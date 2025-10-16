@@ -5,7 +5,7 @@
   <title>Taiko Web Launcher</title>
   <HTA:APPLICATION
     APPLICATIONNAME="TaikoWebLauncher"
-    BORDER="thin" BORDERSTYLE="normal" CAPTION="yes" SHOWINTASKBAR="yes"
+    BORDER="dialog" BORDERSTYLE="normal" CAPTION="yes" SHOWINTASKBAR="yes"
     SINGLEINSTANCE="yes" SYSMENU="yes" SCROLL="no" WINDOWSTATE="normal"
     ICON="assets\launcher\taiko.ico" />
 
@@ -44,6 +44,9 @@
     var webTimer = null;
     var dockerTimer = null;
     var webInflight = false;
+    var launcherWidth = 860;
+    var launcherHeight = 560;
+    var resizing = false;
 
     // Paths + log
     function projectDir(){
@@ -218,11 +221,10 @@
     function openGameInModernBrowser(){
       var url = "http://localhost:8000";
       var edge = edgeExe();
-      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups';
-      // args += ' --start-fullscreen'; // включить, если нужен fullscreen
+      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups --start-maximized';
       if (edge){ shell.Run('"' + edge + '"' + args, 0, false); return true; }
       var chrome = chromeExe();
-      if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window', 0, false); return true; }
+      if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window --start-maximized', 0, false); return true; }
       shell.Run('cmd /c start "" "' + url + '"', 0, false);
       return false;
     }
@@ -238,7 +240,21 @@
     }
 
     // Main
+    function fixWindowSize(){
+      try {
+        if (resizing) return;
+        resizing = true;
+        window.resizeTo(launcherWidth, launcherHeight);
+        var left = Math.max(0, Math.round((screen.availWidth - launcherWidth) / 2));
+        var top = Math.max(0, Math.round((screen.availHeight - launcherHeight) / 2));
+        window.moveTo(left, top);
+        resizing = false;
+      } catch(e){ resizing = false; }
+    }
+
     function begin(){
+      fixWindowSize();
+      window.onresize = function(){ fixWindowSize(); };
       setText("title","Taiko Web — запуск");
       setText("hint","Готовлю окружение…");
       setText("probe","Проверяю localhost:8000");
