@@ -178,32 +178,41 @@ class Loader{
 			style.appendChild(document.createTextNode(css.join("\n")))
 			document.head.appendChild(style)
 			
-			this.addPromise(this.ajax("api/songs").then(songs => {
-				songs = JSON.parse(songs)
-				songs.forEach(song => {
-					var directory = gameConfig.songs_baseurl + song.id + "/"
-					var songExt = song.music_type ? song.music_type : "mp3"
-					song.music = new RemoteFile(directory + "main." + songExt)
-					if(song.type === "tja"){
-						song.chart = new RemoteFile(directory + "main.tja")
-					}else{
-						song.chart = {separateDiff: true}
-						for(var diff in song.courses){
-							if(song.courses[diff]){
-								song.chart[diff] = new RemoteFile(directory + diff + ".osu")
-							}
-						}
-					}
-					if(song.lyrics){
-						song.lyricsFile = new RemoteFile(directory + "main.vtt")
-					}
-					if(song.preview > 0){
-						song.previewMusic = new RemoteFile(directory + "preview." + gameConfig.preview_type)
-					}
-				})
-				assets.songsDefault = songs
-				assets.songs = assets.songsDefault
-			}), "api/songs")
+                        this.addPromise(this.ajax("api/songs").then(songs => {
+                                songs = JSON.parse(songs);
+                                songs = songs.filter(song => song.enabled !== false);
+                                songs.forEach(song => {
+                                        var paths = song.paths || {}
+                                        var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + song.id + "/")
+                                        if(dirUrl.slice(-1) !== "/"){
+                                                dirUrl += "/"
+                                        }
+                                        if(paths.audio_url){
+                                                song.music = new RemoteFile(paths.audio_url)
+                                        }else if(song.music_type){
+                                                song.music = new RemoteFile(dirUrl + "main." + song.music_type)
+                                        }
+                                        if(song.type === "tja"){
+                                                var chartUrl = paths.tja_url || (dirUrl + "main.tja")
+                                                song.chart = new RemoteFile(chartUrl)
+                                        }else{
+                                                song.chart = {separateDiff: true}
+                                                for(var diff in song.courses){
+                                                        if(song.courses[diff]){
+                                                                song.chart[diff] = new RemoteFile(dirUrl + diff + ".osu")
+                                                        }
+                                                }
+                                        }
+                                        if(song.lyrics){
+                                                song.lyricsFile = new RemoteFile(dirUrl + "main.vtt")
+                                        }
+                                        if(song.preview > 0){
+                                                song.previewMusic = new RemoteFile(dirUrl + "preview." + gameConfig.preview_type)
+                                        }
+                                })
+                                assets.songsDefault = songs
+                                assets.songs = assets.songsDefault
+                        }), "api/songs")
 			
 			var categoryPromises = []
 			assets.categories //load category backgrounds to DOM

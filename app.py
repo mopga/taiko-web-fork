@@ -13,6 +13,7 @@ import requests
 import schema
 import os
 import time
+from pathlib import Path
 
 # -- カスタム --
 from datetime import datetime
@@ -29,6 +30,8 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from pymongo import MongoClient
 from redis import Redis
+
+from songs_scanner import SongScanner
 
 def take_config(name, required=False):
     if hasattr(config, name):
@@ -62,6 +65,30 @@ db = client[take_config('MONGO', required=True)['database']]
 db.users.create_index('username', unique=True)
 db.songs.create_index('id', unique=True)
 db.scores.create_index('username')
+
+def _resolve_baseurl(value):
+    if not value:
+        return '/songs/'
+    if value.startswith('http://') or value.startswith('https://') or value.startswith('/'):
+        return value if value.endswith('/') else value + '/'
+    resolved = basedir + value
+    return resolved if resolved.endswith('/') else resolved + '/'
+
+
+SONGS_DIR_PATH = Path(take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
+SCAN_ON_START = take_config('SCAN_ON_START')
+if SCAN_ON_START is None:
+    SCAN_ON_START = True
+SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
+ADMIN_SCAN_TOKEN = take_config('ADMIN_SCAN_TOKEN') or 'change-me'
+SONGS_BASEURL_VALUE = _resolve_baseurl(take_config('SONGS_BASEURL'))
+
+song_scanner = SongScanner(
+    db=db,
+    songs_dir=SONGS_DIR_PATH,
+    songs_baseurl=SONGS_BASEURL_VALUE,
+    ignore_globs=SCAN_IGNORE_GLOBS,
+)
 
 
 class HashException(Exception):
@@ -140,7 +167,7 @@ def before_request_func():
 def get_config(credentials=False):
     config_out = {
         'basedir': basedir,
-        'songs_baseurl': take_config('SONGS_BASEURL', required=True),
+        'songs_baseurl': SONGS_BASEURL_VALUE,
         'assets_baseurl': take_config('ASSETS_BASEURL', required=True),
         'email': take_config('EMAIL'),
         'accounts': take_config('ACCOUNTS'),
@@ -454,30 +481,51 @@ def route_api_preview():
 
 
 @app.route(basedir + 'api/songs')
-@app.cache.cached(timeout=15)
+@app.cache.cached(timeout=60, query_string=True)
 def route_api_songs():
-    songs = list(db.songs.find({'enabled': True}, {'_id': False, 'enabled': False}))
+    include_disabled = request.args.get('include_disabled', '').lower() in ('1', 'true', 'yes', 'all')
+    query = {} if include_disabled else {'enabled': True}
+    songs = list(db.songs.find(query, {'_id': False}))
     for song in songs:
-        if song['maker_id']:
-            if song['maker_id'] == 0:
+        maker_id = song.get('maker_id')
+        if maker_id is not None:
+            if maker_id == 0:
                 song['maker'] = 0
             else:
-                song['maker'] = db.makers.find_one({'id': song['maker_id']}, {'_id': False})
+                song['maker'] = db.makers.find_one({'id': maker_id}, {'_id': False})
         else:
             song['maker'] = None
-        del song['maker_id']
+        song.pop('maker_id', None)
 
-        if song['category_id']:
-            song['category'] = db.categories.find_one({'id': song['category_id']})['title']
+        category_id = song.get('category_id')
+        if category_id:
+            category_doc = db.categories.find_one({'id': category_id})
+            song['category'] = category_doc['title'] if category_doc else None
         else:
             song['category'] = None
-        #del song['category_id']
 
-        if song['skin_id']:
-            song['song_skin'] = db.song_skins.find_one({'id': song['skin_id']}, {'_id': False, 'id': False})
+        skin_id = song.get('skin_id')
+        if skin_id:
+            song['song_skin'] = db.song_skins.find_one({'id': skin_id}, {'_id': False, 'id': False})
         else:
             song['song_skin'] = None
-        del song['skin_id']
+        song.pop('skin_id', None)
+
+        paths = song.get('paths') or {}
+        if 'tja_url' not in paths and song.get('type') == 'tja':
+            paths['tja_url'] = '%s%s/main.tja' % (SONGS_BASEURL_VALUE, song['id'])
+        if 'audio_url' not in paths:
+            music_type = song.get('music_type')
+            if music_type:
+                paths['audio_url'] = '%s%s/main.%s' % (SONGS_BASEURL_VALUE, song['id'], music_type)
+        if 'dir_url' not in paths:
+            paths['dir_url'] = '%s%s/' % (SONGS_BASEURL_VALUE, song['id'])
+        song['paths'] = paths
+        song['song_path'] = paths.get('tja_url')
+        song['audio_path'] = paths.get('audio_url')
+
+        if not song.get('music_type') and paths.get('audio_url'):
+            song['music_type'] = paths['audio_url'].split('.')[-1].lower()
 
     return cache_wrap(flask.jsonify(songs), 60)
 
@@ -486,6 +534,50 @@ def route_api_songs():
 def route_api_categories():
     categories = list(db.categories.find({},{'_id': False}))
     return jsonify(categories)
+
+
+def invalidate_song_cache():
+    try:
+        app.cache.delete_memoized(route_api_songs)
+    except Exception:
+        pass
+    try:
+        app.cache.delete_memoized(route_api_categories)
+    except Exception:
+        pass
+
+
+def perform_song_scan():
+    summary = song_scanner.scan()
+    invalidate_song_cache()
+    app.logger.info("Song scan finished: %s", summary)
+    return summary
+
+
+def _get_scan_token():
+    header_token = request.headers.get('X-Scan-Token')
+    if header_token:
+        return header_token.strip()
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.lower().startswith('bearer '):
+        return auth_header[7:].strip()
+    request_json = request.get_json(silent=True) or {}
+    if isinstance(request_json, dict) and request_json.get('token'):
+        return str(request_json['token'])
+    if request.form.get('token'):
+        return request.form.get('token')
+    return request.args.get('token')
+
+
+@app.route(basedir + 'api/admin/scan', methods=['POST'])
+def route_admin_scan():
+    token = _get_scan_token()
+    if ADMIN_SCAN_TOKEN and token != ADMIN_SCAN_TOKEN:
+        app.logger.warning('Unauthorized scan attempt')
+        return abort(403)
+
+    summary = perform_song_scan()
+    return jsonify({'status': 'ok', 'summary': summary})
 
 @app.route(basedir + 'api/config')
 @app.cache.cached(timeout=15)
@@ -766,11 +858,17 @@ def send_assets(ref):
 
 @app.route(basedir + "songs/<path:ref>")
 def send_songs(ref):
-    return cache_wrap(flask.send_from_directory("public/songs", ref), 604800)
+    return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
 
 @app.route(basedir + "manifest.json")
 def send_manifest():
     return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
+
+if SCAN_ON_START:
+    try:
+        perform_song_scan()
+    except Exception:
+        app.logger.exception('Automatic song scan failed')
 
 if __name__ == '__main__':
     import argparse
