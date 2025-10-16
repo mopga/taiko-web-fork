@@ -12,6 +12,12 @@ import unicodedata
 
 from pymongo.database import Database
 
+try:  # pragma: no cover - pymongo always available in production
+    from pymongo.errors import DuplicateKeyError, PyMongoError
+except Exception:  # pragma: no cover - fallback when pymongo unavailable
+    DuplicateKeyError = None  # type: ignore[assignment]
+    PyMongoError = None  # type: ignore[assignment]
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -417,7 +423,32 @@ class SongScanner:
                 new_id = self._get_next_song_id()
                 document['id'] = new_id
                 document['order'] = new_id
-                self.db.songs.insert_one(document)
+                try:
+                    self.db.songs.insert_one(document)
+                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
+                    handled = False
+                    if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
+                        fallback = self.db.songs.find_one({'hash': file_hash}) or self.db.songs.find_one({'paths.tja_url': tja_url})
+                        if fallback:
+                            document['id'] = fallback['id']
+                            document['order'] = fallback.get('order', fallback['id'])
+                            self.db.songs.update_one({'id': fallback['id']}, {'$set': document})
+                            summary['updated'] += 1
+                            seen_song_ids.add(fallback['id'])
+                            handled = True
+                        else:
+                            LOGGER.warning("Duplicate key when inserting %s but no existing song was found", tja_path)
+                            summary['errors'] += 1
+                            handled = True
+                    elif PyMongoError and isinstance(exc, PyMongoError):
+                        LOGGER.exception("Failed to insert song %s", tja_path)
+                        summary['errors'] += 1
+                        handled = True
+
+                    if handled:
+                        continue
+                    raise
+
                 summary['inserted'] += 1
                 seen_song_ids.add(new_id)
 
