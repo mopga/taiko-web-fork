@@ -1,37 +1,43 @@
 # TaikoWeb
 
-Это улучшенная версия TaikoWeb.
+This is reworked taiko-web version.
 
-## Начать отладку
+## Improvements
 
-Установить зависимости
+  - docker compose run once for all
+  - add win desktop HTA app for running
+  - add support for ./song directrory scanningg
+  - add support for TJA files auto-patsing
+  - add support for auto-adding songs to MongoDb at startup
+  - add support for JP and EN songs
 
-```bash
-pip install -r requirements.txt
-```
+## How to negin
 
-Запустить базу данных
+U need to install Docker for your system
 
-```bash
-docker run --detach \
-  --name taiko-web-mongo-debug \
-  --volume taiko-web-mongo-debug:/data/db \
-  --publish 27017:27017 \
-  mongo
-```
+## How to run
 
-```bash
-docker run --detach \
-  --name taiko-web-redis-debug \
-  --volume taiko-web-redis-debug:/data \
-  --publish 6379:6379 \
-  redis
-```
-
-Запустить сервер
+Make container:
 
 ```bash
-flask run --host 0.0.0.0
+docker compose build --pull --no-cache
 ```
 
-> ⚠️ Убедитесь, что dev-сервер раздаёт аудиофайлы с корректными заголовками `Content-Type` (`audio/ogg`, `audio/mpeg`). Иначе браузер может отказать в декодировании превью и основного трека.
+Run it:
+
+```bash
+docker compose up -d
+```
+
+
+## Windows run app
+
+Install WSL2
+Install Docker Desktop
+
+Git clone the repo
+
+in repo directory run the file
+```bash
+start_taiko_edge.hta
+```
