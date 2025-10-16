@@ -395,6 +395,9 @@ class CustomSongs{
 		if(songs){
 			var length = songs.length
 			assets.songs = songs
+			if(previewUtils && typeof previewUtils.clearPreviewCache === "function"){
+				previewUtils.clearPreviewCache()
+			}
 			assets.customSongs = true
 			assets.customSelected = this.noPage ? +localStorage.getItem("customSelected") : 0
 		}
