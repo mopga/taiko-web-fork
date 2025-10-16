@@ -4,7 +4,7 @@ import base64
 import bcrypt
 import hashlib
 try:
-    import config
+    import config.config as config
 except ModuleNotFoundError:
     raise FileNotFoundError('No such file or directory: \'config.py\'. Copy the example config file config.example.py to config.py')
 import json
