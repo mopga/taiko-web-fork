@@ -551,7 +551,7 @@ def route_api_songs():
         song.pop('maker_id', None)
 
         category_id = song.get('category_id')
-        if category_id:
+        if category_id is not None:
             category_doc = db.categories.find_one({'id': category_id})
             song['category'] = category_doc['title'] if category_doc else None
         else:
