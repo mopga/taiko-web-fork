@@ -2966,15 +2966,17 @@ class SongSelect{
 		var skin = null
 		var categoryName = ""
 		var originalCategory = ""
-		if(song.category_id !== null && song.category_id !== undefined){
-			var category = assets.categories.find(cat => cat.id === song.category_id)
-			var categoryName = this.getLocalTitle(category.title, category.title_lang)
-			var originalCategory = category.title
-			var skin = this.songSkin[category.title]
-		}else if(song.category){
-			var categoryName = song.category
-			var originalCategory = song.category
-		}
+                if(song.category_id !== null && song.category_id !== undefined){
+                        var category = assets.categories.find(cat => cat.id === song.category_id)
+                        if(category){
+                                var categoryName = this.getLocalTitle(category.title, category.title_lang)
+                                var originalCategory = category.title
+                                var skin = this.songSkin[category.title]
+                        }
+                }else if(song.category){
+                        var categoryName = song.category
+                        var originalCategory = song.category
+                }
 		var addedSong = {
 			title: title,
 			originalTitle: song.title,

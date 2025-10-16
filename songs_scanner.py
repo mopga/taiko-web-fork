@@ -91,6 +91,14 @@ def read_tja(path: Path) -> Tuple[str, str]:
     return text, normalised
 
 
+def _clean_metadata_value(value: str) -> str:
+    """Remove characters that cannot be stored in MongoDB documents."""
+
+    # MongoDB rejects strings containing the null character, which can appear
+    # when UTF-16 encoded TJAs include trailing nulls in metadata fields.
+    return value.replace("\x00", "")
+
+
 def parse_tja(path: Path) -> ParsedTJA:
     original_text, normalised_text = read_tja(path)
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
@@ -113,10 +121,12 @@ def parse_tja(path: Path) -> ParsedTJA:
         key_upper = key.strip().upper()
         value_stripped = value.strip()
 
+        clean_value = _clean_metadata_value(value_stripped)
+
         if key_upper == "TITLE":
-            parsed.title = value_stripped
+            parsed.title = clean_value
         elif key_upper == "SUBTITLE":
-            parsed.subtitle = value_stripped
+            parsed.subtitle = clean_value
         elif key_upper == "OFFSET":
             try:
                 parsed.offset = float(value_stripped)
@@ -128,7 +138,7 @@ def parse_tja(path: Path) -> ParsedTJA:
             except ValueError:
                 LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
         elif key_upper == "WAVE":
-            parsed.wave = value_stripped
+            parsed.wave = clean_value
         elif key_upper == "COURSE":
             value_lower = value_stripped.lower()
             course = COURSE_NAMES.get(value_lower)
@@ -270,7 +280,8 @@ class SongScanner:
         match = re.match(r'^(\d{2})\s+(.+)$', top_folder)
         if match:
             number = int(match.group(1))
-            title = match.group(2).strip() or DEFAULT_CATEGORY_TITLE
+            raw_title = match.group(2).strip()
+            title = _clean_metadata_value(raw_title) or DEFAULT_CATEGORY_TITLE
             return number, title
         return 0, DEFAULT_CATEGORY_TITLE
 
@@ -352,10 +363,11 @@ class SongScanner:
             if not enabled:
                 summary['disabled'] += 1
 
+            fallback_title = _clean_metadata_value(tja_path.stem)
             document = {
-                'title': parsed.title or tja_path.stem,
+                'title': parsed.title or fallback_title,
                 'title_lang': {
-                    'ja': parsed.title or tja_path.stem,
+                    'ja': parsed.title or fallback_title,
                     'en': None,
                     'cn': None,
                     'tw': None,

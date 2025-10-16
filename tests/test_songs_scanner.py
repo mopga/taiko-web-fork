@@ -78,6 +78,51 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(category_id, 2)
         self.assertEqual(category_title, "Anime")
 
+    def test_scan_removes_null_characters_from_metadata(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        chart_dir = songs_dir / "01 Nulls"
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = chart_dir / "example.tja"
+        tja_path.write_text("TITLE:Bad\x00Title\nSUBTITLE:Artist\x00", encoding="utf-8")
+
+        class _SeqCollection(_DummyCollection):
+            def __init__(self):
+                self.value = 0
+
+            def find_one(self, *args, **kwargs):
+                if args and args[0].get('name') == 'songs':
+                    return {'name': 'songs', 'value': self.value}
+                return None
+
+            def update_one(self, *args, **kwargs):
+                update = args[1]
+                self.value = update.get('$set', {}).get('value', self.value)
+
+        class _SongsCollection(_DummyCollection):
+            def __init__(self):
+                self.inserted = []
+
+            def insert_one(self, document):
+                self.inserted.append(document.copy())
+
+        collecting_db = _DummyDB()
+        collecting_db.seq = _SeqCollection()
+        collecting_db.songs = _SongsCollection()
+
+        scanner = SongScanner(
+            db=collecting_db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan()
+
+        self.assertEqual(summary['inserted'], 1)
+        self.assertEqual(collecting_db.songs.inserted[0]['title'], 'BadTitle')
+        self.assertEqual(collecting_db.songs.inserted[0]['subtitle'], 'Artist')
+
     def _tmp_dir(self):
         return tempfile.mkdtemp()
 
