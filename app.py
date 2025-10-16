@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import mimetypes
 import os
 import re
 import requests
@@ -64,6 +65,9 @@ def _load_config_module():
 
 
 config = _load_config_module()
+
+mimetypes.add_type("audio/ogg", ".ogg")
+mimetypes.add_type("audio/mpeg", ".mp3")
 
 def take_config(name, required=False):
     if hasattr(config, name):

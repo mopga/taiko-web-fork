@@ -25,15 +25,32 @@ class Titlescreen{
 				new SettingsView(false, true, this.songId)
 			}
 		}else{
-			pageEvents.add(this.titleScreen, ["mousedown", "touchstart"], event => {
-				if(event.type === "touchstart"){
-					event.preventDefault()
-					this.touched = true
-				}else if(event.type === "mousedown" && event.which !== 1){
-					return
-				}
-				this.onPressed(true)
-			})
+                        this.ignoreMouse = false
+                        this.ignoreMouseTimeout = null
+                        pageEvents.add(this.titleScreen, ["mousedown", "touchstart"], event => {
+                                if(event.type === "touchstart"){
+                                        this.touched = true
+                                        this.ignoreMouse = true
+                                        clearTimeout(this.ignoreMouseTimeout)
+                                        this.ignoreMouseTimeout = setTimeout(() => {
+                                                this.ignoreMouse = false
+                                                this.ignoreMouseTimeout = null
+                                        }, 400)
+                                }else if(event.type === "mousedown"){
+                                        if(event.which !== 1){
+                                                return
+                                        }
+                                        if(this.ignoreMouse){
+                                                if(this.ignoreMouseTimeout){
+                                                        clearTimeout(this.ignoreMouseTimeout)
+                                                        this.ignoreMouseTimeout = null
+                                                }
+                                                this.ignoreMouse = false
+                                                return
+                                        }
+                                }
+                                this.onPressed(true)
+                        }, {passive: true})
 			
 			assets.sounds["v_title"].play()
 			this.keyboard = new Keyboard({
@@ -135,12 +152,16 @@ class Titlescreen{
 	clean(){
 		this.keyboard.clean()
 		this.gamepad.clean()
-		this.logo.clean()
-		assets.sounds["v_title"].stop()
-		pageEvents.remove(this.titleScreen, ["mousedown", "touchstart"])
-		delete this.titleScreen
-		delete this.proceed
-		delete this.titleDisclaimer
+                this.logo.clean()
+                assets.sounds["v_title"].stop()
+                pageEvents.remove(this.titleScreen, ["mousedown", "touchstart"])
+                if(this.ignoreMouseTimeout){
+                        clearTimeout(this.ignoreMouseTimeout)
+                        this.ignoreMouseTimeout = null
+                }
+                delete this.titleScreen
+                delete this.proceed
+                delete this.titleDisclaimer
 		delete this.titleCopyright
 	}
 }

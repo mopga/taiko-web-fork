@@ -58,7 +58,9 @@ class LoadSong{
 				custom: true
 			}
 		}
-		this.songObj = songObj
+                songAudio.normalizeSongAudio(songObj)
+                songAudio.normalizeSongAudio(song)
+                this.songObj = songObj
 		song.songBg = this.randInt(1, 5)
 		song.songStage = this.randInt(1, 3)
 		song.donBg = this.randInt(1, 6)

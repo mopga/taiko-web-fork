@@ -121,9 +121,10 @@ class SongSelect{
 		this.search = new Search(this)
 
 		this.songs = []
-		for(let song of assets.songs){
-			var title = this.getLocalTitle(song.title, song.title_lang)
-			song.titlePrepared = title ? fuzzysort.prepare(this.search.normalizeString(title)) : null
+                for(let song of assets.songs){
+                        songAudio.normalizeSongAudio(song)
+                        var title = this.getLocalTitle(song.title, song.title_lang)
+                        song.titlePrepared = title ? fuzzysort.prepare(this.search.normalizeString(title)) : null
 			var subtitle = this.getLocalTitle(title === song.title ? song.subtitle : "", song.subtitle_lang)
 			song.subtitlePrepared = subtitle ? fuzzysort.prepare(this.search.normalizeString(subtitle)) : null
 			this.songs.push(this.addSong(song))
@@ -414,8 +415,9 @@ class SongSelect{
 			resize: 0.3,
 			scrollDelay: 0.1
 		}
-		this.wheelScrolls = 0
-		this.wheelTimer = 0
+                this.wheelScrolls = 0
+                this.wheelTimer = 0
+                this.ignoreMouseFromTouch = false
 		
 		this.startPreview(true)
 		
@@ -455,15 +457,15 @@ class SongSelect{
 		pageEvents.add(loader.screen, "mouseleave", () => {
 			this.state.moveHover = null
 		})
-		pageEvents.add(loader.screen, ["mousedown", "touchstart"], this.mouseDown.bind(this))
-		pageEvents.add(this.canvas, "touchend", this.touchEnd.bind(this))
+                pageEvents.add(loader.screen, ["mousedown", "touchstart"], this.mouseDown.bind(this), {passive: true})
+                pageEvents.add(this.canvas, "touchend", this.touchEnd.bind(this), {passive: true})
 		if(touchEnabled && fullScreenSupported){
 			this.touchFullBtn = document.getElementById("touch-full-btn")
 			this.touchFullBtn.style.display = "block"
 			pageEvents.add(this.touchFullBtn, "touchend", toggleFullscreen)
 		}
 
-		pageEvents.add(this.canvas, "wheel", this.mouseWheel.bind(this))
+                pageEvents.add(this.canvas, "wheel", this.mouseWheel.bind(this), {passive: true})
 
 		this.selectable = document.getElementById("song-sel-selectable")
 		this.selectableText = ""
@@ -608,21 +610,25 @@ class SongSelect{
 		if(event.target !== this.canvas || !this.redrawRunning){
 			return
 		}
-		if(event.type === "mousedown"){
-			if(event.which !== 1){
-				return
-			}
-			var mouse = this.mouseOffset(event.offsetX, event.offsetY)
-			var shift = event.shiftKey
-			var ctrl = event.ctrlKey
-			var touch = false
-		}else{
-			event.preventDefault()
-			var x = event.touches[0].pageX - this.canvas.offsetLeft
-			var y = event.touches[0].pageY - this.canvas.offsetTop
-			var mouse = this.mouseOffset(x, y)
-			var shift = false
-			var ctrl = false
+                if(event.type === "mousedown"){
+                        if(event.which !== 1){
+                                return
+                        }
+                        if(this.ignoreMouseFromTouch){
+                                this.ignoreMouseFromTouch = false
+                                return
+                        }
+                        var mouse = this.mouseOffset(event.offsetX, event.offsetY)
+                        var shift = event.shiftKey
+                        var ctrl = event.ctrlKey
+                        var touch = false
+                }else{
+                        this.ignoreMouseFromTouch = true
+                        var x = event.touches[0].pageX - this.canvas.offsetLeft
+                        var y = event.touches[0].pageY - this.canvas.offsetTop
+                        var mouse = this.mouseOffset(x, y)
+                        var shift = false
+                        var ctrl = false
 			var touch = true
 		}
 		if(this.state.showWarning){
@@ -674,9 +680,9 @@ class SongSelect{
 			}
 		}
 	}
-	touchEnd(event){
-		event.preventDefault()
-	}
+        touchEnd(){
+                this.ignoreMouseFromTouch = false
+        }
 	mouseWheel(event){
 		if(this.state.screen === "song" && this.state.focused){
 			this.wheelTimer = this.getMS()
@@ -2892,8 +2898,9 @@ class SongSelect{
 				index: currentSong.id
 			})
 		}).then(() => {
-			var imported = importSongs.songs[currentSong.id]
-			importSongs.clean()
+                        var imported = importSongs.songs[currentSong.id]
+                        songAudio.normalizeSongAudio(imported)
+                        importSongs.clean()
 			songObj.preview_time = imported.preview
 			var index = assets.songs.findIndex(song => song.id === currentSong.id)
 			if(index !== -1){
