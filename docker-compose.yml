@@ -1,0 +1,64 @@
+version: "3.9"
+
+name: taiko-web
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: taiko-web-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: taiko-web-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: [ "redis-server", "--save", "", "--appendonly", "no" ]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Ветка/URL форка — при желании можно поменять
+        TAIKO_REPO_URL: "https://forgejo.win/yuuki/taiko-web.git"
+        TAIKO_REPO_REF: "master"
+    container_name: taiko-web-web
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # web увидит Mongo/Redis по именам сервисов в сети compose
+          TAIKO_WEB_MONGO_HOST: "mongo:27017"
+          TAIKO_WEB_REDIS_HOST: "redis"
+          TAIKO_WEB_REDIS_PORT: "6379"
+          TAIKO_WEB_REDIS_DB: "0"
+      # basepath — если хочешь в подпуть, поставь, например, /taiko/
+          BASEDIR: "${BASEDIR:-/}"
+    ports:
+      - "8000:8000"   # откроется http://localhost:8000
+    volumes:
+      - ./config/config.py:/app/config.py:ro
+      - ./songs:/app/public/songs
+      - ./assets:/data/assets
+
+volumes:
+  mongo_data:
