@@ -1,16 +1,16 @@
-# 太鼓ウェブ
+# TaikoWeb
 
-この太鼓ウェブは改良版です
+Это улучшенная версия TaikoWeb.
 
-## デバッグの開始
+## Начать отладку
 
-依存関係をインストールします
+Установить зависимости
 
 ```bash
 pip install -r requirements.txt
 ```
 
-データベースを起動します
+Запустить базу данных
 
 ```bash
 docker run --detach \
@@ -28,14 +28,8 @@ docker run --detach \
   redis
 ```
 
-サーバーを起動してください
+Запустить сервер
 
 ```bash
 flask run --host 0.0.0.0
 ```
-
-## デプロイ
-
-今すぐデプロイ！
-
-- https://taikoapp.uk/
