@@ -1,6 +1,6 @@
 version: "3.9"
 
-name: taiko-web
+name: taiko-web-fork
 
 services:
   mongo:
@@ -37,7 +37,7 @@ services:
       args:
         # Ветка/URL форка — при желании можно поменять
         TAIKO_REPO_URL: "https://github.com/mopga/taiko-web-fork.git"
-    container_name: taiko-web-web
+    container_name: taiko-web-fork
     restart: unless-stopped
     depends_on:
       mongo:

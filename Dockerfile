@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir gunicorn
 
 # Создаём точки монтирования для песен/ассетов и конфигурации
-RUN mkdir -p /data/songs /data/assets /app/config
+RUN mkdir -p /data/songs /app/config
 
 # По умолчанию gunicorn слушает 0.0.0.0:8000
 ENV GUNICORN_CMD_ARGS="--bind 0.0.0.0:8000 --workers 2 --threads 4"
