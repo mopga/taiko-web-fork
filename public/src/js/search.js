@@ -276,8 +276,8 @@ class Search{
 	
 	createResult(result, resultWidth, fontSize){
 		var song = result.obj
-		var title = this.songSelect.getLocalTitle(song.title, song.title_lang)
-		var subtitle = this.songSelect.getLocalTitle(title === song.title ? song.subtitle : "", song.subtitle_lang)
+                var title = song.localizedTitle !== undefined ? song.localizedTitle : this.songSelect.getLocalTitle(song.title, song.title_lang)
+                var subtitle = song.localizedSubtitle !== undefined ? song.localizedSubtitle : this.songSelect.getLocalTitle(song.subtitle, song.subtitle_lang)
 		
 		var id = "default"
 		if(song.category_id){

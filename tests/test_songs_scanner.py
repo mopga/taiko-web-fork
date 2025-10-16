@@ -36,7 +36,9 @@ class TestSongsScanner(unittest.TestCase):
         content = "\n".join(
             [
                 "TITLE:Test Song",
+                "TITLEJA:テストソング",
                 "SUBTITLE:Artist",
+                "SUBTITLEJA:サブタイトル",
                 "OFFSET:1.5",
                 "DEMOSTART:12.5",
                 "COURSE:Oni",
@@ -51,7 +53,9 @@ class TestSongsScanner(unittest.TestCase):
         parsed = parse_tja(tja_path)
 
         self.assertEqual(parsed.title, "Test Song")
+        self.assertEqual(parsed.title_ja, "テストソング")
         self.assertEqual(parsed.subtitle, "Artist")
+        self.assertEqual(parsed.subtitle_ja, "サブタイトル")
         self.assertAlmostEqual(parsed.offset, 1.5)
         self.assertAlmostEqual(parsed.preview, 12.5)
         self.assertEqual(parsed.courses["oni"].stars, 8)
@@ -84,7 +88,13 @@ class TestSongsScanner(unittest.TestCase):
         chart_dir = songs_dir / "01 Nulls"
         chart_dir.mkdir(parents=True, exist_ok=True)
         tja_path = chart_dir / "example.tja"
-        tja_path.write_text("TITLE:Bad\x00Title\nSUBTITLE:Artist\x00", encoding="utf-8")
+        tja_path.write_text(
+            "TITLE:Bad\x00Title\u200b\n"
+            "TITLEJA:\ufeffテ\u00a0スト\n"
+            "SUBTITLE:Artist\x00\u00a0Name\n"
+            "SUBTITLEJA:\u200c副題\n",
+            encoding="utf-8",
+        )
 
         class _SeqCollection(_DummyCollection):
             def __init__(self):
@@ -120,8 +130,17 @@ class TestSongsScanner(unittest.TestCase):
         summary = scanner.scan()
 
         self.assertEqual(summary['inserted'], 1)
-        self.assertEqual(collecting_db.songs.inserted[0]['title'], 'BadTitle')
-        self.assertEqual(collecting_db.songs.inserted[0]['subtitle'], 'Artist')
+        inserted = collecting_db.songs.inserted[0]
+        self.assertEqual(inserted['title'], 'BadTitle')
+        self.assertEqual(inserted['subtitle'], 'Artist Name')
+        self.assertEqual(inserted['titleJa'], 'テ スト')
+        self.assertEqual(inserted['subtitleJa'], '副題')
+        self.assertEqual(inserted['title_lang']['ja'], 'テ スト')
+        self.assertEqual(inserted['subtitle_lang']['ja'], '副題')
+        self.assertIn('locale', inserted)
+        self.assertEqual(inserted['locale']['en']['title'], 'BadTitle')
+        self.assertEqual(inserted['locale']['ja']['title'], 'テ スト')
+        self.assertEqual(inserted['locale']['ja']['subtitle'], '副題')
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

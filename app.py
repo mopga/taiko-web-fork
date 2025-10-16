@@ -549,6 +549,8 @@ def route_api_songs():
     query = {} if include_disabled else {'enabled': True}
     songs = list(db.songs.find(query, {'_id': False}))
     for song in songs:
+        song.setdefault('titleJa', None)
+        song.setdefault('subtitleJa', None)
         maker_id = song.get('maker_id')
         if maker_id is not None:
             if maker_id == 0:
