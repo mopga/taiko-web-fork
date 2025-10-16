@@ -1,0 +1,272 @@
+﻿<html>
+<head>
+  <meta http-equiv="x-ua-compatible" content="IE=Edge" />
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>Taiko Web Launcher</title>
+  <HTA:APPLICATION
+    APPLICATIONNAME="TaikoWebLauncher"
+    BORDER="thin" BORDERSTYLE="normal" CAPTION="yes" SHOWINTASKBAR="yes"
+    SINGLEINSTANCE="yes" SYSMENU="yes" SCROLL="no" WINDOWSTATE="normal"
+    ICON="assets\launcher\taiko.ico" />
+
+  <style type="text/css">
+    html,body { height:100%; margin:0; }
+    body { font-family:"Segoe UI", Meiryo, Arial, sans-serif;
+      background-image:url('assets/launcher/title-screen.png');
+      background-size:cover; background-position:center; background-repeat:no-repeat; }
+    .overlay { position:absolute; left:0; top:0; right:0; bottom:0; background:rgba(255,255,255,.35); }
+    .panel { position:absolute; left:50%; top:60%; transform:translate(-50%,-50%);
+      width:720px; background:rgba(255,255,255,.92); border-radius:18px;
+      box-shadow:0 10px 40px rgba(0,0,0,.25); padding:22px 26px 18px; text-align:center; }
+    h1 { margin:0 0 4px; font-size:24px; font-weight:800; color:#222; }
+    .gif { width:64px; height:64px; margin:8px auto 10px; }
+    .progress { height:8px; background:#e9edf6; border-radius:999px; overflow:hidden; margin:6px 0 8px; }
+    .bar { height:100%; width:0%; background:#6ea8fe; }
+    .muted { color:#444; font-size:13px; margin:0; }
+    .status { color:#2e7d32; font-weight:600; margin:6px 0 0; }
+    .error { color:#c62828; font-weight:700; }
+    .retry { display:none; margin-top:8px; padding:6px 10px; border:0; background:#6ea8fe; color:#fff; border-radius:8px; cursor:pointer; font-weight:600; }
+    pre.log { text-align:left; max-height:160px; overflow:auto; background:#f7f7f7; border:1px solid #ddd; padding:6px; border-radius:6px; }
+  </style>
+
+  <script language="JScript" type="text/javascript">
+    // COM
+    var shell = new ActiveXObject("WScript.Shell");
+    var fso   = new ActiveXObject("Scripting.FileSystemObject");
+
+    // DOM
+    function byId(id){ return document.getElementById(id); }
+    function setBar(p){ var b=byId('bar'); if(b){ b.style.width = p + '%'; } }
+    function setText(id, t){ var el=byId(id); if(el){ el.innerText = t; } }
+
+    // One-shot guards & timers
+    var openedOnce = false;
+    var webTimer = null;
+    var dockerTimer = null;
+    var webInflight = false;
+
+    // Paths + log
+    function projectDir(){
+      var href = window.location.href; // file:///C:/.../start_taiko_edge.hta
+      var path = href.replace(/^file:\/*/i, "");
+      path = unescape(path).replace(/\//g,"\\").replace(/\//g,"/");
+      path = unescape(href.replace(/^file:\/*/i, "")).replace(/\//g,"\").replace(/\//g,"/");
+      path = unescape(href.replace(/^file:\/*/i, "")).replace(/\//g,"\").replace(/\//g,"/");
+      // simpler robust:
+      path = unescape(href.replace(/^file:\/*/i, "")).replace(/\//g,"\").replace(/\//g,"/");
+      path = unescape(href.replace(/^file:\/*/i, "")).replace(/\//g,"\").replace(/\//g,"/");
+      path = unescape(href.replace(/^file:\/*/i, "")).replace(/\//g,"\").replace(/\//g,"\"); // final
+      try { return fso.GetParentFolderName(path); }
+      catch(e){
+        var p2 = unescape(window.location.pathname); if (p2.charAt(0)=="/") p2=p2.substr(1);
+        p2 = p2.replace(/\//g,"\");
+        try { return fso.GetParentFolderName(p2); } catch(e2){ return ""; }
+      }
+    }
+    function tempLog(){ return shell.ExpandEnvironmentStrings("%TEMP%") + "\\taiko-launcher.log"; }
+    function logInit(){ try{ var f=fso.OpenTextFile(tempLog(),8,true); f.WriteLine("--- launcher start "+(new Date()).toISOString()+" ---"); f.Close(); }catch(e){} }
+    function logLine(s){ try{ var f=fso.OpenTextFile(tempLog(),8,true); f.WriteLine(s); f.Close(); }catch(e){} }
+    function readTail(path, n){ try{ var f=fso.OpenTextFile(path,1,false); var t=f.ReadAll(); f.Close(); if(t.length>n) return "..."+t.substr(t.length-n); return t; }catch(e){ return "(лог отсутствует)"; } }
+
+    // where.exe helper
+    function tryWhere(name){
+      try{
+        var exec = shell.Exec("cmd /c where " + name);
+        var all  = exec.StdOut.ReadAll();
+        var nl   = all.indexOf("\r\n"); if (nl==-1) nl = all.indexOf("\n");
+        var first= (nl>-1)? all.substr(0,nl) : all;
+        first = first.replace(/\r/g,"").replace(/\n/g,"");
+        if (first && fso.FileExists(first)) return first;
+      }catch(e){}
+      return null;
+    }
+
+    // Docker binaries
+    function dockerExe(){
+      var a = shell.ExpandEnvironmentStrings("%ProgramFiles%")     + "\\Docker\\Docker\\resources\\bin\\docker.exe";
+      var b = shell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") + "\\Docker\\Docker\\resources\\bin\\docker.exe";
+      if (fso.FileExists(a)) return a;
+      if (fso.FileExists(b)) return b;
+      var w = tryWhere("docker.exe"); if (w) return w;
+      return "docker";
+    }
+    function dockerComposeExe(){
+      var a = shell.ExpandEnvironmentStrings("%ProgramFiles%")     + "\\Docker\\Docker\\resources\\bin\\docker-compose.exe";
+      var b = shell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") + "\\Docker\\Docker\\resources\\bin\\docker-compose.exe";
+      if (fso.FileExists(a)) return a;
+      if (fso.FileExists(b)) return b;
+      var w = tryWhere("docker-compose.exe"); if (w) return w;
+      return null;
+    }
+    function composeMode(){
+      var de = dockerExe();
+      var rc = shell.Run('cmd /c "' + de + '" compose version >nul 2>nul', 0, true);
+      if (rc === 0) return {mode:"v2", bin:de};
+      var legacy = dockerComposeExe();
+      if (legacy) return {mode:"v1", bin:legacy};
+      return {mode:"none", bin:de};
+    }
+    function dockerDesktopPath(){
+      var a = shell.ExpandEnvironmentStrings("%ProgramFiles%")     + "\\Docker\\Docker\\Docker Desktop.exe";
+      var b = shell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") + "\\Docker\\Docker\\Docker Desktop.exe";
+      if (fso.FileExists(a)) return a;
+      if (fso.FileExists(b)) return b;
+      return null;
+    }
+
+    // Edge / Chrome paths
+    function edgeExe(){
+      var a = shell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") + "\\Microsoft\\Edge\\Application\\msedge.exe";
+      var b = shell.ExpandEnvironmentStrings("%ProgramFiles%")      + "\\Microsoft\\Edge\\Application\\msedge.exe";
+      if (fso.FileExists(a)) return a;
+      if (fso.FileExists(b)) return b;
+      return null;
+    }
+    function chromeExe(){
+      var a = shell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") + "\\Google\\Chrome\\Application\\chrome.exe";
+      var b = shell.ExpandEnvironmentStrings("%ProgramFiles%")      + "\\Google\\Chrome\\Application\\chrome.exe";
+      if (fso.FileExists(a)) return a;
+      if (fso.FileExists(b)) return b;
+      var w = tryWhere("chrome.exe"); if (w) return w;
+      return null;
+    }
+
+    // Exec helpers
+    function runHiddenInDir(cmd, dir){
+      var wd = dir || projectDir();
+      var full = 'cmd /c cd /d "' + wd + '" && ' + cmd;
+      return shell.Run(full, 0, false);
+    }
+
+    // Wait docker daemon
+    function waitDocker(maxSec, onOk, onFail){
+      var de = dockerExe();
+      var left = maxSec;
+      dockerTimer = setInterval(function(){
+        var rc = shell.Run('cmd /c "' + de + '" info >nul 2>nul', 0, true);
+        if (rc === 0){ clearInterval(dockerTimer); dockerTimer=null; onOk(); return; }
+        left -= 2; if (left <= 0){ clearInterval(dockerTimer); dockerTimer=null; onFail(); return; }
+        setText("hint", "Жду Docker… осталось ~" + left + " с");
+      }, 2000);
+    }
+
+    // Compose up
+    function composeUp(){
+      var dir = projectDir();
+      var det = composeMode();
+      logLine("projectDir=" + dir);
+      logLine("dockerExe=" + dockerExe());
+      logLine("composeMode=" + det.mode + ", bin=" + det.bin);
+
+      var cmd;
+      if (det.mode == "v2")      cmd = '"' + det.bin + '" compose -f "docker-compose.yml" up -d --pull never';
+      else if (det.mode == "v1") cmd = '"' + det.bin + '" -f "docker-compose.yml" up -d';
+      else                       cmd = '"' + det.bin + '" compose -f "docker-compose.yml" up -d';
+
+      logLine("RUN: " + cmd + "   (cwd=" + dir + ")");
+      runHiddenInDir(cmd + ' >> "' + tempLog() + '" 2>&1', dir);
+    }
+
+    // Wait web via async XHR (single-inflight)
+    function waitWeb(maxSec, onReady, onTimeout){
+      var left = maxSec;
+
+      function tryOnce(){
+        if (webInflight) return;
+        webInflight = true;
+        try{
+          var xhr = new ActiveXObject("MSXML2.XMLHTTP");
+          xhr.open("GET","http://localhost:8000/?_=" + (new Date()).getTime(), true);
+          xhr.setRequestHeader("Cache-Control","no-cache");
+          xhr.onreadystatechange = function(){
+            if (xhr.readyState === 4) {
+              webInflight = false;
+              if (xhr.status > 0 && xhr.status < 500){
+                logLine("WEB READY: status=" + xhr.status);
+                clearInterval(webTimer); webTimer=null;
+                onReady();
+              }
+            }
+          };
+          xhr.send();
+        }catch(e){ webInflight = false; }
+      }
+
+      webTimer = setInterval(function(){
+        left -= 2; var passed = maxSec - left;
+        setText("hint", "Ожидание запуска веб-сервера… " + passed + " с");
+        if (passed < 100) setBar(passed); else setBar(100);
+        tryOnce();
+        if (left <= 0){ clearInterval(webTimer); webTimer=null; onTimeout(); }
+      }, 2000);
+    }
+
+    // Open app window in Edge (fallback Chrome) — ONCE
+    function openGameInModernBrowser(){
+      var url = "http://localhost:8000";
+      var edge = edgeExe();
+      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups';
+      // args += ' --start-fullscreen'; // включить, если нужен fullscreen
+      if (edge){ shell.Run('"' + edge + '"' + args, 0, false); return true; }
+      var chrome = chromeExe();
+      if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window', 0, false); return true; }
+      shell.Run('cmd /c start "" "' + url + '"', 0, false);
+      return false;
+    }
+
+    function openOnceAndClose(){
+      if (openedOnce) return;
+      openedOnce = true;
+      try { if (webTimer)   { clearInterval(webTimer);   webTimer=null; } } catch(e){}
+      try { if (dockerTimer){ clearInterval(dockerTimer); dockerTimer=null; } } catch(e){}
+      logLine("OPEN BROWSER (once)");
+      openGameInModernBrowser();
+      window.setTimeout(function(){ window.close(); }, 800);
+    }
+
+    // Main
+    function begin(){
+      setText("title","Taiko Web — запуск");
+      setText("hint","Готовлю окружение…");
+      setText("probe","Проверяю localhost:8000");
+      setBar(2);
+      logInit();
+
+      var dd = dockerDesktopPath();
+      if (dd){ logLine("start Docker Desktop"); shell.Run('"' + dd + '" --background', 0, false); }
+
+      waitDocker(90, function(){
+        setText("hint","Запускаю сервисы игры…"); setBar(10);
+        composeUp();
+        waitWeb(180, function(){
+          setText("status","Готово! Открываю игру…"); setBar(100);
+          openOnceAndClose();
+        }, function(){
+          byId("status").innerHTML = '<span class="error">Сервер не ответил за 180с.</span>'
+            + '<br><br><b>Хвост лога:</b><br><pre class="log">' + readTail(tempLog(), 6000).replace(/</g,'&lt;') + '</pre>';
+          byId("retry").style.display = "inline-block";
+        });
+      }, function(){
+        byId("status").innerHTML = '<span class="error">Docker не поднялся за 90с.</span><br>Открой Docker Desktop вручную и попробуй ещё раз.';
+        byId("retry").style.display = "inline-block";
+      });
+    }
+
+    function retry(){ byId("retry").style.display="none"; setBar(0); begin(); }
+    window.onload = begin;
+  </script>
+</head>
+
+<body>
+  <div class="overlay"></div>
+  <div class="panel">
+    <h1 id="title">Taiko Web — запуск</h1>
+    <img class="gif" src="assets/launcher/dancing-don.gif" alt="">
+    <p id="hint" class="muted">Инициализация…</p>
+    <div class="progress"><div id="bar" class="bar"></div></div>
+    <p id="probe" class="muted">Проверяю localhost:8000</p>
+    <p id="status" class="status"></p>
+    <button id="retry" class="retry" onclick="retry()">Повторить</button>
+  </div>
+</body>
+</html>
