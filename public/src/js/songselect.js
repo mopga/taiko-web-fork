@@ -123,12 +123,16 @@ class SongSelect{
 		this.songs = []
                 for(let song of assets.songs){
                         songAudio.normalizeSongAudio(song)
-                        var title = this.getLocalTitle(song.title, song.title_lang)
-                        song.titlePrepared = title ? fuzzysort.prepare(this.search.normalizeString(title)) : null
-			var subtitle = this.getLocalTitle(title === song.title ? song.subtitle : "", song.subtitle_lang)
-			song.subtitlePrepared = subtitle ? fuzzysort.prepare(this.search.normalizeString(subtitle)) : null
-			this.songs.push(this.addSong(song))
-		}
+                        var localizedTitle = this.getLocalTitle(song.title, song.title_lang)
+                        var localizedSubtitle = this.getLocalTitle(song.subtitle, song.subtitle_lang)
+                        song.localizedTitle = localizedTitle
+                        song.localizedSubtitle = localizedSubtitle
+                        var titleTokens = this.buildSearchIndex(song, "title")
+                        song.titlePrepared = titleTokens ? fuzzysort.prepare(this.search.normalizeString(titleTokens)) : null
+                        var subtitleTokens = this.buildSearchIndex(song, "subtitle")
+                        song.subtitlePrepared = subtitleTokens ? fuzzysort.prepare(this.search.normalizeString(subtitleTokens)) : null
+                        this.songs.push(this.addSong(song))
+                }
 		this.songs.sort((a, b) => {
 			var catA = a.originalCategory in this.songSkin ? this.songSkin[a.originalCategory] : this.songSkin.default
 			var catB = b.originalCategory in this.songSkin ? this.songSkin[b.originalCategory] : this.songSkin.default
@@ -142,10 +146,11 @@ class SongSelect{
 				return a.id > b.id ? 1 : -1
 			}
 		})
-		const titlesort = localStorage.getItem("titlesort") ?? "false";
-		if (titlesort === "true") {
-			this.songs.sort((a, b) => a.title.localeCompare(b.title));
-		}
+                const titlesort = localStorage.getItem("titlesort") ?? "false";
+                if (titlesort === "true") {
+                        var locale = strings && strings.id ? strings.id : "en";
+                        this.songs.sort((a, b) => a.title.localeCompare(b.title, locale));
+                }
 		if(assets.songs.length){
 			this.songs.push({
 				title: strings.back,
@@ -2989,13 +2994,27 @@ class SongSelect{
 				return Promise.reject("cancel")
 			}
 		})
-	}
-	addSong(song){
-		var title = this.getLocalTitle(song.title, song.title_lang)
-		var subtitle = this.getLocalTitle(title === song.title ? song.subtitle : "", song.subtitle_lang)
-		var skin = null
-		var categoryName = ""
-		var originalCategory = ""
+        }
+        addSong(song){
+                if(song.localizedTitle === undefined){
+                        song.localizedTitle = this.getLocalTitle(song.title, song.title_lang)
+                }
+                if(song.localizedSubtitle === undefined){
+                        song.localizedSubtitle = this.getLocalTitle(song.subtitle, song.subtitle_lang)
+                }
+                if(song.titlePrepared === undefined){
+                        var titleTokens = this.buildSearchIndex(song, "title")
+                        song.titlePrepared = titleTokens ? fuzzysort.prepare(this.search.normalizeString(titleTokens)) : null
+                }
+                if(song.subtitlePrepared === undefined){
+                        var subtitleTokens = this.buildSearchIndex(song, "subtitle")
+                        song.subtitlePrepared = subtitleTokens ? fuzzysort.prepare(this.search.normalizeString(subtitleTokens)) : null
+                }
+                var title = song.localizedTitle
+                var subtitle = song.localizedSubtitle
+                var skin = null
+                var categoryName = ""
+                var originalCategory = ""
                 if(song.category_id !== null && song.category_id !== undefined){
                         var category = assets.categories.find(cat => cat.id === song.category_id)
                         if(category){
@@ -3007,11 +3026,12 @@ class SongSelect{
                         var categoryName = song.category
                         var originalCategory = song.category
                 }
-		var addedSong = {
-			title: title,
-			originalTitle: song.title,
-			subtitle: subtitle,
-			skin: skin || this.songSkin.default,
+                var addedSong = {
+                        title: title,
+                        originalTitle: song.title,
+                        originalSubtitle: song.subtitle,
+                        subtitle: subtitle,
+                        skin: skin || this.songSkin.default,
 			originalCategory: originalCategory,
 			category: categoryName,
 			preview: song.preview || 0,
@@ -3143,15 +3163,51 @@ class SongSelect{
 		}
 	}
 	
-	mod(length, index){
-		return ((index % length) + length) % length
-	}
-	
-	getLocalTitle(title, titleLang){
-		if(titleLang){
-			for(var id in titleLang){
-				if(id === "en" && strings.preferEn && !(strings.id in titleLang) && titleLang.en || id === strings.id && titleLang[id]){
-					return titleLang[id]
+        mod(length, index){
+                return ((index % length) + length) % length
+        }
+
+        buildSearchIndex(song, key){
+                var values = []
+                var seen = new Set()
+                var addValue = value => {
+                        if(typeof value !== "string"){
+                                return
+                        }
+                        var normalised = value.trim()
+                        if(!normalised || seen.has(normalised)){
+                                return
+                        }
+                        seen.add(normalised)
+                        values.push(normalised)
+                }
+                addValue(song[key])
+                var jaKey = key + "Ja"
+                if(jaKey in song){
+                        addValue(song[jaKey])
+                }
+                var langKey = key + "_lang"
+                if(song[langKey]){
+                        for(var lang in song[langKey]){
+                                addValue(song[langKey][lang])
+                        }
+                }
+                if(song.locale){
+                        for(var locale in song.locale){
+                                var entry = song.locale[locale]
+                                if(entry && entry[key]){
+                                        addValue(entry[key])
+                                }
+                        }
+                }
+                return values.join(" ")
+        }
+
+        getLocalTitle(title, titleLang){
+                if(titleLang){
+                        for(var id in titleLang){
+                                if(id === "en" && strings.preferEn && !(strings.id in titleLang) && titleLang.en || id === strings.id && titleLang[id]){
+                                        return titleLang[id]
 				}
 			}
 		}

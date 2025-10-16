@@ -51,6 +51,15 @@ UNKNOWN_VALUE = "Unknown"
 
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
+ZERO_WIDTH_CHARACTERS = {
+    "\u200b",  # zero width space
+    "\u200c",  # zero width non-joiner
+    "\u200d",  # zero width joiner
+    "\ufeff",  # zero width no-break space / BOM
+    "\u2060",  # word joiner
+    "\u180e",  # mongolian vowel separator
+}
+
 
 @dataclass
 class CourseInfo:
@@ -61,7 +70,9 @@ class CourseInfo:
 @dataclass
 class ParsedTJA:
     title: str = ""
+    title_ja: str = ""
     subtitle: str = ""
+    subtitle_ja: str = ""
     offset: float = 0.0
     preview: float = 0.0
     wave: Optional[str] = None
@@ -85,17 +96,46 @@ def md5_text(text: str) -> str:
 
 def read_tja(path: Path) -> Tuple[str, str]:
     raw_bytes = path.read_bytes()
+    encoding_used: Optional[str] = None
     for encoding in ENCODINGS:
         try:
             text = raw_bytes.decode(encoding)
+            encoding_used = encoding
             break
         except UnicodeDecodeError:
             continue
     else:
         text = raw_bytes.decode("utf-8", errors="replace")
+        encoding_used = "utf-8"
+    if encoding_used and not encoding_used.lower().startswith("utf"):
+        LOGGER.warning("Decoded %s using non-UTF encoding %s", path, encoding_used)
     text = unicodedata.normalize("NFC", text)
     normalised = _normalise_newlines(text)
     return text, normalised
+
+
+def _normalise_invisible_whitespace(value: str) -> str:
+    """Replace non-breaking whitespace and strip zero-width characters."""
+
+    normalised_chars: List[str] = []
+    for char in value:
+        if char in ZERO_WIDTH_CHARACTERS:
+            continue
+        category = unicodedata.category(char)
+        if category == "Cf":
+            # Other format characters such as directional marks should not affect search.
+            continue
+        if category == "Zs" and char != " ":
+            normalised_chars.append(" ")
+            continue
+        if char == "\xa0":  # NBSP
+            normalised_chars.append(" ")
+            continue
+        normalised_chars.append(char)
+    normalised = "".join(normalised_chars)
+    # Collapse runs of ASCII whitespace to a single space to stabilise search tokens.
+    normalised = re.sub(r"[\t\f\v ]+", " ", normalised)
+    return normalised
 
 
 def _clean_metadata_value(value: str) -> str:
@@ -103,7 +143,9 @@ def _clean_metadata_value(value: str) -> str:
 
     # MongoDB rejects strings containing the null character, which can appear
     # when UTF-16 encoded TJAs include trailing nulls in metadata fields.
-    return value.replace("\x00", "")
+    cleaned = value.replace("\x00", "")
+    cleaned = _normalise_invisible_whitespace(cleaned)
+    return cleaned
 
 
 def parse_tja(path: Path) -> ParsedTJA:
@@ -132,8 +174,12 @@ def parse_tja(path: Path) -> ParsedTJA:
 
         if key_upper == "TITLE":
             parsed.title = clean_value
+        elif key_upper == "TITLEJA":
+            parsed.title_ja = clean_value
         elif key_upper == "SUBTITLE":
             parsed.subtitle = clean_value
+        elif key_upper == "SUBTITLEJA":
+            parsed.subtitle_ja = clean_value
         elif key_upper == "OFFSET":
             try:
                 parsed.offset = float(value_stripped)
@@ -383,23 +429,41 @@ class SongScanner:
             subtitle_value = (parsed.subtitle or "").strip()
             if not subtitle_value:
                 subtitle_value = UNKNOWN_VALUE
+
+            title_ja_value = (parsed.title_ja or "").strip() or None
+            subtitle_ja_value = (parsed.subtitle_ja or "").strip() or None
+
+            locale_doc: Dict[str, Dict[str, str]] = {
+                'en': {
+                    'title': title_value,
+                    'subtitle': subtitle_value,
+                }
+            }
+            if title_ja_value or subtitle_ja_value:
+                locale_doc['ja'] = {
+                    'title': title_ja_value or title_value,
+                    'subtitle': subtitle_ja_value or subtitle_value,
+                }
             document = {
                 'title': title_value,
+                'titleJa': title_ja_value,
                 'title_lang': {
-                    'ja': title_value,
+                    'ja': title_ja_value or title_value,
                     'en': None,
                     'cn': None,
                     'tw': None,
                     'ko': None,
                 },
                 'subtitle': subtitle_value,
+                'subtitleJa': subtitle_ja_value,
                 'subtitle_lang': {
-                    'ja': subtitle_value,
+                    'ja': subtitle_ja_value or subtitle_value,
                     'en': None,
                     'cn': None,
                     'tw': None,
                     'ko': None,
                 },
+                'locale': locale_doc,
                 'courses': courses_doc,
                 'enabled': enabled,
                 'category_id': category_id,
