@@ -391,6 +391,7 @@ class SongSelect{
 		this.drawBackground(cat)
 		
 		this.previewId = 0
+		this.previewAbortController = null
 		this.previewList = Array(5)
 		
 		var skipStart = fromTutorial || p2.session
@@ -1167,6 +1168,9 @@ class SongSelect{
 		if(assets.customSongs){
 			assets.customSongs = false
 			assets.songs = assets.songsDefault
+			if(previewUtils && typeof previewUtils.clearPreviewCache === "function"){
+				previewUtils.clearPreviewCache()
+			}
 			delete assets.otherFiles
 			this.playSound("se_don")
 			this.clean()
@@ -2819,25 +2823,42 @@ class SongSelect{
 				}
 			}else{
 				songObj = {id: id}
-				if(currentSong.previewMusic){
-					songObj.preview_time = 0
-					var promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
-						songObj.preview_time = prvTime
-						return snd.previewGain.load(currentSong.music)
+				var promise
+				var previewController = null
+				var loadFallback = () => this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
+				if(currentSong.previewMusic && previewUtils && typeof previewUtils.resolveSongPreview === "function"){
+					if(typeof AbortController !== "undefined"){
+						previewController = new AbortController()
+						this.previewAbortController = previewController
+					}
+					promise = previewUtils.resolveSongPreview(currentSong, {
+						signal: previewController ? previewController.signal : undefined
+					}).then(previewFile => {
+						if(previewFile){
+							songObj.preview_time = 0
+							return snd.previewGain.load(previewFile).catch(() => {
+								songObj.preview_time = prvTime
+								return loadFallback()
+							})
+						}
+						return loadFallback()
 					})
-				}else if(currentSong.unloaded){
-					var promise = this.getUnloaded(this.selectedSong, songObj, currentId)
-				}else if(currentSong.sound){
-					songObj.preview_time = prvTime
-					currentSong.sound.gain = snd.previewGain
-					var promise = Promise.resolve(currentSong.sound)
-				}else if(currentSong.music !== "muted"){
-					songObj.preview_time = prvTime
-					var promise = snd.previewGain.load(currentSong.music)
+				}else if(currentSong.previewMusic){
+					songObj.preview_time = 0
+					promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
+						songObj.preview_time = prvTime
+						return loadFallback()
+					})
 				}else{
+					promise = loadFallback()
+				}
+				if(!promise){
 					return
 				}
-				promise.then(sound => {
+				var chained = promise.then(sound => {
+					if(!sound){
+						return
+					}
 					if(currentId === this.previewId || loadOnly){
 						songObj.preview_sound = sound
 						if(!loadOnly){
@@ -2853,10 +2874,23 @@ class SongSelect{
 						sound.clean()
 					}
 				}).catch(e => {
-					if(e !== "cancel"){
-						return Promise.reject(e)
+					if(e === "cancel" || e && e.name === "AbortError"){
+						return
 					}
+					return Promise.reject(e)
 				})
+				if(previewController){
+					var clearPreviewController = () => {
+						if(this.previewAbortController === previewController){
+							this.previewAbortController = null
+						}
+					}
+					if(typeof chained.finally === "function"){
+						chained.finally(clearPreviewController)
+					}else{
+						chained.then(clearPreviewController, clearPreviewController)
+					}
+				}
 			}
 		}
 	}
@@ -2868,7 +2902,14 @@ class SongSelect{
 		snd.previewGain.setVolumeMul(volume || 1)
 		this.preview.playLoop(delay / 1000, false, prvTime)
 	}
+	cancelPreviewRequest(){
+		if(this.previewAbortController){
+			this.previewAbortController.abort()
+			this.previewAbortController = null
+		}
+	}
 	endPreview(force){
+		this.cancelPreviewRequest()
 		this.previewId++
 		this.previewing = force ? "muted" : null
 		if(this.preview){
