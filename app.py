@@ -343,14 +343,24 @@ def route_admin_songs_id(id):
         song=song, categories=categories, song_skins=song_skins, makers=makers, admin=user, config=get_config())
 
 
+def _get_next_song_id():
+    seq = db.seq.find_one({'name': 'songs'})
+    seq_value = seq['value'] if seq else 0
+
+    highest_song = db.songs.find_one(sort=[('id', -1)])
+    if highest_song and highest_song['id'] > seq_value:
+        seq_value = highest_song['id']
+
+    return seq_value + 1
+
+
 @app.route(basedir + 'admin/songs/new')
 @admin_required(level=100)
 def route_admin_songs_new():
     categories = list(db.categories.find({}))
     song_skins = list(db.song_skins.find({}))
     makers = list(db.makers.find({}))
-    seq = db.seq.find_one({'name': 'songs'})
-    seq_new = seq['value'] + 1 if seq else 1
+    seq_new = _get_next_song_id()
 
     return render_template('admin_song_new.html', categories=categories, song_skins=song_skins, makers=makers, config=get_config(), id=seq_new)
 
@@ -384,8 +394,7 @@ def route_admin_songs_new_post():
     output['lyrics'] = True if request.form.get('lyrics') else False
     output['hash'] = request.form.get('hash')
     
-    seq = db.seq.find_one({'name': 'songs'})
-    seq_new = seq['value'] + 1 if seq else 1
+    seq_new = _get_next_song_id()
     
     hash_error = False
     if request.form.get('gen_hash'):
