@@ -47,6 +47,7 @@ COURSE_NAMES = {
 COURSE_ORDER = ["easy", "normal", "hard", "oni", "ura"]
 
 DEFAULT_CATEGORY_TITLE = "Unsorted"
+UNKNOWN_VALUE = "Unknown"
 
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
@@ -370,18 +371,30 @@ class SongScanner:
                 summary['disabled'] += 1
 
             fallback_title = _clean_metadata_value(tja_path.stem)
+            if not fallback_title:
+                fallback_title = UNKNOWN_VALUE
+
+            title_value = (parsed.title or "").strip()
+            if not title_value:
+                title_value = fallback_title
+            if not title_value:
+                title_value = UNKNOWN_VALUE
+
+            subtitle_value = (parsed.subtitle or "").strip()
+            if not subtitle_value:
+                subtitle_value = UNKNOWN_VALUE
             document = {
-                'title': parsed.title or fallback_title,
+                'title': title_value,
                 'title_lang': {
-                    'ja': parsed.title or fallback_title,
+                    'ja': title_value,
                     'en': None,
                     'cn': None,
                     'tw': None,
                     'ko': None,
                 },
-                'subtitle': parsed.subtitle,
+                'subtitle': subtitle_value,
                 'subtitle_lang': {
-                    'ja': parsed.subtitle,
+                    'ja': subtitle_value,
                     'en': None,
                     'cn': None,
                     'tw': None,
@@ -414,6 +427,7 @@ class SongScanner:
                 existing = self.db.songs.find_one({'paths.tja_url': tja_url})
 
             if existing:
+                document.pop('_id', None)
                 document['id'] = existing['id']
                 document['order'] = existing.get('order', existing['id'])
                 self.db.songs.update_one({'id': existing['id']}, {'$set': document})
@@ -430,6 +444,7 @@ class SongScanner:
                     if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
                         fallback = self.db.songs.find_one({'hash': file_hash}) or self.db.songs.find_one({'paths.tja_url': tja_url})
                         if fallback:
+                            document.pop('_id', None)
                             document['id'] = fallback['id']
                             document['order'] = fallback.get('order', fallback['id'])
                             self.db.songs.update_one({'id': fallback['id']}, {'$set': document})
