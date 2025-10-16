@@ -10,7 +10,7 @@
     ICON="assets\launcher\taiko.ico" />
 
   <style type="text/css">
-    html,body { height:100%; margin:0; }
+    html,body { height:100%; margin:0; overflow:hidden; }
     body { font-family:"Segoe UI", Meiryo, Arial, sans-serif;
       background-image:url('assets/launcher/title-screen.png');
       background-size:cover; background-position:center; background-repeat:no-repeat; }
@@ -44,8 +44,8 @@
     var webTimer = null;
     var dockerTimer = null;
     var webInflight = false;
-    var launcherWidth = 860;
-    var launcherHeight = 560;
+    var launcherWidth = 1920;
+    var launcherHeight = 1080;
     var resizing = false;
 
     // Paths + log
@@ -221,10 +221,11 @@
     function openGameInModernBrowser(){
       var url = "http://localhost:8000";
       var edge = edgeExe();
-      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups --start-maximized';
+      var sizeArgs = ' --window-size=' + launcherWidth + ',' + launcherHeight;
+      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups' + sizeArgs;
       if (edge){ shell.Run('"' + edge + '"' + args, 0, false); return true; }
       var chrome = chromeExe();
-      if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window --start-maximized', 0, false); return true; }
+      if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window' + sizeArgs, 0, false); return true; }
       shell.Run('cmd /c start "" "' + url + '"', 0, false);
       return false;
     }
