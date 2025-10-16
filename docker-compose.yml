@@ -36,8 +36,7 @@ services:
       dockerfile: Dockerfile
       args:
         # Ветка/URL форка — при желании можно поменять
-        TAIKO_REPO_URL: "https://forgejo.win/yuuki/taiko-web.git"
-        TAIKO_REPO_REF: "master"
+        TAIKO_REPO_URL: "https://github.com/mopga/taiko-web-fork.git"
     container_name: taiko-web-web
     restart: unless-stopped
     depends_on:

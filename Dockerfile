@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
 
 # Аргументы для выбора форка/ветки
 ARG TAIKO_REPO_URL="https://github.com/mopga/taiko-web-fork.git"
-#ARG TAIKO_REPO_REF="master"
 
 # Рабочая директория приложения
 WORKDIR /app
