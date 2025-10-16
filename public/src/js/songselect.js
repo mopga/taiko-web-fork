@@ -2851,36 +2851,37 @@ class SongSelect{
 					this.previewLoaded(startLoad, songObj.preview_time, currentSong.volume)
 				}
 			}else{
-				songObj = {id: id}
-				var promise
-				var previewController = null
-                                var loadFallback = () => this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
-				if(currentSong.previewMusic && previewUtils && typeof previewUtils.resolveSongPreview === "function"){
-					if(typeof AbortController !== "undefined"){
-						previewController = new AbortController()
-						this.previewAbortController = previewController
-					}
-					promise = previewUtils.resolveSongPreview(currentSong, {
-						signal: previewController ? previewController.signal : undefined
-					}).then(previewFile => {
-						if(previewFile){
-							songObj.preview_time = 0
-							return snd.previewGain.load(previewFile).catch(() => {
-								songObj.preview_time = prvTime
-								return loadFallback()
-							})
-						}
-						return loadFallback()
-					})
-				}else if(currentSong.previewMusic){
-					songObj.preview_time = 0
-					promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
-						songObj.preview_time = prvTime
-						return loadFallback()
-					})
-				}else{
-					promise = loadFallback()
-				}
+                               songObj = {id: id}
+                               var promise
+                               var previewController = null
+                               var loadFallback = () => {
+                                       songObj.preview_time = prvTime
+                                       return this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
+                               }
+                               if(currentSong.previewMusic && previewUtils && typeof previewUtils.resolveSongPreview === "function"){
+                                        if(typeof AbortController !== "undefined"){
+                                                previewController = new AbortController()
+                                                this.previewAbortController = previewController
+                                        }
+                                       promise = previewUtils.resolveSongPreview(currentSong, {
+                                                signal: previewController ? previewController.signal : undefined
+                                        }).then(previewFile => {
+                                                if(previewFile){
+                                                        songObj.preview_time = 0
+                                                        return snd.previewGain.load(previewFile).catch(() => {
+                                                                return loadFallback()
+                                                        })
+                                                }
+                                                return loadFallback()
+                                        })
+                               }else if(currentSong.previewMusic){
+                                        songObj.preview_time = 0
+                                        promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
+                                                return loadFallback()
+                                        })
+                               }else{
+                                        promise = loadFallback()
+                               }
 				if(!promise){
 					return
 				}
