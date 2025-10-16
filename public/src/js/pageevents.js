@@ -14,58 +14,85 @@ class PageEvents{
 		this.add(window, "blur", this.blurEvent.bind(this))
 		this.kbd = []
 	}
-	add(target, type, callback, symbol){
-		if(Array.isArray(type)){
-			type.forEach(type => this.add(target, type, callback, symbol))
-			return
-		}
-		this.remove(target, type)
-		var addedEvent = this.allEvents.get(symbol || target)
-		if(!addedEvent){
-			addedEvent = new Map()
-			this.allEvents.set(symbol || target, addedEvent)
-		}
-		addedEvent.set(type, callback)
-		return target.addEventListener(type, callback)
-	}
-	remove(target, type, symbol){
-		if(Array.isArray(type)){
-			type.forEach(type => this.remove(target, type, symbol))
-			return
-		}
-		var addedEvent = this.allEvents.get(symbol || target)
-		if(addedEvent){
-			var callback = addedEvent.get(type)
-			if(callback){
-				target.removeEventListener(type, callback)
-				addedEvent.delete(type)
-				if(addedEvent.size == 0){
-					return this.allEvents.delete(symbol || target)
-				}
-			}
-		}
-	}
-	once(target, type, symbol){
-		return new Promise(resolve => {
-			this.add(target, type, event => {
-				this.remove(target, type)
-				return resolve(event)
-			}, symbol)
-		})
-	}
-	race(){
-		var symbols = []
-		var target = arguments[0]
-		return new Promise(resolve => {
-			for(var i = 1;i < arguments.length; i++){
-				symbols[i] = Symbol()
-				let type = arguments[i]
-				this.add(target, type, event => {
-					resolve({
-						type: type,
-						event: event
-					})
-				}, symbols[i])
+        add(target, type, callback, symbol, options){
+                var actualSymbol = symbol
+                var actualOptions = options
+                if(actualOptions === undefined && (typeof actualSymbol === "boolean" || actualSymbol && typeof actualSymbol === "object" && typeof actualSymbol !== "symbol")){
+                        actualOptions = actualSymbol
+                        actualSymbol = undefined
+                }
+                if(Array.isArray(type)){
+                        type.forEach(type => this.add(target, type, callback, actualSymbol, actualOptions))
+                        return
+                }
+                this.remove(target, type, actualSymbol)
+                var addedEvent = this.allEvents.get(actualSymbol || target)
+                if(!addedEvent){
+                        addedEvent = new Map()
+                        this.allEvents.set(actualSymbol || target, addedEvent)
+                }
+                addedEvent.set(type, { callback: callback, options: actualOptions })
+                return target.addEventListener(type, callback, actualOptions)
+        }
+        remove(target, type, symbol, options){
+                var actualSymbol = symbol
+                var actualOptions = options
+                if(actualOptions === undefined && (typeof actualSymbol === "boolean" || actualSymbol && typeof actualSymbol === "object" && typeof actualSymbol !== "symbol")){
+                        actualOptions = actualSymbol
+                        actualSymbol = undefined
+                }
+                if(Array.isArray(type)){
+                        type.forEach(type => this.remove(target, type, actualSymbol, actualOptions))
+                        return
+                }
+                var addedEvent = this.allEvents.get(actualSymbol || target)
+                if(addedEvent){
+                        var listener = addedEvent.get(type)
+                        if(listener){
+                                var callback
+                                var listenerOptions
+                                if(typeof listener === "function"){
+                                        callback = listener
+                                        listenerOptions = actualOptions
+                                }else{
+                                        callback = listener.callback
+                                        listenerOptions = listener.options
+                                }
+                                target.removeEventListener(type, callback, listenerOptions)
+                                addedEvent.delete(type)
+                                if(addedEvent.size == 0){
+                                        return this.allEvents.delete(actualSymbol || target)
+                                }
+                        }
+                }
+        }
+        once(target, type, symbol, options){
+                var actualSymbol = symbol
+                var actualOptions = options
+                if(actualOptions === undefined && (typeof actualSymbol === "boolean" || actualSymbol && typeof actualSymbol === "object" && typeof actualSymbol !== "symbol")){
+                        actualOptions = actualSymbol
+                        actualSymbol = undefined
+                }
+                return new Promise(resolve => {
+                        this.add(target, type, event => {
+                                this.remove(target, type, actualSymbol)
+                                return resolve(event)
+                        }, actualSymbol, actualOptions)
+                })
+        }
+        race(){
+                var symbols = []
+                var target = arguments[0]
+                return new Promise(resolve => {
+                        for(var i = 1;i < arguments.length; i++){
+                                symbols[i] = Symbol()
+                                let type = arguments[i]
+                                this.add(target, type, event => {
+                                        resolve({
+                                                type: type,
+                                                event: event
+                                        })
+                                }, symbols[i])
 			}
 		}).then(response => {
 			for(var i = 1;i < arguments.length; i++){
