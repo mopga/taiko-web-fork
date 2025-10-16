@@ -2796,7 +2796,36 @@ class SongSelect{
 		}
 	}
 	
-	startPreview(loadOnly){
+        loadSongPreviewAudio(songObj, currentSong, prvTime, currentId){
+                if(!currentSong){
+                        return Promise.resolve(null)
+                }
+
+                songObj.preview_time = 0
+
+                var existingSound = currentSong.sound
+                if(existingSound && typeof existingSound.copy === "function"){
+                        return Promise.resolve(existingSound.copy(snd.previewGain))
+                }
+
+                var musicSource = currentSong.music
+                if(!musicSource || musicSource === "muted"){
+                        return Promise.resolve(null)
+                }
+
+                return snd.previewGain.load(musicSource).then(sound => {
+                        if(!currentSong.sound && typeof sound.copy === "function" && (currentId === this.previewId || currentId === null || typeof currentId === "undefined")){
+                                currentSong.sound = sound.copy(snd.musicGain)
+                        }
+                        return sound
+                }).catch(error => {
+                        if(error === "cancel" || error && error.name === "AbortError"){
+                                return Promise.reject(error)
+                        }
+                        return null
+                })
+        }
+        startPreview(loadOnly){
 		if(!loadOnly && this.state && this.state.showWarning || this.state.waitPreview > this.getMS()){
 			return
 		}
@@ -2825,7 +2854,7 @@ class SongSelect{
 				songObj = {id: id}
 				var promise
 				var previewController = null
-				var loadFallback = () => this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
+                                var loadFallback = () => this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
 				if(currentSong.previewMusic && previewUtils && typeof previewUtils.resolveSongPreview === "function"){
 					if(typeof AbortController !== "undefined"){
 						previewController = new AbortController()
