@@ -47,18 +47,18 @@ services:
         condition: service_healthy
     environment:
       # web увидит Mongo/Redis по именам сервисов в сети compose
-          TAIKO_WEB_MONGO_HOST: "mongo:27017"
-          TAIKO_WEB_REDIS_HOST: "redis"
-          TAIKO_WEB_REDIS_PORT: "6379"
-          TAIKO_WEB_REDIS_DB: "0"
+      TAIKO_WEB_MONGO_HOST: "mongo:27017"
+      TAIKO_WEB_REDIS_HOST: "redis"
+      TAIKO_WEB_REDIS_PORT: "6379"
+      TAIKO_WEB_REDIS_DB: "0"
       # basepath — если хочешь в подпуть, поставь, например, /taiko/
-          BASEDIR: "${BASEDIR:-/}"
+      BASEDIR: "${BASEDIR:-/}"
     ports:
       - "8000:8000"   # откроется http://localhost:8000
     volumes:
-      - ./config/config.py:/app/config.py:ro
+      - ./config/config.py:/app/config/config.py:ro
       - ./songs:/app/public/songs
-      - ./assets:/data/assets
+      - ./assets:/app/public/assets
 
 volumes:
   mongo_data:

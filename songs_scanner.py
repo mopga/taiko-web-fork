@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 import unicodedata
 
 from pymongo.database import Database
@@ -283,6 +283,21 @@ class SongScanner:
             'errors': 0,
         }
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
+        managed_songs: Dict[int, bool] = {}
+        seen_song_ids: Set[int] = set()
+
+        try:
+            cursor = self.db.songs.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
+        except AttributeError:
+            cursor = []
+        except Exception:  # pragma: no cover - defensive when find unsupported
+            LOGGER.debug("songs.find is not available on db collection")
+            cursor = []
+
+        for doc in cursor:
+            doc_id = doc.get('id')
+            if isinstance(doc_id, int):
+                managed_songs[doc_id] = bool(doc.get('enabled', True))
 
         if not self.songs_dir.exists():
             LOGGER.warning("Songs directory %s does not exist", self.songs_dir)
@@ -373,6 +388,7 @@ class SongScanner:
                 },
                 'music_type': music_type,
                 'diagnostics': diagnostics if diagnostics else [],
+                'managed_by_scanner': True,
             }
 
             existing = self.db.songs.find_one({'hash': file_hash})
@@ -384,12 +400,14 @@ class SongScanner:
                 document['order'] = existing.get('order', existing['id'])
                 self.db.songs.update_one({'id': existing['id']}, {'$set': document})
                 summary['updated'] += 1
+                seen_song_ids.add(existing['id'])
             else:
                 new_id = self._get_next_song_id()
                 document['id'] = new_id
                 document['order'] = new_id
                 self.db.songs.insert_one(document)
                 summary['inserted'] += 1
+                seen_song_ids.add(new_id)
 
         self._update_sequence()
 
@@ -405,5 +423,12 @@ class SongScanner:
             else:
                 update.setdefault('song_skin', None)
                 self.db.categories.insert_one(update)
+
+        missing_ids = set(managed_songs.keys()) - seen_song_ids
+        for missing_id in sorted(missing_ids):
+            previous_enabled = managed_songs.get(missing_id, True)
+            self.db.songs.update_one({'id': missing_id}, {'$set': {'enabled': False}})
+            if previous_enabled:
+                summary['disabled'] += 1
 
         return summary
