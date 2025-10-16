@@ -11,7 +11,16 @@
 		this.gainList = []
 	}
 	load(file, gain){
-		var decoder = file.name.endsWith(".ogg") ? this.oggDecoder : this.audioDecoder
+		if(typeof file === "string"){
+			file = new RemoteFile(file)
+		}else if(file && !file.name && file.url && typeof file.arrayBuffer !== "function"){
+			file = new RemoteFile(file.url)
+		}
+		if(!file || typeof file.arrayBuffer !== "function"){
+			return Promise.reject(["Invalid audio file", file && file.url])
+		}
+		var name = file.name || ""
+		var decoder = name.endsWith(".ogg") ? this.oggDecoder : this.audioDecoder
 		return file.arrayBuffer().then(response => {
 			return new Promise((resolve, reject) => {
 				return decoder(response, resolve, reject)
