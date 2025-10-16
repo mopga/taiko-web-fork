@@ -2818,47 +2818,70 @@ class SongSelect{
 					this.previewLoaded(startLoad, songObj.preview_time, currentSong.volume)
 				}
 			}else{
-				songObj = {id: id}
-				if(currentSong.previewMusic){
-					songObj.preview_time = 0
-					var promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
-						songObj.preview_time = prvTime
-						return snd.previewGain.load(currentSong.music)
-					})
-				}else if(currentSong.unloaded){
-					var promise = this.getUnloaded(this.selectedSong, songObj, currentId)
-				}else if(currentSong.sound){
-					songObj.preview_time = prvTime
-					currentSong.sound.gain = snd.previewGain
-					var promise = Promise.resolve(currentSong.sound)
-				}else if(currentSong.music !== "muted"){
-					songObj.preview_time = prvTime
-					var promise = snd.previewGain.load(currentSong.music)
-				}else{
-					return
-				}
-				promise.then(sound => {
-					if(currentId === this.previewId || loadOnly){
-						songObj.preview_sound = sound
-						if(!loadOnly){
-							this.preview = sound
-							this.previewLoaded(startLoad, songObj.preview_time, currentSong.volume)
-						}
-						var oldPreview = this.previewList.shift()
-						if(oldPreview){
-							oldPreview.preview_sound.clean()
-						}
-						this.previewList.push(songObj)
-					}else{
-						sound.clean()
-					}
-				}).catch(e => {
-					if(e !== "cancel"){
-						return Promise.reject(e)
-					}
-				})
-			}
-		}
+	                       songObj = {id: id}
+	                       var promise
+	                       var loadFallback = () => this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
+	                       if(currentSong.previewMusic && previewUtils && typeof previewUtils.resolveSongPreview === "function"){
+	                               promise = previewUtils.resolveSongPreview(currentSong).then(previewFile => {
+	                                       if(previewFile){
+	                                               songObj.preview_time = 0
+	                                               return snd.previewGain.load(previewFile).catch(() => {
+	                                                       songObj.preview_time = prvTime
+	                                                       return loadFallback()
+	                                               })
+	                                       }
+	                                       return loadFallback()
+	                               })
+	                       }else if(currentSong.previewMusic){
+	                               songObj.preview_time = 0
+	                               promise = snd.previewGain.load(currentSong.previewMusic).catch(() => {
+	                                       songObj.preview_time = prvTime
+	                                       return loadFallback()
+	                               })
+	                       }else{
+	                               promise = loadFallback()
+	                       }
+	                       if(!promise){
+	                               return
+	                       }
+	                       promise.then(sound => {
+	                               if(!sound){
+	                                       return
+	                               }
+	                               if(currentId === this.previewId || loadOnly){
+	                                       songObj.preview_sound = sound
+	                                       if(!loadOnly){
+	                                               this.preview = sound
+	                                               this.previewLoaded(startLoad, songObj.preview_time, currentSong.volume)
+	                                       }
+	                                       var oldPreview = this.previewList.shift()
+	                                       if(oldPreview){
+	                                               oldPreview.preview_sound.clean()
+	                                       }
+	                                       this.previewList.push(songObj)
+	                               }else{
+	                                       sound.clean()
+	                               }
+	                       }).catch(e => {
+	                               if(e !== "cancel"){
+	                                       return Promise.reject(e)
+	                               }
+	                       })
+	                }
+                }
+        }
+	loadSongPreviewAudio(songObj, currentSong, prvTime, currentId){
+	        if(currentSong.unloaded){
+	                return this.getUnloaded(this.selectedSong, songObj, currentId)
+	        }else if(currentSong.sound){
+	                songObj.preview_time = prvTime
+	                currentSong.sound.gain = snd.previewGain
+	                return Promise.resolve(currentSong.sound)
+	        }else if(currentSong.music !== "muted"){
+	                songObj.preview_time = prvTime
+	                return snd.previewGain.load(currentSong.music)
+	        }
+	        return Promise.reject("cancel")
 	}
 	previewLoaded(startLoad, prvTime, volume){
 		var endLoad = this.getMS()
