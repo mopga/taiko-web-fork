@@ -193,8 +193,11 @@ class Loader{
                                                 song.music = new RemoteFile(dirUrl + "main." + song.music_type)
                                         }
                                         if(song.type === "tja"){
-                                                var chartUrl = paths.tja_url || (dirUrl + "main.tja")
-                                                song.chart = new RemoteFile(chartUrl)
+                                                if(paths.tja_url){
+                                                        song.chart = new RemoteFile(paths.tja_url)
+                                                }else{
+                                                        song.chart = new RemoteFile(dirUrl + "main.tja")
+                                                }
                                         }else{
                                                 song.chart = {separateDiff: true}
                                                 for(var diff in song.courses){

@@ -1,5 +1,9 @@
-import unittest
 from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from songs_scanner import SongScanner, parse_tja
 
@@ -7,6 +11,9 @@ from songs_scanner import SongScanner, parse_tja
 class _DummyCollection:
     def find_one(self, *args, **kwargs):
         return None
+
+    def find(self, *args, **kwargs):
+        return []
 
     def update_one(self, *args, **kwargs):
         return None
@@ -72,8 +79,6 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(category_title, "Anime")
 
     def _tmp_dir(self):
-        import tempfile
-
         return tempfile.mkdtemp()
 
 

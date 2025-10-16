@@ -3,15 +3,13 @@
 import base64
 import bcrypt
 import hashlib
-try:
-    import config.config as config
-except ModuleNotFoundError:
-    raise FileNotFoundError('No such file or directory: \'config.py\'. Copy the example config file config.example.py to config.py')
+import importlib
+import importlib.util
 import json
+import os
 import re
 import requests
 import schema
-import os
 import time
 from pathlib import Path
 
@@ -33,35 +31,83 @@ from redis import Redis
 
 from songs_scanner import SongScanner
 
+
+def _load_config_module():
+    """Load configuration module from several possible locations."""
+
+    module_name = os.environ.get("TAIKO_WEB_CONFIG_MODULE")
+    search_order = []
+    if module_name:
+        search_order.append(module_name)
+    search_order.extend(["config.config", "config"])
+
+    for name in search_order:
+        try:
+            return importlib.import_module(name)
+        except ModuleNotFoundError:
+            continue
+
+    path_candidates = [
+        Path(os.environ.get("TAIKO_WEB_CONFIG_PATH", "config.py")),
+        Path("config/config.py"),
+    ]
+    for config_path in path_candidates:
+        if not config_path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location("config", config_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)  # type: ignore[attr-defined]
+            return module
+
+    raise FileNotFoundError('No such file or directory: \'config.py\'. Copy the example config file config.example.py to config.py')
+
+
+config = _load_config_module()
+
 def take_config(name, required=False):
     if hasattr(config, name):
         return getattr(config, name)
-    elif required:
+    if required:
         raise ValueError('Required option is not defined in the config.py file: {}'.format(name))
-    else:
-        return None
+    return None
 
 app = Flask(__name__)
 
-client = MongoClient(host=os.environ.get("TAIKO_WEB_MONGO_HOST") or take_config('MONGO', required=True)['host'])
-basedir = take_config('BASEDIR') or '/'
+mongo_config = take_config('MONGO', required=True)
+mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config['host']
+client = MongoClient(host=mongo_host)
+
+basedir = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
 
 app.secret_key = take_config('SECRET_KEY') or 'change-me'
 app.config['SESSION_TYPE'] = 'redis'
-redis_config = take_config('REDIS', required=True)
-redis_config['CACHE_REDIS_HOST'] = os.environ.get("TAIKO_WEB_REDIS_HOST") or redis_config['CACHE_REDIS_HOST']
+redis_config = dict(take_config('REDIS', required=True))
+redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
+if redis_host_env:
+    redis_config['CACHE_REDIS_HOST'] = redis_host_env
+redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
+if redis_port_env:
+    redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
+redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
+if redis_password_env is not None:
+    redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
+redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
+if redis_db_env is not None:
+    redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
 app.config['SESSION_REDIS'] = Redis(
     host=redis_config['CACHE_REDIS_HOST'],
     port=redis_config['CACHE_REDIS_PORT'],
-    password=redis_config['CACHE_REDIS_PASSWORD'],
-    db=redis_config['CACHE_REDIS_DB']
+    password=redis_config.get('CACHE_REDIS_PASSWORD'),
+    db=redis_config.get('CACHE_REDIS_DB'),
 )
 app.cache = Cache(app, config=redis_config)
 sess = Session()
 sess.init_app(app)
 #csrf = CSRFProtect(app)
 
-db = client[take_config('MONGO', required=True)['database']]
+db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config['database']
+db = client[db_name]
 db.users.create_index('username', unique=True)
 db.songs.create_index('id', unique=True)
 db.scores.create_index('username')
@@ -75,13 +121,16 @@ def _resolve_baseurl(value):
     return resolved if resolved.endswith('/') else resolved + '/'
 
 
-SONGS_DIR_PATH = Path(take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
+SONGS_DIR_PATH = Path(os.environ.get('SONGS_DIR') or take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
 SCAN_ON_START = take_config('SCAN_ON_START')
-if SCAN_ON_START is None:
+scan_env = os.environ.get('SCAN_ON_START')
+if scan_env is not None:
+    SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
+elif SCAN_ON_START is None:
     SCAN_ON_START = True
 SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
-ADMIN_SCAN_TOKEN = take_config('ADMIN_SCAN_TOKEN') or 'change-me'
-SONGS_BASEURL_VALUE = _resolve_baseurl(take_config('SONGS_BASEURL'))
+ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
+SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
 
 song_scanner = SongScanner(
     db=db,
@@ -510,6 +559,7 @@ def route_api_songs():
         else:
             song['song_skin'] = None
         song.pop('skin_id', None)
+        song.pop('managed_by_scanner', None)
 
         paths = song.get('paths') or {}
         if 'tja_url' not in paths and song.get('type') == 'tja':
