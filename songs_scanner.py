@@ -5,9 +5,11 @@ import fnmatch
 import hashlib
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Callable
 import unicodedata
 
 from pymongo.database import Database
@@ -17,6 +19,14 @@ try:  # pragma: no cover - pymongo always available in production
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
     DuplicateKeyError = None  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
+
+
+try:  # pragma: no cover - watchdog is optional during tests
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except Exception:  # pragma: no cover - watchdog optional dependency
+    FileSystemEventHandler = None  # type: ignore[assignment]
+    Observer = None  # type: ignore[assignment]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -235,6 +245,14 @@ class SongScanner:
         self.ignore_globs = list(ignore_globs or [])
         self._next_song_id: Optional[int] = None
         self._max_song_id: int = 0
+        self._scan_lock = threading.Lock()
+        self._state_collection = getattr(self.db, 'song_scanner_state', None)
+        if self._state_collection is not None:
+            try:
+                self._state_collection.create_index('tja_path', unique=True)
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
+        self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
 
     def _ensure_sequence(self) -> None:
         if self._next_song_id is not None:
@@ -338,17 +356,38 @@ class SongScanner:
             return number, title
         return 0, DEFAULT_CATEGORY_TITLE
 
-    def scan(self) -> Dict[str, int]:
+    def scan(self, *, full: bool = False) -> Dict[str, int]:
+        """Scan songs directory and sync metadata with MongoDB."""
+
+        start_time = time.perf_counter()
+        with self._scan_lock:
+            summary = self._scan_impl(full=full)
+        summary['duration_seconds'] = round(time.perf_counter() - start_time, 3)
+        return summary
+
+    def _scan_impl(self, *, full: bool) -> Dict[str, int]:
         summary = {
             'found': 0,
             'inserted': 0,
             'updated': 0,
             'disabled': 0,
             'errors': 0,
+            'skipped': 0,
         }
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
         managed_songs: Dict[int, bool] = {}
         seen_song_ids: Set[int] = set()
+        seen_state_paths: Set[str] = set()
+
+        state_docs: Dict[str, Dict[str, object]] = {}
+        if self._state_collection is not None:
+            try:
+                for doc in self._state_collection.find():
+                    path_value = doc.get('tja_path')
+                    if isinstance(path_value, str):
+                        state_docs[path_value] = dict(doc)
+            except Exception:  # pragma: no cover - tolerate collection access issues
+                LOGGER.debug('Failed to read song scanner state collection')
 
         try:
             cursor = self.db.songs.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
@@ -370,6 +409,50 @@ class SongScanner:
         for tja_path in self._iter_tja_files():
             summary['found'] += 1
             try:
+                relative_tja = tja_path.relative_to(self._songs_root)
+            except ValueError:
+                LOGGER.warning("Skipping chart outside songs dir: %s", tja_path)
+                summary['errors'] += 1
+                continue
+            tja_key = relative_tja.as_posix()
+            state_doc = state_docs.get(tja_key)
+            seen_state_paths.add(tja_key)
+            tja_stat = tja_path.stat()
+            tja_mtime_ns = getattr(tja_stat, 'st_mtime_ns', int(tja_stat.st_mtime * 1_000_000_000))
+            tja_size = tja_stat.st_size
+
+            needs_processing = full or state_doc is None
+            if state_doc is not None and not needs_processing:
+                stored_mtime = state_doc.get('tja_mtime_ns')
+                stored_size = state_doc.get('tja_size')
+                if stored_mtime != tja_mtime_ns or stored_size != tja_size:
+                    needs_processing = True
+
+            stored_audio_path: Optional[str] = None
+            if state_doc:
+                stored_audio_path = state_doc.get('audio_path') if isinstance(state_doc.get('audio_path'), str) else None
+                if not needs_processing and stored_audio_path:
+                    audio_candidate = (self._songs_root / stored_audio_path).resolve()
+                    if audio_candidate.exists():
+                        audio_stat = audio_candidate.stat()
+                        audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
+                        audio_size = audio_stat.st_size
+                        if state_doc.get('audio_mtime_ns') != audio_mtime_ns or state_doc.get('audio_size') != audio_size:
+                            needs_processing = True
+                    else:
+                        needs_processing = True
+                if not needs_processing and not stored_audio_path:
+                    # Previously missing audio, recheck occasionally in fast mode.
+                    needs_processing = True
+
+            if not needs_processing:
+                existing_song_id = state_doc.get('song_id') if state_doc else None
+                if isinstance(existing_song_id, int):
+                    seen_song_ids.add(existing_song_id)
+                summary['skipped'] += 1
+                continue
+
+            try:
                 parsed = parse_tja(tja_path)
                 audio_path, diagnostics = self._detect_audio(tja_path, parsed)
             except Exception:  # pragma: no cover - defensive
@@ -381,7 +464,6 @@ class SongScanner:
             file_hash = md5_bytes(tja_bytes)
             fingerprint = parsed.fingerprint
 
-            relative_tja = tja_path.relative_to(self._songs_root)
             tja_url = self._build_url(relative_tja)
             dir_url = self._build_url(relative_tja.parent)
             if not dir_url.endswith('/'):
@@ -389,10 +471,18 @@ class SongScanner:
 
             audio_url = None
             music_type = None
+            audio_hash = None
+            audio_mtime_ns = None
+            audio_size = None
             if audio_path:
                 relative_audio = audio_path.resolve().relative_to(self._songs_root)
                 audio_url = self._build_url(relative_audio)
                 music_type = audio_path.suffix.lower().lstrip('.')
+                audio_bytes = audio_path.read_bytes()
+                audio_hash = md5_bytes(audio_bytes)
+                audio_stat = audio_path.stat()
+                audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
+                audio_size = audio_stat.st_size
 
             category_id, category_title = self._determine_category(tja_path)
             if category_id and category_title:
@@ -486,6 +576,7 @@ class SongScanner:
                 'managed_by_scanner': True,
             }
 
+            new_id: Optional[int] = None
             existing = self.db.songs.find_one({'hash': file_hash})
             if not existing:
                 existing = self.db.songs.find_one({'paths.tja_url': tja_url})
@@ -515,6 +606,8 @@ class SongScanner:
                             summary['updated'] += 1
                             seen_song_ids.add(fallback['id'])
                             handled = True
+                            existing = fallback
+                            new_id = None
                         else:
                             LOGGER.warning("Duplicate key when inserting %s but no existing song was found", tja_path)
                             summary['errors'] += 1
@@ -524,14 +617,42 @@ class SongScanner:
                         summary['errors'] += 1
                         handled = True
 
-                    if handled:
-                        continue
-                    raise
+                    if not handled:
+                        raise
 
+            if new_id is not None:
                 summary['inserted'] += 1
                 seen_song_ids.add(new_id)
 
+            try:
+                if self._state_collection is not None:
+                    state_payload = {
+                        'tja_path': tja_key,
+                        'tja_hash': file_hash,
+                        'tja_mtime_ns': tja_mtime_ns,
+                        'tja_size': tja_size,
+                        'audio_path': audio_path.resolve().relative_to(self._songs_root).as_posix() if audio_path else None,
+                        'audio_hash': audio_hash,
+                        'audio_mtime_ns': audio_mtime_ns,
+                        'audio_size': audio_size,
+                        'song_id': document['id'],
+                    }
+                    if state_doc:
+                        self._state_collection.update_one({'tja_path': tja_key}, {'$set': state_payload}, upsert=True)
+                    else:
+                        self._state_collection.insert_one(state_payload)
+            except Exception:  # pragma: no cover - state updates are best effort
+                LOGGER.debug('Failed to update song scanner state for %s', tja_path)
+
         self._update_sequence()
+
+        if self._state_collection is not None:
+            stale_paths = set(state_docs.keys()) - seen_state_paths
+            if stale_paths:
+                try:
+                    self._state_collection.delete_many({'tja_path': {'$in': list(stale_paths)}})
+                except Exception:  # pragma: no cover - best effort cleanup
+                    LOGGER.debug('Failed to prune %d stale scanner state entries', len(stale_paths))
 
         # Update categories collection
         for cat_id, title in categories.items():
@@ -554,3 +675,59 @@ class SongScanner:
                 summary['disabled'] += 1
 
         return summary
+
+    @property
+    def watchdog_supported(self) -> bool:
+        return self._watchdog_supported
+
+    def start_watcher(self, callback: Optional[Callable[[], None]] = None, debounce_seconds: float = 1.0):
+        if not self.watchdog_supported:
+            LOGGER.info('watchdog is not available; live song updates disabled')
+            return None
+        if callback is None:
+            callback = lambda: self.scan(full=False)
+
+        class _EventHandler(FileSystemEventHandler):
+            def __init__(self, trigger: Callable[[], None], debounce: float) -> None:
+                super().__init__()
+                self._trigger = trigger
+                self._debounce = debounce
+                self._timer: Optional[threading.Timer] = None
+                self._lock = threading.Lock()
+
+            def _schedule(self) -> None:
+                with self._lock:
+                    if self._timer:
+                        self._timer.cancel()
+                    self._timer = threading.Timer(self._debounce, self._trigger)
+                    self._timer.daemon = True
+                    self._timer.start()
+
+            def on_any_event(self, event):  # type: ignore[override]
+                if getattr(event, 'is_directory', False):
+                    return
+                path = getattr(event, 'src_path', '') or getattr(event, 'dest_path', '')
+                suffix = Path(path).suffix.lower()
+                if suffix not in ['.tja'] + SUPPORTED_AUDIO_EXTS:
+                    return
+                self._schedule()
+
+        handler = _EventHandler(callback, debounce_seconds)
+        observer = Observer()
+        observer.daemon = True
+        observer.schedule(handler, str(self.songs_dir), recursive=True)
+        observer.start()
+
+        class _WatcherHandle:
+            def __init__(self, obs: Observer, hnd: FileSystemEventHandler) -> None:
+                self._observer = obs
+                self._handler = hnd
+
+            def stop(self) -> None:
+                try:
+                    self._observer.stop()
+                    self._observer.join(timeout=5)
+                except Exception:  # pragma: no cover - shutdown best effort
+                    LOGGER.debug('Failed to stop song directory watcher cleanly')
+
+        return _WatcherHandle(observer, handler)
