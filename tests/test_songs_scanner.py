@@ -5,7 +5,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from songs_scanner import SongScanner, parse_tja
+from songs_scanner import SongScanner, TjaImportRecord, parse_tja
 
 
 class _MemoryCollection:
@@ -351,6 +351,84 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(followup_summary['skipped'], 2)
         existing = db.songs._docs[0]
         self.assertEqual(len(existing['charts']), 2)
+
+    def test_determine_group_key_prefers_audio_hash_and_folder(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path("/unused"),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        record_with_hash = TjaImportRecord(
+            relative_path="pack/oni.tja",
+            relative_dir="Pack/OniCourse",
+            tja_url="/songs/pack/oni.tja",
+            dir_url="/songs/pack/",
+            audio_url="/songs/audio.ogg",
+            audio_path="pack/audio.ogg",
+            audio_hash="deadbeef",
+            audio_mtime_ns=None,
+            audio_size=None,
+            music_type=None,
+            diagnostics=[],
+            title="Oni Title",
+            title_ja=None,
+            subtitle="",
+            subtitle_ja=None,
+            locale={},
+            offset=0.0,
+            preview=0.0,
+            fingerprint="",
+            tja_hash="hash",
+            wave="audio.ogg",
+            song_id=None,
+            genre=None,
+            category_id=0,
+            category_title="Unsorted",
+            charts=[],
+            import_issues=[],
+            normalized_title="oni title",
+        )
+
+        key_with_hash = scanner._determine_group_key(record_with_hash)
+        self.assertEqual(key_with_hash, "audio:deadbeef:Pack")
+
+        record_missing_audio = TjaImportRecord(
+            relative_path="pack/oni.tja",
+            relative_dir="Pack/OniCourse",
+            tja_url="/songs/pack/oni.tja",
+            dir_url="/songs/pack/",
+            audio_url=None,
+            audio_path=None,
+            audio_hash=None,
+            audio_mtime_ns=None,
+            audio_size=None,
+            music_type=None,
+            diagnostics=[],
+            title="Fallback Title",
+            title_ja=None,
+            subtitle="",
+            subtitle_ja=None,
+            locale={},
+            offset=0.0,
+            preview=0.0,
+            fingerprint="",
+            tja_hash="hash2",
+            wave=None,
+            song_id=None,
+            genre=None,
+            category_id=0,
+            category_title="Unsorted",
+            charts=[],
+            import_issues=[],
+            normalized_title="",
+        )
+
+        key_missing_audio = scanner._determine_group_key(record_missing_audio)
+        self.assertTrue(key_missing_audio.startswith("missing:Pack:"))
+        self.assertIn("fallback title", key_missing_audio)
 
     def test_scanner_normalizes_alias_courses_and_genre_fallback(self):
         tmp_dir = Path(self._tmp_dir())
