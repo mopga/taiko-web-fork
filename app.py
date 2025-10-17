@@ -122,6 +122,10 @@ db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') o
 db = client[db_name]
 db.users.create_index('username', unique=True)
 db.songs.create_index('id', unique=True)
+try:
+    db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
+except Exception:
+    app.logger.debug('Could not ensure audioHash/titleNormalized index')
 db.scores.create_index('username')
 try:
     db.song_scanner_state.create_index('tja_path', unique=True)
@@ -189,12 +193,14 @@ elif SCAN_ON_START is None:
 SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
 ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
 SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
+COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
 
 song_scanner = SongScanner(
     db=db,
     songs_dir=SONGS_DIR_PATH,
     songs_baseurl=SONGS_BASEURL_VALUE,
     ignore_globs=SCAN_IGNORE_GLOBS,
+    coerce_unknown_course=COERCE_UNKNOWN_COURSE,
 )
 
 _song_watcher_handle = None
@@ -618,11 +624,16 @@ def route_api_songs():
         song.pop('maker_id', None)
 
         category_id = song.get('category_id')
-        if category_id is not None:
+        genre_value = song.get('genre')
+        category_value = None
+        if isinstance(genre_value, str) and genre_value.strip():
+            category_value = genre_value.strip()
+        elif category_id is not None:
             category_doc = db.categories.find_one({'id': category_id})
-            song['category'] = category_doc['title'] if category_doc else None
+            category_value = category_doc['title'] if category_doc else 'Unsorted'
         else:
-            song['category'] = None
+            category_value = 'Unsorted'
+        song['category'] = category_value
 
         skin_id = song.get('skin_id')
         if skin_id:

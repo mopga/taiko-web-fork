@@ -183,6 +183,9 @@ class Loader{
                                 songs = songs.filter(song => song.enabled !== false);
                                 songs.forEach(song => {
                                         var paths = song.paths || {}
+                                        if(!Array.isArray(song.import_issues)){
+                                                song.import_issues = []
+                                        }
                                         var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + song.id + "/")
                                         if(dirUrl.slice(-1) !== "/"){
                                                 dirUrl += "/"
@@ -192,12 +195,80 @@ class Loader{
                                         }else if(song.music_type){
                                                 song.music = new RemoteFile(dirUrl + "main." + song.music_type)
                                         }
+
                                         if(song.type === "tja"){
-                                                if(paths.tja_url){
-                                                        song.chart = new RemoteFile(paths.tja_url)
-                                                }else{
-                                                        song.chart = new RemoteFile(dirUrl + "main.tja")
+                                                var charts = Array.isArray(song.charts) ? song.charts : []
+                                                var canonicalMap = {
+                                                        "Easy": "easy",
+                                                        "Normal": "normal",
+                                                        "Hard": "hard",
+                                                        "Oni": "oni",
+                                                        "UraOni": "ura"
                                                 }
+                                                var courseOrder = ["easy", "normal", "hard", "oni", "ura"]
+                                                var courseInfo = {}
+                                                var chartDetails = {}
+                                                courseOrder.forEach(diff => courseInfo[diff] = null)
+                                                var coursesByDiff = {}
+                                                charts.forEach(chart => {
+                                                        var legacy = canonicalMap[chart.course]
+                                                        if(!legacy){
+                                                                return
+                                                        }
+                                                        if(!coursesByDiff[legacy] || (chart.valid && !coursesByDiff[legacy].valid)){
+                                                                coursesByDiff[legacy] = chart
+                                                        }
+                                                })
+                                                song.courses = courseInfo
+                                                Object.keys(coursesByDiff).forEach(diff => {
+                                                        var chart = coursesByDiff[diff]
+                                                        var sourceUrl = chart.tja_url || null
+                                                        var info = {
+                                                                stars: chart.level || 0,
+                                                                branch: !!chart.branch,
+                                                                valid: !!chart.valid,
+                                                                issues: chart.issues || [],
+                                                                tja_url: sourceUrl
+                                                        }
+                                                        chartDetails[diff] = info
+                                                        song.courses[diff] = info.valid ? info : null
+                                                })
+                                                song.chartDetails = chartDetails
+                                                var validCount = song.valid_chart_count
+                                                if(typeof validCount !== "number"){
+                                                        validCount = Object.values(song.courses).filter(info => info && info.valid).length
+                                                }
+                                                song.hasValidCharts = validCount > 0
+                                                if(!song.hasValidCharts){
+                                                        song.courses = null
+                                                }
+
+                                                var uniqueUrls = new Set()
+                                                Object.values(song.chartDetails).forEach(info => {
+                                                        if(info && info.tja_url){
+                                                                uniqueUrls.add(info.tja_url)
+                                                        }
+                                                })
+
+                                                if(uniqueUrls.size === 0){
+                                                        var fallbackUrl = paths.tja_url || (dirUrl + "main.tja")
+                                                        song.chart = fallbackUrl ? new RemoteFile(fallbackUrl) : null
+                                                }else if(uniqueUrls.size === 1){
+                                                        var singleUrl = uniqueUrls.values().next().value
+                                                        song.chart = new RemoteFile(singleUrl)
+                                                }else{
+                                                        song.chart = {separateDiff: true}
+                                                        Object.entries(song.chartDetails).forEach(([diff, info]) => {
+                                                                if(info && info.tja_url){
+                                                                        song.chart[diff] = new RemoteFile(info.tja_url)
+                                                                }
+                                                        })
+                                                }
+                                                Object.values(song.chartDetails).forEach(info => {
+                                                        if(info){
+                                                                delete info.tja_url
+                                                        }
+                                                })
                                         }else{
                                                 song.chart = {separateDiff: true}
                                                 for(var diff in song.courses){
@@ -206,6 +277,7 @@ class Loader{
                                                         }
                                                 }
                                         }
+
                                         if(song.lyrics){
                                                 song.lyricsFile = new RemoteFile(dirUrl + "main.vtt")
                                         }

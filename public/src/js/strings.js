@@ -223,17 +223,24 @@ var translations = {
 		en: "Permission to access the file was not granted",
 		ko: "파일에 접근할 수 있는 권한이 부여되지 않았습니다."
 	},
-	loading: {
-		ja: "ロード中...",
-		en: "Loading...",
-		cn: "加载中...",
-		tw: "讀取中...",
-		ko: "로딩 중..."
-	},
-	waitingForP2: {
-		ja: "他のプレイヤーを待っている...",
-		en: "Waiting for Another Player...",
-		cn: "正在等待对方玩家...",
+        loading: {
+                ja: "ロード中...",
+                en: "Loading...",
+                cn: "加载中...",
+                tw: "讀取中...",
+                ko: "로딩 중..."
+        },
+        noValidCourse: {
+                ja: "有効なコースがありません",
+                en: "No valid courses (COURSE)",
+                cn: "没有有效的COURSE",
+                tw: "沒有有效的COURSE",
+                ko: "유효한 COURSE가 없습니다"
+        },
+        waitingForP2: {
+                ja: "他のプレイヤーを待っている...",
+                en: "Waiting for Another Player...",
+                cn: "正在等待对方玩家...",
 		tw: "正在等待對方玩家...",
 		ko: "다른 플레이어 대기 중..."
 	},
