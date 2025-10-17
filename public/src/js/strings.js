@@ -1,4 +1,21 @@
 ﻿var languageList = ["ja", "en", "cn", "tw", "ko"]
+var loaderMessages = {
+        loading: {
+                ja: "ロード中...",
+                en: "Loading...",
+                cn: "加载中...",
+                tw: "讀取中...",
+                ko: "로딩 중..."
+        },
+        waitingForP2: {
+                ja: "他のプレイヤーを待っている...",
+                en: "Waiting for Another Player...",
+                cn: "正在等待对方玩家...",
+                tw: "正在等待對方玩家...",
+                ko: "다른 플레이어 대기 중..."
+        }
+}
+
 var translations = {
 	name: {
 		ja: "日本語",
@@ -218,26 +235,20 @@ var translations = {
 		en: "Could not load song %s with ID %s.\n\n%s",
 		ko: "곡 %s (ID:%s)를 로드할 수 없습니다.\n\n%s"
 	},
-	accessNotGrantedError: {
-		ja: "ファイルへのアクセス権が拒否されました",
-		en: "Permission to access the file was not granted",
-		ko: "파일에 접근할 수 있는 권한이 부여되지 않았습니다."
-	},
-	loading: {
-		ja: "ロード中...",
-		en: "Loading...",
-		cn: "加载中...",
-		tw: "讀取中...",
-		ko: "로딩 중..."
-	},
-	waitingForP2: {
-		ja: "他のプレイヤーを待っている...",
-		en: "Waiting for Another Player...",
-		cn: "正在等待对方玩家...",
-		tw: "正在等待對方玩家...",
-		ko: "다른 플레이어 대기 중..."
-	},
-	cancel: {
+        accessNotGrantedError: {
+                ja: "ファイルへのアクセス権が拒否されました",
+                en: "Permission to access the file was not granted",
+                ko: "파일에 접근할 수 있는 권한이 부여되지 않았습니다."
+        },
+        loaderStatus: loaderMessages,
+        noValidCourse: {
+                ja: "有効なコースがありません",
+                en: "No valid courses (COURSE)",
+                cn: "没有有效的COURSE",
+                tw: "沒有有效的COURSE",
+                ko: "유효한 COURSE가 없습니다"
+        },
+        cancel: {
 		ja: "キャンセル",
 		en: "Cancel",
 		cn: "取消",
@@ -1497,3 +1508,11 @@ function separateStrings(){
 	}
 }
 separateStrings()
+for(var j in languageList){
+        var lang = languageList[j]
+        var str = allStrings[lang]
+        if(str.loaderStatus){
+                str.loading = str.loaderStatus.loading
+                str.waitingForP2 = str.loaderStatus.waitingForP2
+        }
+}

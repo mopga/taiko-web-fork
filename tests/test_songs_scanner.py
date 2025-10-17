@@ -153,9 +153,10 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(parsed.subtitle_ja, "サブタイトル")
         self.assertAlmostEqual(parsed.offset, 1.5)
         self.assertAlmostEqual(parsed.preview, 12.5)
-        self.assertEqual(parsed.courses["oni"].stars, 8)
-        self.assertTrue(parsed.courses["oni"].branch)
-        self.assertEqual(parsed.courses["hard"].stars, 5)
+        courses = {course.canonical: course for course in parsed.courses}
+        self.assertEqual(courses["Oni"].stars, 8)
+        self.assertTrue(courses["Oni"].branch)
+        self.assertEqual(courses["Hard"].stars, 5)
 
     def test_determine_category_from_directory(self):
         tmp_dir = Path(self._tmp_dir())
@@ -214,6 +215,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(inserted['locale']['en']['title'], 'BadTitle')
         self.assertEqual(inserted['locale']['ja']['title'], 'テ スト')
         self.assertEqual(inserted['locale']['ja']['subtitle'], '副題')
+        self.assertIn('charts', inserted)
 
     def test_fast_scan_skips_unchanged_files(self):
         tmp_dir = Path(self._tmp_dir())
@@ -245,6 +247,130 @@ class TestSongsScanner(unittest.TestCase):
         third_summary = scanner.scan()
         self.assertEqual(third_summary['updated'], 1)
         self.assertEqual(third_summary['skipped'], 0)
+
+    def test_course_alias_normalization(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = Path(tmp_dir) / "alias.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Alias Test",
+            "WAVE:dummy.ogg",
+            "COURSE:Kara-Kuchi",
+            "LEVEL:4",
+            "#START",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+        courses = {course.canonical: course for course in parsed.courses}
+
+        self.assertIn("Normal", courses)
+        self.assertEqual(courses["Normal"].stars, 4)
+
+    def test_scanner_merges_multiple_tja_into_single_song(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = songs_dir / "song.ogg"
+        audio_path.write_bytes(b"audio-bytes")
+
+        easy_tja = songs_dir / "easy.tja"
+        easy_tja.write_text("\n".join([
+            "TITLE:Merge Test",
+            "WAVE:song.ogg",
+            "COURSE:Easy",
+            "LEVEL:3",
+            "#START",
+            "#END",
+        ]), encoding="utf-8")
+
+        oni_tja = songs_dir / "oni.tja"
+        oni_tja.write_text("\n".join([
+            "TITLE:Merge Test",
+            "WAVE:song.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        self.assertEqual(len(db.songs.inserted), 1)
+        inserted = db.songs.inserted[0]
+        self.assertIn('charts', inserted)
+        courses = {chart['course']: chart for chart in inserted['charts']}
+        self.assertIn('Easy', courses)
+        self.assertIn('Oni', courses)
+        self.assertEqual(inserted.get('valid_chart_count'), 2)
+        self.assertEqual(inserted.get('genre'), 'Unsorted')
+
+        # Second scan should not duplicate charts
+        followup_summary = scanner.scan(full=False)
+        self.assertEqual(followup_summary['updated'], 0)
+        self.assertEqual(followup_summary['skipped'], 2)
+        existing = db.songs._docs[0]
+        self.assertEqual(len(existing['charts']), 2)
+
+    def test_scanner_normalizes_alias_courses_and_genre_fallback(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        track_dir = songs_dir / "Taiko Tower 01"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = track_dir / "tower.ogg"
+        audio_path.write_bytes(b"tower-audio")
+        tja_path = track_dir / "tower.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Mix",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "0,",
+            "#END",
+            "COURSE:Ama-kuchi",
+            "LEVEL:2",
+            "#START",
+            "0,",
+            "#END",
+            "COURSE:Kara-kuchi",
+            "LEVEL:4",
+            "#START",
+            "0,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        courses = {chart['course']: chart for chart in inserted['charts']}
+        self.assertIn('Oni', courses)
+        self.assertIn('Easy', courses)
+        self.assertIn('Normal', courses)
+        self.assertTrue(courses['Oni']['valid'])
+        self.assertTrue(courses['Easy']['valid'])
+        self.assertTrue(courses['Normal']['valid'])
+        self.assertNotIn('unknown-course', inserted.get('import_issues', []))
+        self.assertEqual(inserted.get('genre'), 'Taiko Tower 01')
+        self.assertEqual(inserted.get('category_id'), 0)
+        self.assertEqual(inserted.get('valid_chart_count'), 3)
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

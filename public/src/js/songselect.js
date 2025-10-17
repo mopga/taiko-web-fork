@@ -1694,11 +1694,11 @@ class SongSelect{
 			})
 		}
 		
-		this.draw.songFrame({
-			ctx: ctx,
-			x: winW / 2 - selectedWidth / 2 + xOffset,
-			y: songTop + this.songAsset.height - selectedHeight,
-			width: selectedWidth,
+                        this.draw.songFrame({
+                                ctx: ctx,
+                                x: winW / 2 - selectedWidth / 2 + xOffset,
+                                y: songTop + this.songAsset.height - selectedHeight,
+                                width: selectedWidth,
 			height: selectedHeight,
 			border: this.songAsset.border,
 			innerBorder: this.songAsset.innerBorder,
@@ -1706,17 +1706,29 @@ class SongSelect{
 			borderStyle: selectedSkin.border,
 			highlight: highlight,
 			noCrop: screen === "difficulty",
-			animateMS: Math.max(this.state.moveMS, this.state.mouseMoveMS),
-			cached: selectedWidth === this.songAsset.fullWidth ? 3 : (selectedWidth === this.songAsset.selectedWidth ? 2 : (selectedWidth === this.songAsset.width ? 1 : 0)),
-			frameCache: this.songFrameCache,
-			disabled: p2.session && currentSong.action && !currentSong.p2Enabled,
-			innerContent: (x, y, w, h) => {
-				ctx.strokeStyle = "#000"
-				if(screen === "title" || screen === "titleFadeIn" || screen === "song"){
-					var opened = ((selectedWidth - this.songAsset.width) / (this.songAsset.selectedWidth - this.songAsset.width))
-					var songSel = true
-				}else{
-					var textW = strings.id === "en" ? 350 : 280
+                                animateMS: Math.max(this.state.moveMS, this.state.mouseMoveMS),
+                                cached: selectedWidth === this.songAsset.fullWidth ? 3 : (selectedWidth === this.songAsset.selectedWidth ? 2 : (selectedWidth === this.songAsset.width ? 1 : 0)),
+                                frameCache: this.songFrameCache,
+                                disabled: p2.session && currentSong.action && !currentSong.p2Enabled,
+                                innerContent: (x, y, w, h) => {
+                                        ctx.strokeStyle = "#000"
+                                        if(!currentSong.courses){
+                                                var warningText = (currentSong.import_issues && currentSong.import_issues.length) ? currentSong.import_issues[0] : strings.noValidCourse
+                                                ctx.save()
+                                                ctx.font = "24px " + this.font
+                                                ctx.textAlign = "right"
+                                                ctx.fillStyle = "#f8d24b"
+                                                ctx.fillText("⚠", x + w - 18, y + 30)
+                                                ctx.textAlign = "left"
+                                                ctx.fillStyle = "#ffffff"
+                                                ctx.fillText(warningText, x + 20, y + h - 20)
+                                                ctx.restore()
+                                        }
+                                        if(screen === "title" || screen === "titleFadeIn" || screen === "song"){
+                                                var opened = ((selectedWidth - this.songAsset.width) / (this.songAsset.selectedWidth - this.songAsset.width))
+                                                var songSel = true
+                                        }else{
+                                                var textW = strings.id === "en" ? 350 : 280
 					this.selectTextCache.get({
 						ctx: ctx,
 						x: frameLeft,

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>TJA Import Report</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 2rem;
+            background: #f7f7f7;
+            color: #222;
+        }
+        h1 {
+            font-size: 1.8rem;
+            margin-bottom: 0.5rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 2rem;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            padding: 0.5rem;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background: #eee;
+        }
+        .issues {
+            color: #c0392b;
+        }
+        .ok {
+            color: #27ae60;
+        }
+        .summary {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        .group {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+        }
+        .group h2 {
+            margin-top: 0;
+            font-size: 1.3rem;
+        }
+        .record {
+            border-top: 1px solid #eee;
+            padding-top: 1rem;
+            margin-top: 1rem;
+        }
+        .record:first-of-type {
+            border-top: none;
+            padding-top: 0;
+            margin-top: 0;
+        }
+        ul {
+            margin: 0.25rem 0 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>TJA Import Report</h1>
+    <p>Generated at {{ generated_at.isoformat() }}Z</p>
+    <div class="summary">
+        <strong>Summary</strong>
+        <ul>
+            <li>Total groups: {{ summary.groups }}</li>
+            <li>Total TJA files: {{ summary.records }}</li>
+            <li>Groups with issues: {{ summary.groups_with_issues }}</li>
+            <li>Total charts: {{ summary.total_charts }}</li>
+            <li>Valid charts: {{ summary.valid_charts }}</li>
+        </ul>
+    </div>
+    {% if not groups %}
+        <p class="ok">No import records found.</p>
+    {% else %}
+        {% for group in groups %}
+            <div class="group">
+                <h2>
+                    {% if group.song_id %}
+                        Song #{{ group.song_id }}
+                    {% else %}
+                        Untracked Song
+                    {% endif %}
+                    {% if group.title %} – {{ group.title }}{% endif %}
+                </h2>
+                <p><strong>Group key:</strong> {{ group.group_key }}</p>
+                {% if group.audio_url %}
+                    <p><strong>Audio:</strong> <a href="{{ group.audio_url }}">{{ group.audio_url }}</a></p>
+                {% endif %}
+                <p><strong>Total charts:</strong> {{ group.total_charts }} | <strong>Valid charts:</strong> {{ group.valid_chart_count }}</p>
+                {% if group.issues %}
+                    <p class="issues"><strong>Import issues:</strong> {{ group.issues | join(', ') }}</p>
+                {% else %}
+                    <p class="ok">No import issues detected.</p>
+                {% endif %}
+                {% if group.diagnostics %}
+                    <p><strong>Diagnostics:</strong> {{ group.diagnostics | join(', ') }}</p>
+                {% endif %}
+                {% for record in group.records %}
+                    <div class="record">
+                        <h3>{{ record.title or 'Untitled chart' }}</h3>
+                        <p><strong>TJA path:</strong> {{ record.tja_path }}</p>
+                        {% if record.genre %}
+                            <p><strong>Genre/category:</strong> {{ record.genre }}</p>
+                        {% endif %}
+                        {% if record.import_issues %}
+                            <p class="issues"><strong>Chart issues:</strong> {{ record.import_issues | join(', ') }}</p>
+                        {% endif %}
+                        {% if record.diagnostics %}
+                            <p><strong>Diagnostics:</strong> {{ record.diagnostics | join(', ') }}</p>
+                        {% endif %}
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Course</th>
+                                    <th>Level</th>
+                                    <th>Status</th>
+                                    <th>Issues</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for chart in record.charts %}
+                                    <tr>
+                                        <td>{{ chart.course }}</td>
+                                        <td>{{ chart.level if chart.level is not none else '—' }}</td>
+                                        <td>
+                                            {% if chart.valid %}
+                                                <span class="ok">Valid{% if chart.coerced %} (coerced){% endif %}</span>
+                                            {% else %}
+                                                <span class="issues">Invalid{% if chart.coerced %} (coerced){% endif %}</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{% if chart.issues %}{{ chart.issues | join(', ') }}{% else %}—{% endif %}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endfor %}
+    {% endif %}
+</body>
+</html>
