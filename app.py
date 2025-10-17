@@ -78,9 +78,16 @@ def take_config(name, required=False):
 
 app = Flask(__name__)
 
-mongo_config = take_config('MONGO', required=True)
-mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config['host']
-client = MongoClient(host=mongo_host)
+mongo_config = take_config('MONGO') or {}
+mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
+mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
+
+if mongo_uri:
+    client = MongoClient(mongo_uri)
+else:
+    if not mongo_host:
+        mongo_host = ['127.0.0.1:27017']
+    client = MongoClient(host=mongo_host)
 
 basedir = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
 
@@ -110,7 +117,7 @@ sess = Session()
 sess.init_app(app)
 #csrf = CSRFProtect(app)
 
-db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config['database']
+db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
 db = client[db_name]
 db.users.create_index('username', unique=True)
 db.songs.create_index('id', unique=True)

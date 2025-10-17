@@ -51,6 +51,8 @@ taiko.db
 version.json
 public/index.html
 config.py
+!config/
+!config/config.py
 public/assets/song_skins
 .venv
 public/src/js/plugin
