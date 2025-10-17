@@ -994,6 +994,9 @@ def _start_song_directory_watcher():
     if not song_scanner.watchdog_supported:
         app.logger.info('watchdog not available; live song updates disabled')
         return
+    if not SONGS_DIR_PATH.exists():
+        app.logger.warning('Songs directory %s missing; live song updates disabled', SONGS_DIR_PATH)
+        return
 
     def _run_scan():
         with app.app_context():
@@ -1007,6 +1010,10 @@ def _start_song_directory_watcher():
         if handle:
             app.logger.info('Song directory watcher started')
             _song_watcher_handle = handle
+    except KeyboardInterrupt:
+        raise
+    except SystemExit as exc:
+        app.logger.error('Failed to start song directory watcher (exiting): %s', exc, exc_info=True)
     except Exception:
         app.logger.exception('Failed to start song directory watcher')
 
