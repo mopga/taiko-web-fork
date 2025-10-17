@@ -1041,7 +1041,33 @@ def _start_song_directory_watcher():
         app.logger.exception('Failed to start song directory watcher')
 
 
-@app.before_serving
+# Flask 3 removed the ``before_serving`` decorator. Provide a compatible fallback
+# that runs the hook before the first request is processed so that the song
+# directory watcher still starts automatically.
+if hasattr(app, "before_serving"):
+    _song_watcher_hook = app.before_serving
+else:
+    def _song_watcher_hook(func):
+        has_run = False
+
+        @wraps(func)
+        def _run_once():
+            nonlocal has_run
+            if has_run:
+                return
+            has_run = True
+            try:
+                func()
+            finally:
+                funcs = app.before_request_funcs.get(None)
+                if funcs and _run_once in funcs:
+                    funcs.remove(_run_once)
+
+        app.before_request(_run_once)
+        return func
+
+
+@_song_watcher_hook
 def _ensure_song_directory_watcher_started():
     _start_song_directory_watcher()
 
