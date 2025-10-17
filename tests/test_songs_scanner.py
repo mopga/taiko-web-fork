@@ -8,25 +8,120 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from songs_scanner import SongScanner, parse_tja
 
 
-class _DummyCollection:
-    def find_one(self, *args, **kwargs):
+class _MemoryCollection:
+    def __init__(self):
+        self._docs = []
+
+    def create_index(self, *args, **kwargs):
         return None
 
-    def find(self, *args, **kwargs):
-        return []
+    def _matches(self, doc, filter_):
+        if not filter_:
+            return True
+        for key, expected in filter_.items():
+            value = self._resolve_key(doc, key)
+            if isinstance(expected, dict):
+                if '$in' in expected and value not in expected['$in']:
+                    return False
+                if '$nin' in expected and value in expected['$nin']:
+                    return False
+            else:
+                if value != expected:
+                    return False
+        return True
 
-    def update_one(self, *args, **kwargs):
-        return None
+    def _resolve_key(self, doc, dotted):
+        current = doc
+        for part in dotted.split('.'):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return None
+        return current
 
-    def insert_one(self, *args, **kwargs):
-        return None
+    def _project(self, doc, projection):
+        if not projection:
+            return dict(doc)
+        include_keys = {key for key, enabled in projection.items() if enabled}
+        if not include_keys:
+            return dict(doc)
+        projected = {}
+        for key in include_keys:
+            projected[key] = self._resolve_key(doc, key)
+        return projected
+
+    def find_one(self, filter_=None, projection=None, sort=None, **kwargs):
+        matches = [doc for doc in self._docs if self._matches(doc, filter_ or {})]
+        if sort:
+            for key, direction in reversed(sort):
+                reverse = direction < 0
+                matches.sort(key=lambda doc, k=key: self._resolve_key(doc, k), reverse=reverse)
+        if not matches:
+            return None
+        return self._project(matches[0], projection or {})
+
+    def find(self, filter_=None, projection=None):
+        for doc in list(self._docs):
+            if self._matches(doc, filter_ or {}):
+                yield self._project(doc, projection or {})
+
+    def insert_one(self, document):
+        self._docs.append(dict(document))
+
+    def update_one(self, filter_, update, upsert=False):
+        for doc in self._docs:
+            if self._matches(doc, filter_ or {}):
+                if '$set' in update:
+                    doc.update(update['$set'])
+                return
+        if upsert and '$set' in update:
+            new_doc = dict(update['$set'])
+            if filter_:
+                for key, value in filter_.items():
+                    if isinstance(value, dict):
+                        continue
+                    new_doc[key] = value
+            self._docs.append(new_doc)
+
+    def delete_many(self, filter_):
+        self._docs = [doc for doc in self._docs if not self._matches(doc, filter_ or {})]
+
+
+class _SeqCollection(_MemoryCollection):
+    def __init__(self):
+        super().__init__()
+        self._docs = [{'name': 'songs', 'value': 0}]
+
+    def find_one(self, filter_=None, projection=None):
+        return super().find_one(filter_, projection)
+
+    def update_one(self, filter_, update, upsert=False):
+        for doc in self._docs:
+            if self._matches(doc, filter_ or {}):
+                if '$set' in update:
+                    doc.update(update['$set'])
+                return
+        if upsert:
+            super().update_one(filter_, update, upsert=True)
+
+
+class _SongsCollection(_MemoryCollection):
+    def __init__(self):
+        super().__init__()
+        self.inserted = []
+
+    def insert_one(self, document):
+        copy = dict(document)
+        self.inserted.append(copy)
+        super().insert_one(copy)
 
 
 class _DummyDB:
     def __init__(self):
-        self.seq = _DummyCollection()
-        self.songs = _DummyCollection()
-        self.categories = _DummyCollection()
+        self.seq = _SeqCollection()
+        self.songs = _SongsCollection()
+        self.categories = _MemoryCollection()
+        self.song_scanner_state = _MemoryCollection()
 
 
 class TestSongsScanner(unittest.TestCase):
@@ -96,29 +191,7 @@ class TestSongsScanner(unittest.TestCase):
             encoding="utf-8",
         )
 
-        class _SeqCollection(_DummyCollection):
-            def __init__(self):
-                self.value = 0
-
-            def find_one(self, *args, **kwargs):
-                if args and args[0].get('name') == 'songs':
-                    return {'name': 'songs', 'value': self.value}
-                return None
-
-            def update_one(self, *args, **kwargs):
-                update = args[1]
-                self.value = update.get('$set', {}).get('value', self.value)
-
-        class _SongsCollection(_DummyCollection):
-            def __init__(self):
-                self.inserted = []
-
-            def insert_one(self, document):
-                self.inserted.append(document.copy())
-
         collecting_db = _DummyDB()
-        collecting_db.seq = _SeqCollection()
-        collecting_db.songs = _SongsCollection()
 
         scanner = SongScanner(
             db=collecting_db,
@@ -141,6 +214,37 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(inserted['locale']['en']['title'], 'BadTitle')
         self.assertEqual(inserted['locale']['ja']['title'], 'テ スト')
         self.assertEqual(inserted['locale']['ja']['subtitle'], '副題')
+
+    def test_fast_scan_skips_unchanged_files(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = songs_dir / "song.tja"
+        tja_path.write_text("TITLE:First\nWAVE:song.ogg\n", encoding="utf-8")
+        audio_path = songs_dir / "song.ogg"
+        audio_path.write_bytes(b"12345")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan()
+        self.assertEqual(first_summary['inserted'], 1)
+        self.assertEqual(first_summary['skipped'], 0)
+
+        second_summary = scanner.scan()
+        self.assertEqual(second_summary['inserted'], 0)
+        self.assertEqual(second_summary['updated'], 0)
+        self.assertEqual(second_summary['skipped'], 1)
+
+        audio_path.write_bytes(b"changed")
+        third_summary = scanner.scan()
+        self.assertEqual(third_summary['updated'], 1)
+        self.assertEqual(third_summary['skipped'], 0)
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

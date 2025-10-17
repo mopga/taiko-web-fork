@@ -122,6 +122,32 @@ db = client[db_name]
 db.users.create_index('username', unique=True)
 db.songs.create_index('id', unique=True)
 db.scores.create_index('username')
+try:
+    db.song_scanner_state.create_index('tja_path', unique=True)
+except Exception:
+    app.logger.debug('Could not ensure song_scanner_state index')
+
+
+@app.route('/healthz')
+def route_healthcheck():
+    status = {'status': 'ok'}
+    try:
+        client.admin.command('ping')
+        status['mongo'] = 'ok'
+    except Exception:
+        status['status'] = 'error'
+        status['mongo'] = 'error'
+        return jsonify(status), 503
+    try:
+        redis_client = app.config.get('SESSION_REDIS')
+        if redis_client:
+            redis_client.ping()
+        status['redis'] = 'ok'
+    except Exception:
+        status['status'] = 'error'
+        status['redis'] = 'error'
+        return jsonify(status), 503
+    return jsonify(status)
 
 def _resolve_baseurl(value):
     if not value:
@@ -149,6 +175,8 @@ song_scanner = SongScanner(
     songs_baseurl=SONGS_BASEURL_VALUE,
     ignore_globs=SCAN_IGNORE_GLOBS,
 )
+
+_song_watcher_handle = None
 
 
 class HashException(Exception):
@@ -619,8 +647,8 @@ def invalidate_song_cache():
         pass
 
 
-def perform_song_scan():
-    summary = song_scanner.scan()
+def perform_song_scan(*, full: bool = False):
+    summary = song_scanner.scan(full=full)
     invalidate_song_cache()
     app.logger.info("Song scan finished: %s", summary)
     return summary
@@ -641,6 +669,21 @@ def _get_scan_token():
     return request.args.get('token')
 
 
+def _should_run_full_scan(request_json):
+    if isinstance(request_json, dict):
+        mode = request_json.get('mode')
+        if isinstance(mode, str) and mode.lower() in {'full', 'complete', 'all'}:
+            return True
+        if str(request_json.get('full', '')).lower() in {'1', 'true', 'yes'}:
+            return True
+    for source in (request.form, request.args):
+        if source.get('mode', '').lower() in {'full', 'complete', 'all'}:
+            return True
+        if source.get('full', '').lower() in {'1', 'true', 'yes'}:
+            return True
+    return False
+
+
 @app.route(basedir + 'api/admin/scan', methods=['POST'])
 def route_admin_scan():
     token = _get_scan_token()
@@ -648,7 +691,8 @@ def route_admin_scan():
         app.logger.warning('Unauthorized scan attempt')
         return abort(403)
 
-    summary = perform_song_scan()
+    payload = request.get_json(silent=True) or {}
+    summary = perform_song_scan(full=_should_run_full_scan(payload))
     return jsonify({'status': 'ok', 'summary': summary})
 
 @app.route(basedir + 'api/config')
@@ -941,6 +985,33 @@ if SCAN_ON_START:
         perform_song_scan()
     except Exception:
         app.logger.exception('Automatic song scan failed')
+
+
+def _start_song_directory_watcher():
+    global _song_watcher_handle
+    if _song_watcher_handle is not None:
+        return
+    if not song_scanner.watchdog_supported:
+        app.logger.info('watchdog not available; live song updates disabled')
+        return
+
+    def _run_scan():
+        with app.app_context():
+            try:
+                perform_song_scan(full=False)
+            except Exception:
+                app.logger.exception('Live song scan failed')
+
+    try:
+        handle = song_scanner.start_watcher(callback=_run_scan, debounce_seconds=0.75)
+        if handle:
+            app.logger.info('Song directory watcher started')
+            _song_watcher_handle = handle
+    except Exception:
+        app.logger.exception('Failed to start song directory watcher')
+
+
+_start_song_directory_watcher()
 
 if __name__ == '__main__':
     import argparse

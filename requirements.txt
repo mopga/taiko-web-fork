@@ -11,3 +11,4 @@ redis==6.4.0
 requests==2.32.5
 websockets==15.0.1
 msgspec==0.19.0
+watchdog==5.0.2
