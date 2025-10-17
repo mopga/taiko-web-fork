@@ -13,6 +13,7 @@ import requests
 import schema
 import threading
 import time
+from urllib.parse import unquote
 from collections import defaultdict
 from pathlib import Path
 
@@ -624,15 +625,32 @@ def route_api_songs():
             song['maker'] = None
         song.pop('maker_id', None)
 
+        paths = song.get('paths') or {}
+
         category_id = song.get('category_id')
         genre_value = song.get('genre')
         category_value = None
-        if isinstance(genre_value, str) and genre_value.strip():
-            category_value = genre_value.strip()
-        elif category_id is not None:
+        if isinstance(genre_value, str):
+            trimmed_genre = genre_value.strip()
+            if trimmed_genre:
+                category_value = trimmed_genre
+        if not category_value:
+            dir_url = paths.get('dir_url') if isinstance(paths.get('dir_url'), str) else None
+            if dir_url:
+                relative_dir = dir_url
+                base_url = SONGS_BASEURL_VALUE or ''
+                if base_url and dir_url.startswith(base_url):
+                    relative_dir = dir_url[len(base_url):]
+                relative_dir = relative_dir.strip('/')
+                if relative_dir:
+                    folder_name = unquote(relative_dir).split('/', 1)[0]
+                    if folder_name:
+                        category_value = folder_name
+        if not category_value and category_id is not None:
             category_doc = db.categories.find_one({'id': category_id})
-            category_value = category_doc['title'] if category_doc else 'Unsorted'
-        else:
+            if category_doc:
+                category_value = category_doc.get('title') or 'Unsorted'
+        if not category_value:
             category_value = 'Unsorted'
         song['category'] = category_value
 
@@ -644,7 +662,6 @@ def route_api_songs():
         song.pop('skin_id', None)
         song.pop('managed_by_scanner', None)
 
-        paths = song.get('paths') or {}
         if 'tja_url' not in paths and song.get('type') == 'tja':
             paths['tja_url'] = '%s%s/main.tja' % (SONGS_BASEURL_VALUE, song['id'])
         if 'audio_url' not in paths:

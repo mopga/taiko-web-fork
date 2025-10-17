@@ -246,6 +246,16 @@ def _normalise_title_key(value: str) -> str:
     return value
 
 
+def _derive_genre_from_path(relative_tja: Path, category_title: str) -> str:
+    parts = list(relative_tja.parts)
+    if len(parts) > 1:
+        parent_name = _clean_metadata_value(parts[-2])
+        if parent_name:
+            return parent_name
+    cleaned_category = _clean_metadata_value(category_title) if category_title else None
+    return cleaned_category or DEFAULT_CATEGORY_TITLE
+
+
 def parse_tja(path: Path) -> ParsedTJA:
     original_text, normalised_text = read_tja(path)
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
@@ -516,6 +526,8 @@ class SongScanner:
         if not dir_url.endswith('/'):
             dir_url += '/'
 
+        genre_value = parsed.genre or _derive_genre_from_path(relative_tja, category_title)
+
         record = TjaImportRecord(
             relative_path=relative_tja.as_posix(),
             relative_dir=relative_tja.parent.as_posix(),
@@ -539,7 +551,7 @@ class SongScanner:
             tja_hash=file_hash,
             wave=parsed.wave,
             song_id=parsed.song_id,
-            genre=parsed.genre or category_title,
+            genre=genre_value,
             category_id=category_id,
             category_title=category_title,
             charts=charts,
