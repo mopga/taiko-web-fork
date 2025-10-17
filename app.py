@@ -160,6 +160,26 @@ def _resolve_baseurl(value):
 
 SONGS_DIR_PATH = Path(os.environ.get('SONGS_DIR') or take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
 SCAN_ON_START = take_config('SCAN_ON_START')
+ENABLE_SONG_WATCHER_DEFAULT = True
+
+
+def _coerce_bool(value, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text not in {'0', 'false', 'no', 'off'}
+
+
+ENABLE_SONG_WATCHER = _coerce_bool(
+    os.environ.get('ENABLE_SONG_WATCHER'),
+    _coerce_bool(take_config('ENABLE_SONG_WATCHER'), ENABLE_SONG_WATCHER_DEFAULT),
+)
 scan_env = os.environ.get('SCAN_ON_START')
 if scan_env is not None:
     SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
@@ -991,6 +1011,9 @@ def _start_song_directory_watcher():
     global _song_watcher_handle
     if _song_watcher_handle is not None:
         return
+    if not ENABLE_SONG_WATCHER:
+        app.logger.info('Song directory watcher disabled')
+        return
     if not song_scanner.watchdog_supported:
         app.logger.info('watchdog not available; live song updates disabled')
         return
@@ -1018,7 +1041,9 @@ def _start_song_directory_watcher():
         app.logger.exception('Failed to start song directory watcher')
 
 
-_start_song_directory_watcher()
+@app.before_serving
+def _ensure_song_directory_watcher_started():
+    _start_song_directory_watcher()
 
 if __name__ == '__main__':
     import argparse
