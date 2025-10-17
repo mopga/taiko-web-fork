@@ -13,6 +13,7 @@ import requests
 import schema
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 
 # -- カスタム --
@@ -666,6 +667,124 @@ def route_api_songs():
 def route_api_categories():
     categories = list(db.categories.find({},{'_id': False}))
     return jsonify(categories)
+
+
+@app.route(basedir + 'import/report')
+def route_import_report():
+    state_collection = getattr(db, 'song_scanner_state', None)
+    if state_collection is None:
+        abort(404)
+
+    try:
+        cursor = state_collection.find({}, {'_id': False})
+    except Exception:
+        app.logger.exception('Failed to load song scanner state for report')
+        cursor = []
+
+    grouped: defaultdict[str, list] = defaultdict(list)
+    for doc in cursor:
+        if not isinstance(doc, dict):
+            continue
+        key = doc.get('group_key') or doc.get('tja_path') or 'ungrouped'
+        grouped[str(key)].append(doc)
+
+    report_groups = []
+    for key in sorted(grouped.keys()):
+        docs = grouped[key]
+        song_id = None
+        title = None
+        normalized_title = None
+        audio_url = None
+        issues: set[str] = set()
+        diagnostics: set[str] = set()
+        total_valid = 0
+        total_charts = 0
+        records = []
+
+        for doc in docs:
+            if song_id is None and isinstance(doc.get('song_id'), int):
+                song_id = doc['song_id']
+            record = doc.get('record') if isinstance(doc.get('record'), dict) else {}
+            if not title and isinstance(record.get('title'), str):
+                title = record['title']
+            if not normalized_title and isinstance(record.get('normalized_title'), str):
+                normalized_title = record['normalized_title']
+            if not audio_url and isinstance(record.get('audio_url'), str) and record['audio_url']:
+                audio_url = record['audio_url']
+
+            record_issues = set(record.get('import_issues', []) or [])
+            issues.update(record_issues)
+            diagnostics.update(set(record.get('diagnostics', []) or []))
+
+            charts_raw = record.get('charts', []) or []
+            chart_entries = []
+            for chart in charts_raw:
+                if not isinstance(chart, dict):
+                    continue
+                chart_entry = {
+                    'course': chart.get('course') or 'Unknown',
+                    'level': chart.get('level'),
+                    'valid': bool(chart.get('valid')),
+                    'issues': list(chart.get('issues', []) or []),
+                    'coerced': bool(chart.get('coerced')),
+                    'tja_path': doc.get('tja_path'),
+                }
+                chart_entries.append(chart_entry)
+                if chart_entry['valid']:
+                    total_valid += 1
+                total_charts += 1
+
+            records.append({
+                'tja_path': doc.get('tja_path'),
+                'relative_dir': record.get('relative_dir'),
+                'title': record.get('title'),
+                'genre': record.get('genre'),
+                'category_title': record.get('category_title'),
+                'audio_url': record.get('audio_url'),
+                'import_issues': sorted(record_issues),
+                'diagnostics': sorted(set(record.get('diagnostics', []) or [])),
+                'valid_charts': sum(1 for chart in chart_entries if chart['valid']),
+                'charts': chart_entries,
+            })
+
+        group_entry = {
+            'group_key': key,
+            'song_id': song_id,
+            'title': title,
+            'normalized_title': normalized_title,
+            'audio_url': audio_url,
+            'issues': sorted(issues),
+            'diagnostics': sorted(diagnostics),
+            'valid_chart_count': total_valid,
+            'total_charts': total_charts,
+            'records': records,
+        }
+        report_groups.append(group_entry)
+
+    generated_at = datetime.utcnow()
+    summary = {
+        'groups': len(report_groups),
+        'records': sum(len(group['records']) for group in report_groups),
+        'groups_with_issues': sum(1 for group in report_groups if group['issues']),
+        'total_charts': sum(group['total_charts'] for group in report_groups),
+        'valid_charts': sum(group['valid_chart_count'] for group in report_groups),
+    }
+
+    response_format = request.args.get('format', 'html').lower()
+    if response_format == 'json':
+        payload = {
+            'generated_at': generated_at.isoformat() + 'Z',
+            'summary': summary,
+            'groups': report_groups,
+        }
+        return jsonify(payload)
+
+    return render_template(
+        'import_report.html',
+        groups=report_groups,
+        summary=summary,
+        generated_at=generated_at,
+    )
 
 
 def invalidate_song_cache():

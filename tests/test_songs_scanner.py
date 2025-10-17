@@ -311,6 +311,66 @@ class TestSongsScanner(unittest.TestCase):
         self.assertIn('Easy', courses)
         self.assertIn('Oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
+        self.assertEqual(inserted.get('genre'), 'Unsorted')
+
+        # Second scan should not duplicate charts
+        followup_summary = scanner.scan(full=False)
+        self.assertEqual(followup_summary['updated'], 0)
+        self.assertEqual(followup_summary['skipped'], 2)
+        existing = db.songs._docs[0]
+        self.assertEqual(len(existing['charts']), 2)
+
+    def test_scanner_normalizes_alias_courses_and_genre_fallback(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        track_dir = songs_dir / "Taiko Tower 01"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = track_dir / "tower.ogg"
+        audio_path.write_bytes(b"tower-audio")
+        tja_path = track_dir / "tower.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Mix",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "0,",
+            "#END",
+            "COURSE:Ama-kuchi",
+            "LEVEL:2",
+            "#START",
+            "0,",
+            "#END",
+            "COURSE:Kara-kuchi",
+            "LEVEL:4",
+            "#START",
+            "0,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        courses = {chart['course']: chart for chart in inserted['charts']}
+        self.assertIn('Oni', courses)
+        self.assertIn('Easy', courses)
+        self.assertIn('Normal', courses)
+        self.assertTrue(courses['Oni']['valid'])
+        self.assertTrue(courses['Easy']['valid'])
+        self.assertTrue(courses['Normal']['valid'])
+        self.assertNotIn('unknown-course', inserted.get('import_issues', []))
+        self.assertEqual(inserted.get('genre'), 'Taiko Tower 01')
+        self.assertEqual(inserted.get('category_id'), 0)
+        self.assertEqual(inserted.get('valid_chart_count'), 3)
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

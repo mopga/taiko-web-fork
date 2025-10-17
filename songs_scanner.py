@@ -46,19 +46,18 @@ SUPPORTED_AUDIO_EXTS = [
 COURSE_ALIASES = {
     "EASY": "Easy",
     "KANTAN": "Easy",
+    "AMAKUCHI": "Easy",
     "NORMAL": "Normal",
     "FUTSUU": "Normal",
     "FUTSU": "Normal",
+    "KARAKUCHI": "Normal",
     "HARD": "Hard",
     "MUZUKASHII": "Hard",
     "ONI": "Oni",
-    "URAONI": "UraOni",
-    "URA": "UraOni",
     "EDIT": "Oni",
     "TOWER": "Oni",
-    "AMAKUCHI": "Easy",
-    "KARAKUCHI": "Normal",
-    "KARA-KUCHI": "Normal",
+    "URAONI": "UraOni",
+    "URA": "UraOni",
 }
 
 COURSE_ORDER = ["Easy", "Normal", "Hard", "Oni", "UraOni"]
@@ -819,6 +818,8 @@ class SongScanner:
         parts = relative.parts
         if not parts:
             return 0, DEFAULT_CATEGORY_TITLE
+        if len(parts) == 1:
+            return 0, DEFAULT_CATEGORY_TITLE
         top_folder = parts[0]
         match = re.match(r'^(\d{2})\s+(.+)$', top_folder)
         if match:
@@ -826,7 +827,8 @@ class SongScanner:
             raw_title = match.group(2).strip()
             title = _clean_metadata_value(raw_title) or DEFAULT_CATEGORY_TITLE
             return number, title
-        return 0, DEFAULT_CATEGORY_TITLE
+        fallback = _clean_metadata_value(top_folder) or DEFAULT_CATEGORY_TITLE
+        return 0, fallback
 
     def scan(self, *, full: bool = False) -> Dict[str, int]:
         """Scan songs directory and sync metadata with MongoDB."""
@@ -1022,7 +1024,8 @@ class SongScanner:
                 'fingerprint': fingerprint or record.fingerprint,
             }
 
-            categories[record.category_id] = record.category_title
+            if record.category_id != 0:
+                categories[record.category_id] = record.category_title
 
         song_id_by_key: Dict[str, int] = {}
         for key in sorted(aggregated_records.keys()):
