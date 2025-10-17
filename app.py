@@ -1058,7 +1058,10 @@ else:
             has_run = True
             func()
 
-        app.before_first_request(_run_once)
+        if hasattr(app, "before_first_request"):
+            app.before_first_request(_run_once)
+        else:
+            app.before_request(_run_once)
         return func
 
 
