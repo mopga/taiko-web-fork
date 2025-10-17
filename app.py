@@ -13,7 +13,8 @@ import requests
 import schema
 import threading
 import time
-from urllib.parse import unquote
+import unicodedata
+from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
 
@@ -641,16 +642,30 @@ def route_api_songs():
         if not category_value:
             # derive category from folder name if genre is empty
             category_value = None
-            dir_url = paths.get('dir_url') if isinstance(paths.get('dir_url'), str) else None
-            if dir_url:
-                relative_dir = dir_url
-                base_url = SONGS_BASEURL_VALUE or ''
-                if base_url and dir_url.startswith(base_url):
-                    relative_dir = dir_url[len(base_url):]
-                relative_dir = relative_dir.strip('/')
-                if relative_dir:
-                    folder_name = unquote(relative_dir).split('/', 1)[0]
+            dir_url_value = paths.get('dir_url') if isinstance(paths.get('dir_url'), str) else None
+            if dir_url_value:
+                dir_url_value = dir_url_value.strip()
+            if dir_url_value:
+                base_url_value = (SONGS_BASEURL_VALUE or '').strip()
+                dir_parsed = urlparse(dir_url_value)
+                dir_path = (dir_parsed.path or dir_url_value)
+                dir_path = dir_path.replace('\\', '/').strip('/')
+                base_parts = []
+                if base_url_value:
+                    base_parsed = urlparse(base_url_value)
+                    base_path = (base_parsed.path or base_url_value)
+                    base_path = base_path.replace('\\', '/').strip('/')
+                    if base_path:
+                        base_parts = [part for part in base_path.split('/') if part]
+                dir_parts = [part for part in dir_path.split('/') if part]
+                relative_parts = dir_parts
+                if base_parts and len(dir_parts) >= len(base_parts):
+                    if dir_parts[: len(base_parts)] == base_parts:
+                        relative_parts = dir_parts[len(base_parts):]
+                if relative_parts:
+                    folder_name = unquote(relative_parts[0]).strip()
                     if folder_name:
+                        folder_name = unicodedata.normalize("NFC", folder_name)
                         category_value = folder_name
         song['category'] = category_value or 'Unsorted'
 
