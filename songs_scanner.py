@@ -75,6 +75,8 @@ UNKNOWN_VALUE = "Unknown"
 
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
+NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-8]")
+
 ZERO_WIDTH_CHARACTERS = {
     "\u200b",  # zero width space
     "\u200c",  # zero width non-joiner
@@ -96,6 +98,8 @@ class CourseInfo:
     start_blocks: int = 0
     end_blocks: int = 0
     issues: List[str] = field(default_factory=list)
+    total_notes: int = 0
+    first_note_preview: Optional[str] = None
 
     def add_issue(self, issue: str) -> None:
         if issue not in self.issues:
@@ -128,6 +132,8 @@ class ChartRecord:
     valid: bool
     issues: List[str]
     coerced: bool = False
+    total_notes: int = 0
+    first_note_preview: Optional[str] = None
 
 
 @dataclass
@@ -175,6 +181,34 @@ def md5_text(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def _strip_inline_comments(value: str, *, allow_without_whitespace: bool = False) -> str:
+    """Remove inline // and ; comments from a line of text."""
+
+    comment_markers = ("//", ";")
+    lowest_index: Optional[int] = None
+    for marker in comment_markers:
+        search_start = 0
+        while True:
+            index = value.find(marker, search_start)
+            if index == -1:
+                break
+            if index == 0:
+                should_strip = True
+            elif allow_without_whitespace:
+                should_strip = True
+            else:
+                previous = value[index - 1]
+                should_strip = previous.isspace()
+            if should_strip:
+                if lowest_index is None or index < lowest_index:
+                    lowest_index = index
+                break
+            search_start = index + len(marker)
+    if lowest_index is None:
+        return value
+    return value[:lowest_index]
+
+
 def read_tja(path: Path) -> Tuple[str, str]:
     raw_bytes = path.read_bytes()
     encoding_used: Optional[str] = None
@@ -190,7 +224,7 @@ def read_tja(path: Path) -> Tuple[str, str]:
         encoding_used = "utf-8"
     if encoding_used and not encoding_used.lower().startswith("utf"):
         LOGGER.warning("Decoded %s using non-UTF encoding %s", path, encoding_used)
-    text = unicodedata.normalize("NFC", text)
+    text = unicodedata.normalize("NFC", text.lstrip("\ufeff"))
     normalised = _normalise_newlines(text)
     return text, normalised
 
@@ -262,18 +296,38 @@ def parse_tja(path: Path) -> ParsedTJA:
 
     active_course: Optional[CourseInfo] = None
     known_courses: Dict[str, CourseInfo] = {}
+    current_notes_course: Optional[CourseInfo] = None
+    parsing_notes = False
 
+    first_line = True
     for raw_line in normalised_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("//"):
+        if first_line:
+            raw_line = raw_line.lstrip("\ufeff")
+            first_line = False
+        trimmed_left = raw_line.lstrip()
+        if trimmed_left.startswith("//") or trimmed_left.startswith(";"):
+            continue
+        stripped_comments = _strip_inline_comments(
+            raw_line, allow_without_whitespace=parsing_notes
+        )
+        line = stripped_comments.strip()
+        if not line:
+            continue
+        if line == "...":
+            continue
+        if parsing_notes and set(line) <= {',', ';'}:
             continue
         if line.startswith("#"):
             upper_line = line.upper()
             if active_course:
                 if upper_line == "#START":
                     active_course.start_blocks += 1
+                    current_notes_course = active_course
+                    parsing_notes = True
                 elif upper_line == "#END":
                     active_course.end_blocks += 1
+                    parsing_notes = False
+                    current_notes_course = None
                 elif upper_line.startswith("#BRANCH"):
                     active_course.branch = True
                     if upper_line.startswith("#BRANCHSTART"):
@@ -281,6 +335,23 @@ def parse_tja(path: Path) -> ParsedTJA:
                 elif upper_line in {"#N", "#E", "#M"}:
                     active_course.branch_sections.add(upper_line[1:])
             continue
+
+        if parsing_notes and current_notes_course:
+            tokens = stripped_comments.split(",")
+            saw_digits = False
+            for token in tokens:
+                cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)
+                if not cleaned:
+                    continue
+                saw_digits = True
+                notes = [int(ch) for ch in cleaned]
+                current_notes_course.total_notes += sum(1 for note in notes if note != 0)
+            if saw_digits and current_notes_course.first_note_preview is None:
+                preview = stripped_comments.strip()
+                if preview:
+                    current_notes_course.first_note_preview = preview[:120]
+            continue
+
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
@@ -401,6 +472,19 @@ class SongScanner:
                 self._state_collection.create_index('tja_path', unique=True)
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
+        try:
+            self.db.songs.create_index('group_key', unique=True)
+        except Exception:  # pragma: no cover - tolerate missing create_index
+            LOGGER.debug('Failed to ensure unique index for songs collection')
+        self._import_issues_collection = getattr(self.db, 'import_issues', None)
+        if self._import_issues_collection is not None:
+            try:
+                self._import_issues_collection.create_index(
+                    [('reason', 1), ('path', 1), ('course_raw', 1)],
+                    unique=True,
+                )
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure unique index for import issues collection')
         self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
 
     def _build_chart_records(self, parsed: ParsedTJA, tja_path: Path) -> Tuple[List[ChartRecord], List[str]]:
@@ -426,6 +510,8 @@ class SongScanner:
 
             if course.start_blocks == 0 or course.end_blocks == 0 or course.end_blocks < course.start_blocks:
                 issues.append("missing-chart-content")
+            if course.total_notes == 0:
+                issues.append("empty-chart")
             if course.branch:
                 required_sections = {"N", "E", "M"}
                 if not required_sections.issubset(course.branch_sections):
@@ -435,7 +521,12 @@ class SongScanner:
             if course.stars is None:
                 issues.append("missing-level")
 
-            valid = course_name in COURSE_ORDER and "missing-chart-content" not in issues and "unknown-course" not in issues
+            valid = (
+                course_name in COURSE_ORDER
+                and "missing-chart-content" not in issues
+                and "unknown-course" not in issues
+                and course.total_notes > 0
+            )
 
             if course.branch and "invalid-branch-sections" in issues:
                 valid = False
@@ -449,6 +540,8 @@ class SongScanner:
                 valid=valid,
                 issues=sorted(set(issues)),
                 coerced=coerced,
+                total_notes=course.total_notes,
+                first_note_preview=course.first_note_preview,
             )
             records.append(record)
 
@@ -456,6 +549,27 @@ class SongScanner:
                 import_issues.extend(record.issues)
 
         return records, sorted(set(import_issues))
+
+    def _update_empty_chart_issues(self, relative_tja: Path, record: TjaImportRecord) -> None:
+        if self._import_issues_collection is None:
+            return
+        path = relative_tja.as_posix()
+        for chart in record.charts:
+            course_label = chart.raw_course or chart.course
+            filter_doc = {
+                'reason': 'empty_chart',
+                'path': path,
+                'course_raw': course_label,
+            }
+            try:
+                self._import_issues_collection.delete_many(filter_doc)
+                if 'empty-chart' in chart.issues:
+                    payload = dict(filter_doc)
+                    if chart.first_note_preview:
+                        payload['after_start_token'] = chart.first_note_preview
+                    self._import_issues_collection.insert_one(payload)
+            except Exception:  # pragma: no cover - tolerate collection issues
+                LOGGER.debug('Failed to record empty chart issue for %s (%s)', path, chart.raw_course)
 
     def _build_import_record(
         self,
@@ -558,6 +672,7 @@ class SongScanner:
             import_issues=sorted(set(import_issues)),
             normalized_title=normalized_title,
         )
+        self._update_empty_chart_issues(relative_tja, record)
         return record
 
     def _record_from_state(self, payload: Dict[str, object]) -> Optional[TjaImportRecord]:
@@ -573,6 +688,8 @@ class SongScanner:
                     valid=bool(item.get('valid', False)),
                     issues=list(item.get('issues', [])),
                     coerced=bool(item.get('coerced', False)),
+                    total_notes=int(item.get('total_notes', 0)) if item.get('total_notes') is not None else 0,
+                    first_note_preview=item.get('first_note_preview'),
                 )
                 for item in charts_raw
             ]
@@ -611,11 +728,26 @@ class SongScanner:
             LOGGER.debug('Failed to reconstruct TJA record from state payload')
             return None
 
+    def _extract_folder_token(self, record: TjaImportRecord) -> str:
+        relative_dir = (record.relative_dir or '').strip()
+        if not relative_dir or relative_dir == '.':
+            return ''
+        parts = Path(relative_dir).parts
+        if not parts:
+            return ''
+        folder = _clean_metadata_value(parts[0])
+        folder = folder.replace(':', '_') if folder else ''
+        return folder
+
     def _determine_group_key(self, record: TjaImportRecord) -> str:
         if record.song_id:
             return f"songid:{record.song_id}"
-        audio_part = record.audio_hash or f"missing:{record.relative_dir}:{record.relative_path}"
-        return f"audio:{audio_part}:{record.normalized_title}"
+        folder_token = self._extract_folder_token(record) or '_root'
+        if record.audio_hash:
+            return f"audio:{record.audio_hash}:{folder_token}"
+        fallback_title = record.normalized_title or _normalise_title_key(record.title)
+        missing_part = f"{record.relative_dir}:{record.relative_path}"
+        return f"missing:{folder_token}:{fallback_title}:{missing_part}"
 
     def _select_base_record(self, records: List[TjaImportRecord]) -> TjaImportRecord:
         def _score(record: TjaImportRecord) -> Tuple[int, int, bool]:
@@ -638,6 +770,8 @@ class SongScanner:
                     'valid': chart.valid,
                     'issues': chart.issues,
                     'coerced': chart.coerced,
+                    'total_notes': chart.total_notes,
+                    'first_note_preview': chart.first_note_preview,
                     'tja_path': record.relative_path,
                     'tja_url': record.tja_url,
                 }
