@@ -1056,14 +1056,9 @@ else:
             if has_run:
                 return
             has_run = True
-            try:
-                func()
-            finally:
-                funcs = app.before_request_funcs.get(None)
-                if funcs and _run_once in funcs:
-                    funcs.remove(_run_once)
+            func()
 
-        app.before_request(_run_once)
+        app.before_first_request(_run_once)
         return func
 
 
