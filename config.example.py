@@ -69,3 +69,4 @@ SONGS_DIR = '/app/public/songs'
 SCAN_ON_START = True
 SCAN_IGNORE_GLOBS = ['**/.DS_Store', '**/Thumbs.db']
 ADMIN_SCAN_TOKEN = 'change-me'
+ENABLE_SONG_WATCHER = True
