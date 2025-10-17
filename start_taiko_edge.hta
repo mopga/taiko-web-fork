@@ -47,6 +47,109 @@
     var launcherWidth = 1920;
     var launcherHeight = 1080;
     var resizing = false;
+    var lockAcquired = false;
+    var lockPath = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%") + "\\taiko-web-launcher.lock";
+    var selfPid = null;
+
+    // WMI helpers
+    function wmiService(){
+      try {
+        var locator = new ActiveXObject("WbemScripting.SWbemLocator");
+        return locator.ConnectServer(".", "root\\cimv2");
+      } catch(e){}
+      return null;
+    }
+    function enumerate(query){
+      try {
+        var svc = wmiService();
+        if (!svc) return null;
+        return new Enumerator(svc.ExecQuery(query));
+      } catch(e){}
+      return null;
+    }
+
+    function currentProcessPid(){
+      if (selfPid !== null) return selfPid;
+      try {
+        var target = unescape(window.location.pathname || "").toLowerCase();
+        if (target.length > 2 && target.charAt(0) === "/" && target.charAt(2) === ":") {
+          target = target.substr(1);
+        }
+        target = target.replace(/\//g, "\\");
+        if (target.indexOf("start_taiko_edge.hta") === -1) {
+          target = target + (target.charAt(target.length - 1) === "\\" ? "" : "\\") + "start_taiko_edge.hta";
+        }
+        var items = enumerate("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='mshta.exe'");
+        if (!items) return null;
+        for (; !items.atEnd(); items.moveNext()){
+          var proc = items.item();
+          var cmd = (proc.CommandLine || "").toLowerCase();
+          if (cmd.indexOf(target) !== -1){
+            selfPid = proc.ProcessId;
+            return selfPid;
+          }
+        }
+      } catch(e){}
+      return null;
+    }
+    function pidActive(pid){
+      if (!pid && pid !== 0) return false;
+      try {
+        var items = enumerate("SELECT ProcessId FROM Win32_Process WHERE ProcessId=" + pid);
+        if (!items) return false;
+        for (; !items.atEnd(); items.moveNext()){
+          return true;
+        }
+      } catch(e){}
+      return false;
+    }
+    function readLockPid(){
+      try {
+        if (!fso.FileExists(lockPath)) return null;
+        var f = fso.OpenTextFile(lockPath, 1, false);
+        var txt = f.ReadAll();
+        f.Close();
+        var pid = parseInt(txt, 10);
+        if (!isNaN(pid)) return pid;
+      } catch(e){}
+      return null;
+    }
+    function writeLockPid(pid){
+      try {
+        var f = fso.CreateTextFile(lockPath, true);
+        f.WriteLine(pid);
+        f.Close();
+        lockAcquired = true;
+      } catch(e){}
+    }
+    function acquireLock(){
+      var pid = currentProcessPid();
+      if (pid === null){
+        logLine("WARN: can't determine PID, skipping lock");
+        return true;
+      }
+      var existing = readLockPid();
+      if (existing && existing !== pid){
+        if (pidActive(existing)){
+          logLine("LOCK: already owned by PID " + existing);
+          return false;
+        }
+      }
+      writeLockPid(pid);
+      return true;
+    }
+    function releaseLock(){
+      if (!lockAcquired) return;
+      try {
+        var existing = readLockPid();
+        if (existing !== null && existing !== selfPid) return;
+        if (fso.FileExists(lockPath)){
+          fso.DeleteFile(lockPath, true);
+        }
+        lockAcquired = false;
+      } catch(e){}
+    }
+    window.onunload = releaseLock;
 
     // Paths + log
     function projectDir(){
@@ -222,7 +325,7 @@
       var url = "http://localhost:8000";
       var edge = edgeExe();
       var sizeArgs = ' --window-size=' + launcherWidth + ',' + launcherHeight;
-      var args = ' --app="' + url + '" --new-window --disable-features=msEdgeTabGroups' + sizeArgs;
+      var args = ' --app="' + url + '" --new-window --disable-features=CalculateNativeWinOcclusion,msEdgeTabGroups --disable-backgrounding-occluded-windows' + sizeArgs;
       if (edge){ shell.Run('"' + edge + '"' + args, 0, false); return true; }
       var chrome = chromeExe();
       if (chrome){ shell.Run('"' + chrome + '" --app="' + url + '" --new-window' + sizeArgs, 0, false); return true; }
@@ -230,17 +333,29 @@
       return false;
     }
 
-    function openOnceAndClose(){
+    function openEdgeOnce(){
       if (openedOnce) return;
       openedOnce = true;
       try { if (webTimer)   { clearInterval(webTimer);   webTimer=null; } } catch(e){}
       try { if (dockerTimer){ clearInterval(dockerTimer); dockerTimer=null; } } catch(e){}
-      logLine("OPEN BROWSER (once)");
+      logLine("OPEN EDGE (once)");
       openGameInModernBrowser();
       window.setTimeout(function(){ window.close(); }, 800);
     }
 
     // Main
+    function portBusy(){
+      try {
+        var xhr = new ActiveXObject("MSXML2.XMLHTTP");
+        xhr.open("GET", "http://localhost:8000/?_=" + (new Date()).getTime(), false);
+        xhr.setRequestHeader("Cache-Control","no-cache");
+        xhr.send();
+        if (xhr.status > 0 && xhr.status < 500){
+          return true;
+        }
+      } catch(e){}
+      return false;
+    }
     function fixWindowSize(){
       try {
         if (resizing) return;
@@ -262,15 +377,28 @@
       setBar(2);
       logInit();
 
+      if (!acquireLock()){
+        setText("status", "Запуск уже выполняется.");
+        window.setTimeout(function(){ window.close(); }, 1200);
+        return;
+      }
+
+      if (portBusy()){
+        setText("status", "Сервер уже работает. Открываю игру…");
+        setBar(100);
+        openEdgeOnce();
+        return;
+      }
+
       var dd = dockerDesktopPath();
-      if (dd){ logLine("start Docker Desktop"); shell.Run('"' + dd + '" --background', 0, false); }
+      if (dd){ logLine("Docker Desktop обнаружен, автозапуск пропущен"); }
 
       waitDocker(90, function(){
         setText("hint","Запускаю сервисы игры…"); setBar(10);
         composeUp();
         waitWeb(180, function(){
           setText("status","Готово! Открываю игру…"); setBar(100);
-          openOnceAndClose();
+          openEdgeOnce();
         }, function(){
           byId("status").innerHTML = '<span class="error">Сервер не ответил за 180с.</span>'
             + '<br><br><b>Хвост лога:</b><br><pre class="log">' + readTail(tempLog(), 6000).replace(/</g,'&lt;') + '</pre>';
@@ -300,3 +428,4 @@
   </div>
 </body>
 </html>
+
