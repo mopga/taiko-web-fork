@@ -11,6 +11,7 @@ import os
 import re
 import requests
 import schema
+import threading
 import time
 from pathlib import Path
 
@@ -1049,13 +1050,17 @@ if hasattr(app, "before_serving"):
 else:
     def _song_watcher_hook(func):
         has_run = False
+        lock = threading.Lock()
 
         @wraps(func)
         def _run_once():
             nonlocal has_run
             if has_run:
                 return
-            has_run = True
+            with lock:
+                if has_run:
+                    return
+                has_run = True
             func()
 
         if hasattr(app, "before_first_request"):
