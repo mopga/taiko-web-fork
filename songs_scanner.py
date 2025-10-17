@@ -181,16 +181,29 @@ def md5_text(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def _strip_inline_comments(value: str) -> str:
+def _strip_inline_comments(value: str, *, allow_without_whitespace: bool = False) -> str:
     """Remove inline // and ; comments from a line of text."""
 
-    comment_markers = ["//", ";"]
+    comment_markers = ("//", ";")
     lowest_index: Optional[int] = None
     for marker in comment_markers:
-        index = value.find(marker)
-        if index != -1:
-            if lowest_index is None or index < lowest_index:
-                lowest_index = index
+        search_start = 0
+        while True:
+            index = value.find(marker, search_start)
+            if index == -1:
+                break
+            if index == 0:
+                should_strip = True
+            elif allow_without_whitespace:
+                should_strip = True
+            else:
+                previous = value[index - 1]
+                should_strip = previous.isspace()
+            if should_strip:
+                if lowest_index is None or index < lowest_index:
+                    lowest_index = index
+                break
+            search_start = index + len(marker)
     if lowest_index is None:
         return value
     return value[:lowest_index]
@@ -291,7 +304,12 @@ def parse_tja(path: Path) -> ParsedTJA:
         if first_line:
             raw_line = raw_line.lstrip("\ufeff")
             first_line = False
-        stripped_comments = _strip_inline_comments(raw_line)
+        trimmed_left = raw_line.lstrip()
+        if trimmed_left.startswith("//") or trimmed_left.startswith(";"):
+            continue
+        stripped_comments = _strip_inline_comments(
+            raw_line, allow_without_whitespace=parsing_notes
+        )
         line = stripped_comments.strip()
         if not line:
             continue

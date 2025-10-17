@@ -294,6 +294,26 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.total_notes, 2)
         self.assertEqual(course.first_note_preview, "1,0")
 
+    def test_parse_tja_preserves_metadata_with_comment_markers(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = Path(tmp_dir) / "markers.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Semicolon;Title",
+            "WAVE:http://cdn.example.com/song.ogg",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1 // comment",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(parsed.title, "Semicolon;Title")
+        self.assertEqual(parsed.wave, "http://cdn.example.com/song.ogg")
+        course = parsed.courses[0]
+        self.assertEqual(course.total_notes, 1)
+
     def test_scanner_merges_multiple_tja_into_single_song(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
