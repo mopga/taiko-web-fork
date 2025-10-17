@@ -122,6 +122,7 @@ class _DummyDB:
         self.songs = _SongsCollection()
         self.categories = _MemoryCollection()
         self.song_scanner_state = _MemoryCollection()
+        self.import_issues = _MemoryCollection()
 
 
 class TestSongsScanner(unittest.TestCase):
@@ -257,6 +258,7 @@ class TestSongsScanner(unittest.TestCase):
             "COURSE:Kara-Kuchi",
             "LEVEL:4",
             "#START",
+            "1,0",
             "#END",
         ]), encoding="utf-8")
 
@@ -265,6 +267,32 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertIn("Normal", courses)
         self.assertEqual(courses["Normal"].stars, 4)
+
+    def test_parse_tja_handles_comments_and_placeholders(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = Path(tmp_dir) / "comments.tja"
+        tja_path.write_text("\n".join([
+            "\ufeffTITLE:Comment Test",
+            "WAVE:dummy.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "...",
+            "1,0 // inline comment",
+            "200; semicolon comment",
+            "; full line comment",
+            ",,,",
+            "#END",
+        ]), encoding="utf-8-sig")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        course = parsed.courses[0]
+        self.assertEqual(course.start_blocks, 1)
+        self.assertEqual(course.end_blocks, 1)
+        self.assertEqual(course.total_notes, 2)
+        self.assertEqual(course.first_note_preview, "1,0")
 
     def test_scanner_merges_multiple_tja_into_single_song(self):
         tmp_dir = Path(self._tmp_dir())
@@ -275,21 +303,23 @@ class TestSongsScanner(unittest.TestCase):
 
         easy_tja = songs_dir / "easy.tja"
         easy_tja.write_text("\n".join([
-            "TITLE:Merge Test",
+            "TITLE:Merge Easy",
             "WAVE:song.ogg",
             "COURSE:Easy",
             "LEVEL:3",
             "#START",
+            "1,0",
             "#END",
         ]), encoding="utf-8")
 
         oni_tja = songs_dir / "oni.tja"
         oni_tja.write_text("\n".join([
-            "TITLE:Merge Test",
+            "TITLE:Merge Oni",
             "WAVE:song.ogg",
             "COURSE:Oni",
             "LEVEL:7",
             "#START",
+            "2,0",
             "#END",
         ]), encoding="utf-8")
 
@@ -306,12 +336,14 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(summary['inserted'], 1)
         self.assertEqual(len(db.songs.inserted), 1)
         inserted = db.songs.inserted[0]
+        self.assertEqual(inserted['title'], 'Merge Easy')
         self.assertIn('charts', inserted)
         courses = {chart['course']: chart for chart in inserted['charts']}
         self.assertIn('Easy', courses)
         self.assertIn('Oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
         self.assertEqual(inserted.get('genre'), 'Unsorted')
+        self.assertTrue(all(chart.get('total_notes', 0) > 0 for chart in inserted['charts']))
 
         # Second scan should not duplicate charts
         followup_summary = scanner.scan(full=False)
@@ -334,17 +366,18 @@ class TestSongsScanner(unittest.TestCase):
             "COURSE:Tower",
             "LEVEL:7",
             "#START",
-            "0,",
+            "...",
+            "1,0",
             "#END",
             "COURSE:Ama-kuchi",
             "LEVEL:2",
             "#START",
-            "0,",
+            "1,0",
             "#END",
             "COURSE:Kara-kuchi",
             "LEVEL:4",
             "#START",
-            "0,",
+            "1,0",
             "#END",
         ]), encoding="utf-8")
 
@@ -371,6 +404,45 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(inserted.get('genre'), 'Taiko Tower 01')
         self.assertEqual(inserted.get('category_id'), 0)
         self.assertEqual(inserted.get('valid_chart_count'), 3)
+
+    def test_scanner_flags_empty_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = songs_dir / "empty.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Empty Chart",
+            "WAVE:missing.ogg",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "0,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        chart = inserted['charts'][0]
+        self.assertFalse(chart['valid'])
+        self.assertIn('empty-chart', chart['issues'])
+        self.assertIn('empty-chart', inserted['import_issues'])
+        self.assertEqual(chart.get('total_notes'), 0)
+        issues = db.import_issues._docs
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['reason'], 'empty_chart')
+        self.assertEqual(issues[0]['path'], 'empty.tja')
+        self.assertEqual(issues[0]['course_raw'], 'Oni')
+        self.assertEqual(issues[0].get('after_start_token'), '0,0')
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()
