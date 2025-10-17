@@ -634,7 +634,13 @@ def route_api_songs():
             trimmed_genre = genre_value.strip()
             if trimmed_genre:
                 category_value = trimmed_genre
+        if not category_value and category_id is not None:
+            category_doc = db.categories.find_one({'id': category_id})
+            if category_doc:
+                category_value = category_doc.get('title') or 'Unsorted'
         if not category_value:
+            # derive category from folder name if genre is empty
+            category_value = None
             dir_url = paths.get('dir_url') if isinstance(paths.get('dir_url'), str) else None
             if dir_url:
                 relative_dir = dir_url
@@ -646,13 +652,7 @@ def route_api_songs():
                     folder_name = unquote(relative_dir).split('/', 1)[0]
                     if folder_name:
                         category_value = folder_name
-        if not category_value and category_id is not None:
-            category_doc = db.categories.find_one({'id': category_id})
-            if category_doc:
-                category_value = category_doc.get('title') or 'Unsorted'
-        if not category_value:
-            category_value = 'Unsorted'
-        song['category'] = category_value
+        song['category'] = category_value or 'Unsorted'
 
         skin_id = song.get('skin_id')
         if skin_id:

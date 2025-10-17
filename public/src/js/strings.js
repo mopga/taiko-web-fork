@@ -241,7 +241,6 @@ var translations = {
                 ko: "파일에 접근할 수 있는 권한이 부여되지 않았습니다."
         },
         loaderStatus: loaderMessages,
-        loading: loaderMessages.loading,
         noValidCourse: {
                 ja: "有効なコースがありません",
                 en: "No valid courses (COURSE)",
@@ -249,8 +248,7 @@ var translations = {
                 tw: "沒有有效的COURSE",
                 ko: "유효한 COURSE가 없습니다"
         },
-        waitingForP2: loaderMessages.waitingForP2,
-	cancel: {
+        cancel: {
 		ja: "キャンセル",
 		en: "Cancel",
 		cn: "取消",
@@ -1510,3 +1508,11 @@ function separateStrings(){
 	}
 }
 separateStrings()
+for(var j in languageList){
+        var lang = languageList[j]
+        var str = allStrings[lang]
+        if(str.loaderStatus){
+                str.loading = str.loaderStatus.loading
+                str.waitingForP2 = str.loaderStatus.waitingForP2
+        }
+}
