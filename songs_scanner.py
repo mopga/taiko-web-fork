@@ -105,6 +105,8 @@ SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
 HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
 
+# NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
+# can be scanned in MVP mode without full exam support.
 DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
 
 COURSE_DOWNCAST_MAP = {
@@ -440,6 +442,10 @@ def _resolve_course(value: str, *, path: Optional[Path] = None) -> Tuple[str, st
         issue = "mapped-course"
     else:
         canonical = COURSE_ALIASES.get(token)
+        if canonical is None and path is not None:
+            taste = _detect_taste_marker(path)
+            if taste:
+                canonical = taste
 
     if canonical is None and token.isdigit():
         try:

@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -35,6 +36,9 @@ from pymongo import MongoClient, ReturnDocument
 from redis import Redis
 
 from songs_scanner import SongScanner
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_config_module():
@@ -442,6 +446,7 @@ def _peek_next_song_id():
 def _get_next_song_id():
     counter = getattr(db, 'counters', None)
     if counter is not None:
+        last_failure = None
         for attempt in range(3):
             try:
                 doc = counter.find_one_and_update(
@@ -450,11 +455,22 @@ def _get_next_song_id():
                     upsert=True,
                     return_document=ReturnDocument.AFTER,
                 )
-            except Exception:
-                time.sleep(0.05 * (attempt + 1))
+            except Exception as exc:
+                last_failure = exc
+                delay = 0.05 * (attempt + 1)
+                LOGGER.warning(
+                    'Failed to increment songs counter (attempt %d/3); retrying in %.2fs: %s',
+                    attempt + 1,
+                    delay,
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(delay)
                 continue
             if isinstance(doc, dict) and isinstance(doc.get('seq'), int):
                 return doc['seq']
+        if last_failure is not None:
+            LOGGER.warning('Falling back to legacy song id allocation after counter failures')
     seq = getattr(db, 'seq', None)
     if seq is not None:
         seq_doc = seq.find_one({'name': 'songs'})
