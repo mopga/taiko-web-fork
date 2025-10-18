@@ -5,7 +5,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from songs_scanner import SongScanner, TjaImportRecord, parse_tja
+from songs_scanner import SongScanner, TjaImportRecord, compute_group_key, parse_tja
 
 
 class _MemoryCollection:
@@ -21,6 +21,8 @@ class _MemoryCollection:
         for key, expected in filter_.items():
             value = self._resolve_key(doc, key)
             if isinstance(expected, dict):
+                if '$ne' in expected and value == expected['$ne']:
+                    return False
                 if '$in' in expected and value not in expected['$in']:
                     return False
                 if '$nin' in expected and value in expected['$nin']:
@@ -38,6 +40,136 @@ class _MemoryCollection:
             else:
                 return None
         return current
+
+    def _clone(self, value):
+        if isinstance(value, dict):
+            return {k: self._clone(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._clone(v) for v in value]
+        return value
+
+    def _set_path(self, doc, dotted, value):
+        parts = dotted.split('.')
+        target = doc
+        for part in parts[:-1]:
+            if isinstance(target, dict):
+                target = target.setdefault(part, {})
+            else:
+                return
+        if isinstance(target, dict):
+            target[parts[-1]] = value
+
+    def _parse_array_filters(self, array_filters):
+        mapping = {}
+        for filter_doc in array_filters or []:
+            for key, expected in filter_doc.items():
+                placeholder, *path = key.split('.')
+                mapping.setdefault(placeholder, []).append((path, expected))
+        return mapping
+
+    def _element_matches_filter(self, element, filters):
+        if not filters:
+            return True
+        for path, expected in filters:
+            value = element
+            for part in path:
+                if isinstance(value, dict):
+                    value = value.get(part)
+                else:
+                    value = None
+                    break
+            if isinstance(expected, dict):
+                if '$in' in expected and value not in expected['$in']:
+                    return False
+                if '$nin' in expected and value in expected['$nin']:
+                    return False
+                if '$ne' in expected and value == expected['$ne']:
+                    return False
+                continue
+            if value != expected:
+                return False
+        return True
+
+    def _apply_array_set(self, doc, path, value, array_filters):
+        parts = path.split('.')
+        if len(parts) < 2:
+            self._set_path(doc, path, self._clone(value))
+            return
+        array_field = parts[0]
+        placeholder = parts[1]
+        if not placeholder.startswith('$['):
+            self._set_path(doc, path, self._clone(value))
+            return
+        placeholder_key = placeholder[2:-1]
+        remaining = parts[2:]
+        array = doc.setdefault(array_field, [])
+        if not isinstance(array, list):
+            return
+        filters_map = self._parse_array_filters(array_filters)
+        filter_conditions = filters_map.get(placeholder_key, [])
+        for index, element in enumerate(array):
+            if isinstance(element, dict) or not remaining:
+                if self._element_matches_filter(element, filter_conditions):
+                    if not remaining:
+                        array[index] = self._clone(value)
+                    else:
+                        target = element if isinstance(element, dict) else {}
+                        if not isinstance(element, dict):
+                            array[index] = target
+                        self._set_path(target, '.'.join(remaining), self._clone(value))
+
+    def _should_pull(self, element, condition):
+        if isinstance(condition, dict):
+            for key, expected in condition.items():
+                value = None
+                if isinstance(element, dict):
+                    value = self._resolve_key(element, key) if '.' in key else element.get(key)
+                if isinstance(expected, dict):
+                    if '$nin' in expected:
+                        if value in expected['$nin']:
+                            return False
+                        continue
+                    if '$in' in expected:
+                        if value not in expected['$in']:
+                            return False
+                        continue
+                    if '$ne' in expected:
+                        if value == expected['$ne']:
+                            return False
+                        continue
+                    if '$eq' in expected:
+                        if value != expected['$eq']:
+                            return False
+                        continue
+                    if value != expected:
+                        return False
+                else:
+                    if value != expected:
+                        return False
+            return True
+        return element == condition
+
+    def _apply_update(self, doc, update, *, array_filters=None):
+        if '$set' in update:
+            for key, value in update['$set'].items():
+                if '$[' in key and array_filters:
+                    self._apply_array_set(doc, key, value, array_filters)
+                else:
+                    self._set_path(doc, key, self._clone(value))
+        if '$addToSet' in update:
+            for key, value in update['$addToSet'].items():
+                array = doc.setdefault(key, [])
+                if not isinstance(array, list):
+                    continue
+                candidate = self._clone(value)
+                if candidate not in array:
+                    array.append(candidate)
+        if '$pull' in update:
+            for key, condition in update['$pull'].items():
+                array = doc.get(key)
+                if not isinstance(array, list):
+                    continue
+                doc[key] = [item for item in array if not self._should_pull(item, condition)]
 
     def _project(self, doc, projection):
         if not projection:
@@ -65,17 +197,44 @@ class _MemoryCollection:
             if self._matches(doc, filter_ or {}):
                 yield self._project(doc, projection or {})
 
+    def find_one_and_update(self, filter_, update, upsert=False, return_document=None, **kwargs):
+        doc = None
+        for candidate in self._docs:
+            if self._matches(candidate, filter_ or {}):
+                doc = candidate
+                break
+        inserted = False
+        if doc is None and upsert:
+            base = dict(update.get('$setOnInsert', {}))
+            for key, value in (filter_ or {}).items():
+                if isinstance(value, dict):
+                    continue
+                base.setdefault(key, value)
+            base.setdefault('_id', len(self._docs) + 1)
+            self._docs.append(base)
+            doc = base
+            inserted = True
+            if hasattr(self, 'inserted'):
+                self.inserted.append(doc)
+        if doc is None:
+            return None
+        if update:
+            self._apply_update(doc, update, array_filters=kwargs.get('array_filters'))
+        if inserted and '$setOnInsert' in update:
+            doc.update(update['$setOnInsert'])
+        return dict(doc)
+
     def insert_one(self, document):
         self._docs.append(dict(document))
 
-    def update_one(self, filter_, update, upsert=False):
+    def update_one(self, filter_, update, upsert=False, array_filters=None):
         for doc in self._docs:
             if self._matches(doc, filter_ or {}):
-                if '$set' in update:
-                    doc.update(update['$set'])
+                if update:
+                    self._apply_update(doc, update, array_filters=array_filters)
                 return
         if upsert and '$set' in update:
-            new_doc = dict(update['$set'])
+            new_doc = self._clone(update['$set'])
             if filter_:
                 for key, value in filter_.items():
                     if isinstance(value, dict):
@@ -111,9 +270,8 @@ class _SongsCollection(_MemoryCollection):
         self.inserted = []
 
     def insert_one(self, document):
-        copy = dict(document)
-        self.inserted.append(copy)
-        super().insert_one(copy)
+        super().insert_one(document)
+        self.inserted.append(self._docs[-1])
 
 
 class _DummyDB:
@@ -647,6 +805,160 @@ class TestSongsScanner(unittest.TestCase):
         raw_names = {chart['raw_course'] for chart in unknown_charts}
         self.assertEqual(raw_names, {'Custom Alpha', 'Custom Beta'})
 
+    def test_scanner_atomic_upsert_same_chart_twice(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = songs_dir / "shared.ogg"
+        audio_path.write_bytes(b"shared-audio")
+
+        tja_path = songs_dir / "oni.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Concurrent Oni",
+            "WAVE:shared.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan(full=True)
+        self.assertEqual(first_summary['inserted'], 1)
+
+        second_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        second_summary = second_scanner.scan(full=True)
+        self.assertEqual(second_summary['inserted'], 0)
+
+        docs = list(db.songs.find())
+        self.assertEqual(len(docs), 1)
+        charts = docs[0].get('charts', [])
+        self.assertEqual(len(charts), 1)
+        self.assertEqual(charts[0]['course'], 'Oni')
+
+    def test_scanner_atomic_upsert_merges_distinct_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = songs_dir / "shared.ogg"
+        audio_path.write_bytes(b"shared-audio")
+
+        easy_tja = songs_dir / "easy.tja"
+        easy_tja.write_text("\n".join([
+            "TITLE:Concurrent Easy",
+            "WAVE:shared.ogg",
+            "COURSE:Easy",
+            "LEVEL:3",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        oni_tja = songs_dir / "oni.tja"
+        oni_tja.write_text("\n".join([
+            "TITLE:Concurrent Oni",
+            "WAVE:shared.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan(full=True)
+        self.assertEqual(first_summary['inserted'], 1)
+
+        second_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        second_scanner.scan(full=True)
+
+        docs = list(db.songs.find())
+        self.assertEqual(len(docs), 1)
+        courses = sorted(chart['course'] for chart in docs[0].get('charts', []))
+        self.assertEqual(courses, ['Easy', 'Oni'])
+
+    def test_scanner_repeated_scan_is_idempotent(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = songs_dir / "shared.ogg"
+        audio_path.write_bytes(b"shared-audio")
+
+        easy_tja = songs_dir / "easy.tja"
+        easy_tja.write_text("\n".join([
+            "TITLE:Idempotent Easy",
+            "WAVE:shared.ogg",
+            "COURSE:Easy",
+            "LEVEL:3",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        oni_tja = songs_dir / "oni.tja"
+        oni_tja.write_text("\n".join([
+            "TITLE:Idempotent Oni",
+            "WAVE:shared.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan(full=True)
+        self.assertEqual(first_summary['inserted'], 1)
+
+        docs_after_first = list(db.songs.find())
+        charts_after_first = sum(len(doc.get('charts', [])) for doc in docs_after_first)
+
+        second_summary = scanner.scan(full=False)
+
+        docs_after_second = list(db.songs.find())
+        charts_after_second = sum(len(doc.get('charts', [])) for doc in docs_after_second)
+
+        self.assertEqual(len(docs_after_second), len(docs_after_first))
+        self.assertEqual(charts_after_second, charts_after_first)
+        self.assertEqual(second_summary['inserted'], 0)
+        self.assertEqual(second_summary['updated'], 0)
+
     def test_scanner_handles_realistic_tower_taste_pair(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
@@ -910,7 +1222,7 @@ class TestSongsScanner(unittest.TestCase):
         )
 
         key_with_hash = scanner._determine_group_key(record_with_hash)
-        self.assertEqual(key_with_hash, "audio:deadbeef:Pack")
+        self.assertEqual(key_with_hash, "audio:deadbeef:pack")
 
         record_missing_audio = TjaImportRecord(
             relative_path="pack/oni.tja",
@@ -944,8 +1256,55 @@ class TestSongsScanner(unittest.TestCase):
         )
 
         key_missing_audio = scanner._determine_group_key(record_missing_audio)
-        self.assertTrue(key_missing_audio.startswith("missing:Pack:"))
+        self.assertTrue(key_missing_audio.startswith("missing:pack:"))
         self.assertIn("fallback title", key_missing_audio)
+
+    def test_compute_group_key_normalises_variants(self):
+        base_kwargs = dict(
+            relative_path="Pack%20Name/Sub/Filename.tja",
+            relative_dir="Pack%20Name\\Sub",
+            tja_url="/songs/Pack%20Name/Sub/Filename.tja",
+            dir_url="/songs/Pack%20Name/Sub/",
+            audio_url="/songs/audio.ogg",
+            audio_path="Pack%20Name/Sub/audio.ogg",
+            audio_hash="deadbeef",
+            audio_mtime_ns=None,
+            audio_size=None,
+            music_type=None,
+            diagnostics=[],
+            title="Normalize Test",
+            title_ja=None,
+            subtitle="",
+            subtitle_ja=None,
+            locale={},
+            offset=0.0,
+            preview=0.0,
+            fingerprint="fp",
+            tja_hash="hash",
+            wave="audio.ogg",
+            song_id=None,
+            genre=None,
+            category_id=0,
+            category_title="Unsorted",
+            charts=[],
+            import_issues=[],
+            normalized_title="normalize test",
+        )
+        record_a = TjaImportRecord(**base_kwargs)
+        variant_kwargs = dict(base_kwargs)
+        variant_kwargs.update(
+            {
+                'relative_path': "pack name//sub//filename.tja",
+                'relative_dir': "PACK%20NAME/sub\\\\",
+            }
+        )
+        record_b = TjaImportRecord(**variant_kwargs)
+
+        key_a = compute_group_key(record_a)
+        key_b = compute_group_key(record_b)
+
+        self.assertEqual(key_a, "audio:deadbeef:pack name")
+        self.assertEqual(key_a, key_b)
 
     def test_scanner_normalizes_alias_courses_and_genre_fallback(self):
         tmp_dir = Path(self._tmp_dir())
