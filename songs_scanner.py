@@ -539,12 +539,30 @@ def parse_tja(path: Path) -> ParsedTJA:
             continue
         if stripped_pre.startswith("//") or stripped_pre.startswith(";"):
             continue
+
+        header_line = (
+            _strip_inline_comments(raw_line, allow_without_whitespace=False).strip()
+            if not parsing_notes
+            else ""
+        )
         stripped_comments = _strip_inline_comments(
             raw_line, allow_without_whitespace=parsing_notes
         )
         line = stripped_comments.strip()
-        if not line:
+        if not line and not header_line:
             continue
+
+        metadata_line: Optional[str] = None
+        if (
+            not parsing_notes
+            and header_line
+            and ":" in header_line
+            and not header_line.startswith("#")
+        ):
+            metadata_line = header_line
+        elif ":" in line and not line.startswith("#"):
+            metadata_line = line
+
         if line.startswith("#"):
             upper_line = line.upper()
             directive = upper_line.split(None, 1)[0]
@@ -663,107 +681,112 @@ def parse_tja(path: Path) -> ParsedTJA:
                     current_notes_course.first_note_preview = preview[:120]
             continue
 
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key_upper = key.strip().upper()
-        value_stripped = value.strip()
+        if metadata_line:
+            key, value = metadata_line.split(":", 1)
+            key_upper = key.strip().upper()
+            value_stripped = value.strip()
 
-        clean_value = _clean_metadata_value(value_stripped)
+            clean_value = _clean_metadata_value(value_stripped)
 
-        if key_upper == "TITLE":
-            parsed.title = clean_value
-        elif key_upper == "TITLEJA":
-            parsed.title_ja = clean_value
-        elif key_upper == "SUBTITLE":
-            parsed.subtitle = clean_value
-        elif key_upper == "SUBTITLEJA":
-            parsed.subtitle_ja = clean_value
-        elif key_upper == "OFFSET":
-            try:
-                parsed.offset = float(value_stripped)
-            except ValueError:
-                LOGGER.debug("Invalid OFFSET value '%s' in %s", value_stripped, path)
-        elif key_upper in {"DEMOSTART", "PREVIEW"}:
-            try:
-                parsed.preview = float(value_stripped)
-            except ValueError:
-                LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
-        elif key_upper == "WAVE":
-            clean_wave = clean_value or None
-            if not parsing_notes:
-                parsed.wave = clean_wave
-            current_wave = clean_wave
-            if parsing_notes and current_notes_course and current_notes_course.mode == "dojo":
-                _end_segment(current_notes_course)
-        elif key_upper == "GENRE":
-            parsed.genre = clean_value or None
-        elif key_upper == "SONGID":
-            parsed.song_id = clean_value or None
-        elif key_upper == "COURSE":
-            raw_course_value = value_stripped.strip()
-            normalised_token = _normalise_course_token(raw_course_value)
-            if normalised_token in DOJO_COURSE_TOKENS:
-                active_course = CourseInfo(
-                    canonical="Dojo",
-                    raw_name=raw_course_value,
-                    normalised=normalised_token,
-                    mode="dojo",
-                )
-                parsed.courses.append(active_course)
-                parsed.has_dojo_course = True
-            else:
-                canonical, token, issue = _resolve_course(raw_course_value, path=path)
-                if canonical == "Unknown":
-                    if issue == "unknown_course_numeric":
-                        LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
-                    else:
-                        LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
-                    parsed.skipped_charts += 1
-                    parsed.skipped_unknown_course += 1
-                    active_course = None
-                    current_notes_course = None
-                    parsing_notes = False
+            if key_upper == "TITLE":
+                parsed.title = clean_value
+            elif key_upper == "TITLEJA":
+                parsed.title_ja = clean_value
+            elif key_upper == "SUBTITLE":
+                parsed.subtitle = clean_value
+            elif key_upper == "SUBTITLEJA":
+                parsed.subtitle_ja = clean_value
+            elif key_upper == "OFFSET":
+                try:
+                    parsed.offset = float(value_stripped)
+                except ValueError:
+                    LOGGER.debug("Invalid OFFSET value '%s' in %s", value_stripped, path)
+            elif key_upper in {"DEMOSTART", "PREVIEW"}:
+                try:
+                    parsed.preview = float(value_stripped)
+                except ValueError:
+                    LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
+            elif key_upper == "WAVE":
+                clean_wave = clean_value or None
+                if not parsing_notes:
+                    parsed.wave = clean_wave
+                current_wave = clean_wave
+                if parsing_notes and current_notes_course and current_notes_course.mode == "dojo":
+                    _end_segment(current_notes_course)
+            elif key_upper == "GENRE":
+                parsed.genre = clean_value or None
+            elif key_upper == "SONGID":
+                parsed.song_id = clean_value or None
+            elif key_upper == "COURSE":
+                raw_course_value = value_stripped.strip()
+                normalised_token = _normalise_course_token(raw_course_value)
+                if normalised_token in DOJO_COURSE_TOKENS:
+                    active_course = CourseInfo(
+                        canonical="Dojo",
+                        raw_name=raw_course_value,
+                        normalised=normalised_token,
+                        mode="dojo",
+                    )
+                    parsed.courses.append(active_course)
+                    parsed.has_dojo_course = True
                 else:
-                    if issue == "mapped-course":
-                        LOGGER.info("mapped-course(parser): %s→%s", raw_course_value, canonical)
-                        parsed.mapped_courses += 1
-                    existing = known_courses.get(canonical)
-                    if existing:
-                        active_course = existing
-                        active_course.raw_name = raw_course_value
-                        active_course.normalised = token
+                    canonical, token, issue = _resolve_course(raw_course_value, path=path)
+                    if canonical == "Unknown":
+                        if issue == "unknown_course_numeric":
+                            LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
+                        else:
+                            LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
+                        parsed.skipped_charts += 1
+                        parsed.skipped_unknown_course += 1
+                        active_course = None
+                        current_notes_course = None
+                        parsing_notes = False
                     else:
-                        active_course = CourseInfo(
-                            canonical=canonical,
-                            raw_name=raw_course_value,
-                            normalised=token,
-                        )
-                        known_courses[canonical] = active_course
-                        parsed.courses.append(active_course)
-                    if issue:
-                        active_course.add_issue(issue)
-        elif key_upper == "LEVEL" and active_course:
-            try:
-                level_value = float(value_stripped)
-            except ValueError:
-                LOGGER.warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
-                active_course.add_issue("invalid-level")
-                continue
-            level_int = int(round(level_value))
-            clamped = max(1, min(10, level_int))
-            if level_int != level_value:
-                active_course.add_issue("level-non-integer")
-            if clamped != level_int:
-                LOGGER.warning(
-                    "LEVEL value %s for course '%s' in %s out of range; clamped to %s",
-                    value_stripped,
-                    active_course.raw_name,
-                    path,
-                    clamped,
-                )
-                active_course.add_issue("level-out-of-range")
-            active_course.stars = clamped
+                        if issue == "mapped-course":
+                            LOGGER.info("mapped-course(parser): %s→%s", raw_course_value, canonical)
+                            parsed.mapped_courses += 1
+                        existing = known_courses.get(canonical)
+                        if existing:
+                            active_course = existing
+                            active_course.raw_name = raw_course_value
+                            active_course.normalised = token
+                        else:
+                            active_course = CourseInfo(
+                                canonical=canonical,
+                                raw_name=raw_course_value,
+                                normalised=token,
+                            )
+                            known_courses[canonical] = active_course
+                            parsed.courses.append(active_course)
+                        if issue:
+                            active_course.add_issue(issue)
+            elif key_upper == "LEVEL" and active_course:
+                try:
+                    level_value = float(value_stripped)
+                except ValueError:
+                    LOGGER.warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
+                    active_course.add_issue("invalid-level")
+                    continue
+                level_int = int(round(level_value))
+                clamped = max(1, min(10, level_int))
+                if level_int != level_value:
+                    active_course.add_issue("level-non-integer")
+                if clamped != level_int:
+                    LOGGER.warning(
+                        "LEVEL value %s for course '%s' in %s out of range; clamped to %s",
+                        value_stripped,
+                        active_course.raw_name,
+                        path,
+                        clamped,
+                    )
+                    active_course.add_issue("level-out-of-range")
+                active_course.stars = clamped
+            continue
+
+        if metadata_line is None and parsing_notes and current_notes_course:
+            current_notes_course.add_issue("unknown-metadata")
+            parsed.unknown_directives += 1
+
 
     for course in parsed.courses:
         state = course_states.get(id(course))
