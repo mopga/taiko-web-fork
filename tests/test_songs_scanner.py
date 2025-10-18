@@ -567,7 +567,7 @@ class TestSongsScanner(unittest.TestCase):
             "#END",
         ]), encoding="utf-8")
 
-        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
             parsed = parse_tja(tja_path)
 
         self.assertFalse(parsed.has_dojo_course)
@@ -595,7 +595,7 @@ class TestSongsScanner(unittest.TestCase):
             "#END",
         ]), encoding="utf-8")
 
-        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
             parsed = parse_tja(tja_path)
 
         self.assertEqual(len(parsed.courses), 1)
