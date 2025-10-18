@@ -895,6 +895,86 @@ class SongScanner:
         finally:
             lock.release()
 
+    def _sync_song_charts(
+        self,
+        song_filter: Dict[str, object],
+        charts: List[Dict[str, object]],
+    ) -> None:
+        if not charts:
+            try:
+                self.db.songs.update_one(song_filter, {'$set': {'charts': []}})
+            except Exception:  # pragma: no cover - collection issues are non-fatal
+                LOGGER.debug('Failed to reset charts for %s', song_filter)
+            return
+
+        desired_courses: Set[str] = set()
+        unknown_raw_courses: Set[str] = set()
+
+        for chart in charts:
+            chart_doc = dict(chart)
+            chart_doc['updatedAt'] = int(time.time() * 1000)
+            course_name = chart_doc.get('course')
+            if isinstance(course_name, str):
+                desired_courses.add(course_name)
+            raw_course = chart_doc.get('raw_course')
+            if course_name == UNKNOWN_VALUE and isinstance(raw_course, str):
+                unknown_raw_courses.add(raw_course)
+
+            match_filter: Dict[str, object] = {'c.course': course_name}
+            if course_name == UNKNOWN_VALUE and isinstance(raw_course, str):
+                match_filter['c.raw_course'] = raw_course
+            array_filters = [match_filter]
+
+            try:
+                self.db.songs.update_one(
+                    song_filter,
+                    {'$set': {'charts.$[c]': chart_doc}},
+                    array_filters=array_filters,
+                )
+            except TypeError:  # pragma: no cover - fallback for in-memory tests
+                self.db.songs.update_one(song_filter, {'$set': {'charts': charts}})
+                return
+            except Exception:  # pragma: no cover - tolerate transient issues
+                LOGGER.debug('Failed to refresh chart %s for %s', course_name, song_filter)
+
+            try:
+                self.db.songs.update_one(song_filter, {'$addToSet': {'charts': chart_doc}})
+            except TypeError:  # pragma: no cover - fallback for in-memory tests
+                self.db.songs.update_one(song_filter, {'$set': {'charts': charts}})
+                return
+            except Exception:  # pragma: no cover - tolerate transient issues
+                LOGGER.debug('Failed to add chart %s for %s', course_name, song_filter)
+
+        if desired_courses:
+            keep_courses = sorted(desired_courses)
+            try:
+                self.db.songs.update_one(
+                    song_filter,
+                    {'$pull': {'charts': {'course': {'$nin': keep_courses}}}},
+                )
+            except TypeError:  # pragma: no cover - fallback for in-memory tests
+                pass
+            except Exception:  # pragma: no cover - tolerate transient issues
+                LOGGER.debug('Failed to prune charts for %s', song_filter)
+
+        if unknown_raw_courses:
+            try:
+                self.db.songs.update_one(
+                    song_filter,
+                    {
+                        '$pull': {
+                            'charts': {
+                                'course': UNKNOWN_VALUE,
+                                'raw_course': {'$nin': sorted(unknown_raw_courses)},
+                            }
+                        }
+                    },
+                )
+            except TypeError:  # pragma: no cover - fallback for in-memory tests
+                pass
+            except Exception:  # pragma: no cover - tolerate transient issues
+                LOGGER.debug('Failed to prune unknown charts for %s', song_filter)
+
     def _select_base_record(self, records: List[TjaImportRecord]) -> TjaImportRecord:
         def _score(record: TjaImportRecord) -> Tuple[int, int, bool]:
             valid = sum(1 for chart in record.charts if chart.valid)
@@ -1363,9 +1443,13 @@ class SongScanner:
         for key in sorted(aggregated_records.keys()):
             records = aggregated_records[key]
             document = self._build_song_document(key, records)
-            base_document = {k: v for k, v in document.items() if k not in {'id', 'order', '_id'}}
+            charts_payload: List[Dict[str, object]] = list(document.get('charts', []))
+            base_document = {
+                k: v for k, v in document.items() if k not in {'id', 'order', '_id', 'charts'}
+            }
+            insert_document = dict(base_document)
+            insert_document['charts'] = []
             lookup_filter: Dict[str, object] = {'group_key': key}
-            update_filter: Dict[str, object] = {'group_key': key}
             existing_doc: Optional[Dict[str, object]] = None
             try:
                 if key:
@@ -1392,13 +1476,10 @@ class SongScanner:
                 existing_key = existing_doc.get('group_key') or key
                 if existing_doc.get('_id') is not None:
                     lookup_filter = {'_id': existing_doc['_id']}
-                    update_filter = {'_id': existing_doc['_id']}
                 elif existing_doc.get('id') is not None:
                     lookup_filter = {'id': existing_doc['id']}
-                    update_filter = {'id': existing_doc['id']}
                 else:
                     lookup_filter = {'group_key': existing_key}
-                    update_filter = {'group_key': existing_key}
 
             result_doc: Optional[Dict[str, object]] = None
 
@@ -1407,7 +1488,7 @@ class SongScanner:
                     try:
                         result_doc = self.db.songs.find_one_and_update(
                             lookup_filter,
-                            {'$setOnInsert': base_document},
+                            {'$setOnInsert': insert_document},
                             upsert=True,
                             return_document=ReturnDocument.AFTER,
                         )
@@ -1423,13 +1504,21 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
 
+            song_filter: Dict[str, object]
+            if result_doc.get('_id') is not None:
+                song_filter = {'_id': result_doc['_id']}
+            elif result_doc.get('id') is not None:
+                song_filter = {'id': result_doc['id']}
+            else:
+                song_filter = {'group_key': key}
+
             song_id = result_doc.get('id') if isinstance(result_doc, dict) else None
             inserted = song_id is None
 
             if inserted:
                 new_id = self._get_next_song_id()
                 try:
-                    self.db.songs.update_one(update_filter, {'$set': {'id': new_id, 'order': new_id}})
+                    self.db.songs.update_one(song_filter, {'$set': {'id': new_id, 'order': new_id}})
                 except Exception as exc:  # pragma: no cover - exercised with real MongoDB
                     if PyMongoError and isinstance(exc, PyMongoError):
                         LOGGER.exception("Failed to assign song id for %s", key)
@@ -1438,16 +1527,25 @@ class SongScanner:
                     raise
                 song_id = new_id
                 summary['inserted'] += 1
-            elif key in dirty_groups:
+
+            needs_refresh = inserted or key in dirty_groups
+
+            if needs_refresh:
                 try:
-                    self.db.songs.update_one(update_filter, {'$set': base_document})
-                    summary['updated'] += 1
+                    self.db.songs.update_one(song_filter, {'$set': base_document})
+                    if key in dirty_groups and not inserted:
+                        summary['updated'] += 1
                 except Exception as exc:  # pragma: no cover - exercised with real MongoDB
                     if PyMongoError and isinstance(exc, PyMongoError):
                         LOGGER.exception("Failed to update aggregated song for %s", key)
                         summary['errors'] += 1
                     else:
                         raise
+
+                try:
+                    self._sync_song_charts(song_filter, charts_payload)
+                except Exception:  # pragma: no cover - tolerate chart sync issues
+                    LOGGER.debug('Failed to synchronise charts for %s', key)
 
             if song_id is not None:
                 seen_song_ids.add(song_id)
