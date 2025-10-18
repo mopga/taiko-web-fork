@@ -50,6 +50,7 @@ SUPPORTED_AUDIO_EXTS = [
     ".aac",
     ".flac",
     ".opus",
+    ".t3u8",
 ]
 
 COURSE_ALIASES = {
@@ -97,11 +98,14 @@ UNKNOWN_VALUE = "Unknown"
 
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
-NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-8]")
+NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-9]")
+NOTE_LINE_RE = re.compile(r"^[0-9,\s\|]+$")
 
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
 HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
+
+DOJO_COURSE_TOKENS = {"DOJO", "DAN", "KYUU"}
 
 ZERO_WIDTH_CHARACTERS = {
     "\u200b",  # zero width space
@@ -199,6 +203,10 @@ class CourseInfo:
     canonical: str
     raw_name: str
     normalised: str
+    mode: str = "standard"
+    display_course: Optional[str] = None
+    segments: List[Dict[str, object]] = field(default_factory=list)
+    unknown_directives: int = 0
     stars: Optional[int] = None
     branch: bool = False
     branch_sections: Set[str] = field(default_factory=set)
@@ -229,6 +237,8 @@ class ParsedTJA:
     courses: List[CourseInfo] = field(default_factory=list)
     raw_text: str = ""
     fingerprint: str = ""
+    unknown_directives: int = 0
+    has_dojo_course: bool = False
 
 
 @dataclass
@@ -240,11 +250,23 @@ class ChartRecord:
     branch: bool
     valid: bool
     issues: List[str]
+    mode: str = "standard"
+    display_course: Optional[str] = None
+    segments: List[Dict[str, object]] = field(default_factory=list)
+    unknown_directives: int = 0
     coerced: bool = False
     hit_notes: int = 0
     total_notes: int = 0
     measures: int = 0
     first_note_preview: Optional[str] = None
+
+
+@dataclass
+class _CourseParseState:
+    measure_index: int = 0
+    segments: List[Dict[str, object]] = field(default_factory=list)
+    current_segment: Optional[Dict[str, object]] = None
+    gogo_start: Optional[int] = None
 
 
 @dataclass
@@ -446,6 +468,54 @@ def parse_tja(path: Path) -> ParsedTJA:
     known_courses: Dict[str, CourseInfo] = {}
     current_notes_course: Optional[CourseInfo] = None
     parsing_notes = False
+    current_wave: Optional[str] = None
+    course_states: Dict[int, _CourseParseState] = {}
+
+    def _state_for(course: CourseInfo) -> _CourseParseState:
+        state = course_states.get(id(course))
+        if state is None:
+            state = _CourseParseState()
+            course_states[id(course)] = state
+        return state
+
+    def _current_audio() -> Optional[str]:
+        return current_wave if current_wave is not None else parsed.wave
+
+    def _close_gogo(course: CourseInfo, *, end_measure: Optional[int] = None) -> None:
+        state = _state_for(course)
+        if state.gogo_start is None:
+            return
+        segment = state.current_segment
+        if segment is None:
+            state.gogo_start = None
+            return
+        end_value = state.measure_index if end_measure is None else end_measure
+        if end_value < state.gogo_start:
+            end_value = state.gogo_start
+        ranges = segment.setdefault('gogo_ranges', [])
+        ranges.append({'start': state.gogo_start, 'end': end_value})
+        state.gogo_start = None
+
+    def _start_segment(course: CourseInfo, audio: Optional[str]) -> None:
+        state = _state_for(course)
+        segment = {
+            'audio': audio,
+            'start_measure': state.measure_index,
+            'end_measure': None,
+            'bpm_map': [],
+            'gogo_ranges': [],
+        }
+        state.current_segment = segment
+        state.segments.append(segment)
+
+    def _end_segment(course: CourseInfo) -> None:
+        state = _state_for(course)
+        if state.current_segment is None:
+            return
+        _close_gogo(course)
+        if state.current_segment.get('end_measure') is None:
+            state.current_segment['end_measure'] = state.measure_index
+        state.current_segment = None
 
     first_line = True
     for raw_line in normalised_text.splitlines():
@@ -468,26 +538,80 @@ def parse_tja(path: Path) -> ParsedTJA:
         if line.startswith("#"):
             upper_line = line.upper()
             directive = upper_line.split(None, 1)[0]
+            directive_payload = line[len(directive) :].strip()
+            handled_directive = False
             if active_course:
                 if directive == "#START":
                     active_course.start_blocks += 1
                     current_notes_course = active_course
                     parsing_notes = True
+                    if current_notes_course.mode == "dojo":
+                        state = _state_for(current_notes_course)
+                        state.measure_index = 0
+                        _end_segment(current_notes_course)
+                        _start_segment(current_notes_course, _current_audio())
+                    handled_directive = True
                 elif directive == "#END":
                     active_course.end_blocks += 1
+                    if current_notes_course and current_notes_course.mode == "dojo":
+                        _end_segment(current_notes_course)
                     parsing_notes = False
                     current_notes_course = None
+                    handled_directive = True
                 elif directive.startswith("#BRANCH"):
                     active_course.branch = True
                     if directive.startswith("#BRANCHSTART"):
                         active_course.branch_sections.add("START")
+                    handled_directive = True
                 elif directive in {"#N", "#E", "#M"}:
                     active_course.branch_sections.add(directive[1:])
-            if parsing_notes and current_notes_course and directive in SAFE_NOTE_DIRECTIVES:
-                continue
+                    handled_directive = True
+            if parsing_notes and current_notes_course:
+                state = _state_for(current_notes_course)
+                if directive == "#NEXTSONG":
+                    if current_notes_course.mode == "dojo":
+                        _end_segment(current_notes_course)
+                    handled_directive = True
+                elif directive == "#GOGOSTART":
+                    if current_notes_course.mode == "dojo":
+                        if state.current_segment is None:
+                            _start_segment(current_notes_course, _current_audio())
+                        state.gogo_start = state.measure_index
+                    handled_directive = True
+                elif directive == "#GOGOEND":
+                    if current_notes_course.mode == "dojo":
+                        _close_gogo(current_notes_course)
+                    handled_directive = True
+                elif directive == "#BPMCHANGE":
+                    handled_directive = True
+                    if current_notes_course.mode == "dojo":
+                        if state.current_segment is None:
+                            _start_segment(current_notes_course, _current_audio())
+                        try:
+                            bpm_value = (
+                                float(directive_payload.split()[0])
+                                if directive_payload
+                                else None
+                            )
+                        except ValueError:
+                            bpm_value = None
+                        if bpm_value is not None:
+                            state.current_segment.setdefault('bpm_map', []).append(
+                                {'measure': state.measure_index, 'value': bpm_value}
+                            )
+                elif directive in SAFE_NOTE_DIRECTIVES:
+                    handled_directive = True
+            if parsing_notes and current_notes_course and not handled_directive:
+                current_notes_course.unknown_directives += 1
+                parsed.unknown_directives += 1
             continue
 
-        if parsing_notes and current_notes_course:
+        if parsing_notes and current_notes_course and ":" not in line:
+            measure_line = stripped_comments.strip()
+            if not measure_line:
+                continue
+            if not NOTE_LINE_RE.match(measure_line):
+                continue
             tokens = stripped_comments.split(",")
             saw_digits = False
             for token in tokens:
@@ -501,6 +625,11 @@ def parse_tja(path: Path) -> ParsedTJA:
                     current_notes_course.hit_notes += hit_count
                 current_notes_course.total_notes += len(notes)
                 current_notes_course.measures += 1
+                if current_notes_course.mode == "dojo":
+                    state = _state_for(current_notes_course)
+                    if state.current_segment is None:
+                        _start_segment(current_notes_course, _current_audio())
+                    state.measure_index += 1
             if saw_digits and current_notes_course.first_note_preview is None:
                 preview = stripped_comments.strip()
                 if preview:
@@ -534,40 +663,57 @@ def parse_tja(path: Path) -> ParsedTJA:
             except ValueError:
                 LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
         elif key_upper == "WAVE":
-            parsed.wave = clean_value or None
+            clean_wave = clean_value or None
+            if not parsing_notes:
+                parsed.wave = clean_wave
+            current_wave = clean_wave
+            if parsing_notes and current_notes_course and current_notes_course.mode == "dojo":
+                _end_segment(current_notes_course)
         elif key_upper == "GENRE":
             parsed.genre = clean_value or None
         elif key_upper == "SONGID":
             parsed.song_id = clean_value or None
         elif key_upper == "COURSE":
-            canonical, token, issue = _resolve_course(value_stripped, path=path)
-            if canonical == "Unknown":
-                if issue == "unknown_course_numeric":
-                    LOGGER.warning("Unknown numeric COURSE '%s' in %s", value_stripped, path)
-                else:
-                    LOGGER.warning("Unknown COURSE '%s' in %s", value_stripped, path)
+            raw_course_value = value_stripped.strip()
+            normalised_token = _normalise_course_token(raw_course_value)
+            if normalised_token in DOJO_COURSE_TOKENS:
                 active_course = CourseInfo(
-                    canonical="Unknown",
-                    raw_name=value_stripped,
-                    normalised=token,
+                    canonical="Dojo",
+                    raw_name=raw_course_value,
+                    normalised=normalised_token,
+                    mode="dojo",
                 )
-                if issue:
-                    active_course.add_issue(issue)
                 parsed.courses.append(active_course)
+                parsed.has_dojo_course = True
             else:
-                existing = known_courses.get(canonical)
-                if existing:
-                    active_course = existing
-                    active_course.raw_name = value_stripped
-                    active_course.normalised = token
-                else:
+                canonical, token, issue = _resolve_course(value_stripped, path=path)
+                if canonical == "Unknown":
+                    if issue == "unknown_course_numeric":
+                        LOGGER.warning("Unknown numeric COURSE '%s' in %s", value_stripped, path)
+                    else:
+                        LOGGER.warning("Unknown COURSE '%s' in %s", value_stripped, path)
                     active_course = CourseInfo(
-                        canonical=canonical,
+                        canonical="Unknown",
                         raw_name=value_stripped,
                         normalised=token,
                     )
-                    known_courses[canonical] = active_course
+                    if issue:
+                        active_course.add_issue(issue)
                     parsed.courses.append(active_course)
+                else:
+                    existing = known_courses.get(canonical)
+                    if existing:
+                        active_course = existing
+                        active_course.raw_name = value_stripped
+                        active_course.normalised = token
+                    else:
+                        active_course = CourseInfo(
+                            canonical=canonical,
+                            raw_name=value_stripped,
+                            normalised=token,
+                        )
+                        known_courses[canonical] = active_course
+                        parsed.courses.append(active_course)
         elif key_upper == "LEVEL" and active_course:
             try:
                 level_value = float(value_stripped)
@@ -589,6 +735,13 @@ def parse_tja(path: Path) -> ParsedTJA:
                 )
                 active_course.add_issue("level-out-of-range")
             active_course.stars = clamped
+
+    for course in parsed.courses:
+        state = course_states.get(id(course))
+        if state:
+            if state.current_segment is not None:
+                _end_segment(course)
+            course.segments = state.segments
 
     return parsed
 
@@ -657,12 +810,47 @@ class SongScanner:
     def _build_chart_records(self, parsed: ParsedTJA, tja_path: Path) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
         import_issues: List[str] = []
+        parts = list(tja_path.parts)
+
+        def _compute_display_course(course: CourseInfo) -> Optional[str]:
+            if course.display_course:
+                return course.display_course
+            candidates: List[str] = []
+            for part in reversed(parts[:-1]):
+                cleaned_part = _clean_metadata_value(part)
+                if cleaned_part:
+                    candidates.append(cleaned_part)
+            metadata_candidates = [
+                parsed.title,
+                parsed.subtitle,
+                parsed.title_ja,
+                parsed.subtitle_ja,
+            ]
+            for value in metadata_candidates:
+                if value:
+                    candidates.append(value)
+            seen: Set[str] = set()
+            for candidate in candidates:
+                cleaned_candidate = _clean_metadata_value(candidate)
+                lowered = cleaned_candidate.casefold()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                if "dan" in lowered or "kyuu" in lowered:
+                    return cleaned_candidate
+            fallback = _clean_metadata_value(course.raw_name) if course.raw_name else None
+            if fallback:
+                return fallback
+            normalised = _clean_metadata_value(course.normalised) if course.normalised else None
+            return normalised
+
         for course in parsed.courses:
             course_name = course.canonical
             coerced = False
             issues = list(course.issues)
+            mode = course.mode or "standard"
 
-            if course_name == "Unknown":
+            if course_name == "Unknown" and mode == "standard":
                 if self._coerce_unknown_course:
                     LOGGER.warning(
                         "Coercing unknown course '%s' in %s to %s",
@@ -684,20 +872,47 @@ class SongScanner:
                 if not required_sections.issubset(course.branch_sections):
                     issues.append("invalid-branch-sections")
 
-            level_value = course.stars if course.stars is not None else 0
-            if course.stars is None:
-                issues.append("missing-level")
+            display_course = course.display_course
+            if mode == "dojo":
+                display_course = _compute_display_course(course)
+                course.display_course = display_course
 
-            valid = (
-                course_name in COURSE_ORDER
-                and "missing-chart-content" not in issues
-                and "unknown-course" not in issues
-                and course.total_notes > 0
-                and course.hit_notes > 0
-            )
+            if mode == "standard":
+                level_value = course.stars if course.stars is not None else 0
+                if course.stars is None:
+                    issues.append("missing-level")
+            else:
+                level_value = course.stars if course.stars is not None else 0
+
+            if mode == "standard":
+                valid = (
+                    course_name in COURSE_ORDER
+                    and "missing-chart-content" not in issues
+                    and "unknown-course" not in issues
+                    and course.total_notes > 0
+                    and course.hit_notes > 0
+                )
+            else:
+                valid = course.total_notes > 0 and course.hit_notes > 0
 
             if course.branch and "invalid-branch-sections" in issues:
                 valid = False
+
+            if mode == "dojo":
+                if not course.segments:
+                    issues.append("dojo_no_segments")
+                    valid = False
+
+            segments_copy: List[Dict[str, object]] = []
+            for segment in course.segments:
+                segment_copy = {
+                    'audio': segment.get('audio'),
+                    'start_measure': segment.get('start_measure'),
+                    'end_measure': segment.get('end_measure'),
+                    'bpm_map': [dict(item) for item in segment.get('bpm_map', [])],
+                    'gogo_ranges': [dict(item) for item in segment.get('gogo_ranges', [])],
+                }
+                segments_copy.append(segment_copy)
 
             record = ChartRecord(
                 course=course_name,
@@ -705,6 +920,10 @@ class SongScanner:
                 normalised=course.normalised,
                 level=level_value,
                 branch=course.branch,
+                mode=mode,
+                display_course=display_course,
+                segments=segments_copy,
+                unknown_directives=course.unknown_directives,
                 valid=valid,
                 issues=sorted(set(issues)),
                 coerced=coerced,
@@ -714,12 +933,14 @@ class SongScanner:
                 first_note_preview=course.first_note_preview,
             )
             LOGGER.debug(
-                "Chart summary %s (raw=%s): notes=%d measures=%d first=\"%s\"",
+                "Chart summary mode=%s course=%s raw=%s notes=%d measures=%d first=\"%s\" issues=%s",
+                record.mode,
                 record.course,
                 course.raw_name,
                 record.total_notes,
                 record.measures,
                 (record.first_note_preview or ""),
+                ",".join(record.issues),
             )
             records.append(record)
 
@@ -863,6 +1084,10 @@ class SongScanner:
                     normalised=str(item.get('normalised', '')),
                     level=int(item.get('level', 0)) if item.get('level') is not None else None,
                     branch=bool(item.get('branch', False)),
+                    mode=str(item.get('mode', 'standard')),
+                    display_course=item.get('display_course'),
+                    segments=[dict(segment) for segment in item.get('segments', [])] if isinstance(item.get('segments'), list) else [],
+                    unknown_directives=int(item.get('unknown_directives', 0)) if item.get('unknown_directives') is not None else 0,
                     valid=bool(item.get('valid', False)),
                     issues=list(item.get('issues', [])),
                     coerced=bool(item.get('coerced', False)),
@@ -1182,6 +1407,9 @@ class SongScanner:
         duplicate_courses: Set[str] = set()
 
         def _dedup_key(chart: ChartRecord) -> Tuple[str, Optional[str]]:
+            if chart.mode != "standard":
+                label = chart.display_course or chart.raw_course or chart.normalised or chart.course
+                return (f"{chart.mode}:{chart.course}", label)
             if chart.course == UNKNOWN_VALUE:
                 raw = chart.raw_course or chart.normalised or ""
                 return (chart.course, raw)
@@ -1193,6 +1421,8 @@ class SongScanner:
                 entry = {
                     'course': chart.course,
                     'raw_course': chart.raw_course,
+                    'mode': chart.mode,
+                    'display_course': chart.display_course,
                     'level': chart.level,
                     'branch': chart.branch,
                     'valid': chart.valid,
@@ -1202,6 +1432,8 @@ class SongScanner:
                     'total_notes': chart.total_notes,
                     'measures': chart.measures,
                     'first_note_preview': chart.first_note_preview,
+                    'segments': chart.segments,
+                    'unknown_directives': chart.unknown_directives,
                     'tja_path': record.relative_path,
                     'tja_url': record.tja_url,
                 }
@@ -1213,6 +1445,8 @@ class SongScanner:
                     label = chart.course
                     if chart.course == UNKNOWN_VALUE:
                         label = f"Unknown:{chart.raw_course or chart.normalised or ''}"
+                    if chart.mode != "standard":
+                        label = f"{chart.mode}:{label}:{chart.display_course or chart.raw_course or chart.normalised or ''}"
                     duplicate_courses.add(label)
                     existing_issues = set(existing.get('issues', []))
                     existing_issues.add('duplicate-course')
@@ -1223,11 +1457,13 @@ class SongScanner:
 
         def _chart_sort_key(item: Dict[str, object]) -> Tuple[int, str, str]:
             course = str(item.get('course', ''))
+            mode = str(item.get('mode', 'standard'))
             try:
                 index = COURSE_ORDER.index(course)
             except ValueError:
                 index = len(COURSE_ORDER)
-            return (index, course, str(item.get('tja_path', '')))
+            mode_rank = 0 if mode == 'standard' else 1
+            return (mode_rank, index, course, str(item.get('tja_path', '')))
 
         charts_payload = sorted(chart_by_key.values(), key=_chart_sort_key)
 
@@ -1388,6 +1624,26 @@ class SongScanner:
 
     def _detect_audio(self, tja_path: Path, parsed: ParsedTJA) -> Tuple[Optional[Path], List[str]]:
         diagnostics: List[str] = []
+
+        def _find_hls_playlist() -> Optional[Path]:
+            candidates: List[Path] = []
+            hls_dir = tja_path.parent / "HLS"
+            if hls_dir.is_dir():
+                candidates.extend(sorted(hls_dir.glob('*.t3u8'), key=lambda p: p.name.lower()))
+            candidates.extend(sorted(tja_path.parent.glob('*.t3u8'), key=lambda p: p.name.lower()))
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except FileNotFoundError:
+                    continue
+                try:
+                    resolved.relative_to(self._songs_root)
+                except ValueError:
+                    continue
+                if resolved.is_file():
+                    return resolved
+            return None
+
         if parsed.wave:
             candidate = (tja_path.parent / parsed.wave).resolve()
             try:
@@ -1398,6 +1654,10 @@ class SongScanner:
                 if candidate.is_file():
                     return candidate, diagnostics
                 diagnostics.append('wave-missing')
+        if parsed.has_dojo_course:
+            playlist = _find_hls_playlist()
+            if playlist is not None:
+                return playlist, diagnostics
         candidates = sorted(
             [p for p in tja_path.parent.iterdir() if p.is_file()],
             key=lambda p: p.name.lower(),
@@ -1554,6 +1814,13 @@ class SongScanner:
             if needs_processing:
                 try:
                     parsed = parse_tja(tja_path)
+                    total_notes = sum(course.total_notes for course in parsed.courses)
+                    if total_notes:
+                        self._metrics.increment('tja_notes_total', total_notes)
+                    if parsed.unknown_directives:
+                        self._metrics.increment('tja_unknown_directives_total', parsed.unknown_directives)
+                    if parsed.has_dojo_course:
+                        self._metrics.increment('tja_dojo_parsed_total')
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
                 except Exception:  # pragma: no cover - defensive
                     LOGGER.exception("Failed to parse %s", tja_path)
@@ -1777,6 +2044,9 @@ class _ScanMetrics:
             'invalid_group_key_total': 0,
             'duplicate_key_retries_total': 0,
             'charts_synced_total': 0,
+            'tja_dojo_parsed_total': 0,
+            'tja_notes_total': 0,
+            'tja_unknown_directives_total': 0,
         }
         self._last_logged = 0.0
 

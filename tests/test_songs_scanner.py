@@ -388,6 +388,159 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(chart.measures, 1)
         self.assertEqual(chart.first_note_preview, "1110,")
 
+    def test_parse_tja_handles_gogo_sections_without_resetting_counts(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "gogo.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Gogo Test",
+            "COURSE:Oni",
+            "LEVEL:3",
+            "#START",
+            "1110,",
+            "#GOGOSTART",
+            "2220,",
+            "#GOGOEND",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 6)
+        self.assertEqual(chart.measures, 2)
+        self.assertEqual(chart.first_note_preview, "1110,")
+
+    def test_parse_tja_counts_measures_with_nine_token(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "nine.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Nine Token",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "10000900,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 1)
+        self.assertEqual(chart.measures, 1)
+
+    def test_parse_tja_counts_other_tokens_when_nine_present(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "mixed_nine.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Mixed Nine",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1,2,90001,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 7)
+        self.assertEqual(chart.hit_notes, 3)
+        self.assertEqual(chart.measures, 3)
+
+    def test_parse_tja_unknown_directive_does_not_reset_counts(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "unknown_directive.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Unknown Directive Test",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1110,",
+            "#FOOBAR",
+            "2220,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 6)
+        self.assertEqual(chart.measures, 2)
+        self.assertEqual(chart.first_note_preview, "1110,")
+        self.assertEqual(chart.unknown_directives, 1)
+        self.assertEqual(parsed.unknown_directives, 1)
+
+    def test_branching_directives_do_not_increment_unknown_counters(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "branching.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Branching",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "#BRANCHSTART",
+            "#N",
+            "1110,",
+            "#BRANCHSWITCH",
+            "#E",
+            "2220,",
+            "#BRANCHEND",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 6)
+        self.assertEqual(chart.measures, 2)
+        self.assertEqual(chart.unknown_directives, 0)
+        self.assertEqual(parsed.unknown_directives, 0)
+
+    def test_parse_tja_dojo_segments(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "Second Dan" / "dojo.tja"
+        tja_path.parent.mkdir(parents=True, exist_ok=True)
+        tja_path.write_text("\n".join([
+            "TITLE:Trial Second Dan",
+            "COURSE:Dan",
+            "LEVEL:1",
+            "WAVE:segment1.ogg",
+            "#START",
+            "1110,",
+            "#NEXTSONG",
+            "WAVE:segment2.ogg",
+            "2220,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertTrue(parsed.has_dojo_course)
+        self.assertEqual(len(parsed.courses), 1)
+        course = parsed.courses[0]
+        self.assertEqual(course.mode, "dojo")
+        self.assertEqual(course.total_notes, 8)
+        self.assertEqual(course.hit_notes, 6)
+        self.assertEqual(course.measures, 2)
+        self.assertGreaterEqual(len(course.segments), 2)
+        first_segment = course.segments[0]
+        second_segment = course.segments[1]
+        self.assertEqual(first_segment.get('audio'), 'segment1.ogg')
+        self.assertEqual(first_segment.get('start_measure'), 0)
+        self.assertEqual(first_segment.get('end_measure'), 1)
+        self.assertEqual(second_segment.get('audio'), 'segment2.ogg')
+        self.assertEqual(second_segment.get('start_measure'), 1)
+        self.assertEqual(second_segment.get('end_measure'), 2)
+
     def test_determine_category_from_directory(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
@@ -478,6 +631,52 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(third_summary['inserted'], 1)
         self.assertEqual(third_summary['disabled'], 1)
         self.assertEqual(third_summary['skipped'], 0)
+
+    def test_scan_imports_dojo_chart_with_segments(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        dojo_dir = songs_dir / "Dojo" / "Second Dan"
+        hls_dir = dojo_dir / "HLS"
+        hls_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = dojo_dir / "dojo.tja"
+        playlist_path = hls_dir / "dojo.t3u8"
+        playlist_path.write_text("#EXTM3U\n", encoding="utf-8")
+        tja_path.write_text("\n".join([
+            "TITLE:Dojo Second Dan",
+            "COURSE:Dan",
+            "LEVEL:1",
+            "#START",
+            "1110,",
+            "#NEXTSONG",
+            "2220,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertTrue(inserted['enabled'])
+        charts = inserted['charts']
+        self.assertEqual(len(charts), 1)
+        chart = charts[0]
+        self.assertEqual(chart.get('mode'), 'dojo')
+        self.assertTrue(chart.get('display_course'))
+        self.assertTrue(chart.get('segments'))
+        self.assertTrue(chart['valid'])
+        self.assertNotIn('dojo_no_segments', chart.get('issues', []))
+        self.assertIn('Second Dan', chart.get('display_course'))
+        paths = inserted.get('paths', {})
+        self.assertIn('audio_url', paths)
+        self.assertTrue(paths['audio_url'].endswith('.t3u8'))
 
     def test_concurrent_upsert_same_chart(self):
         db = _DummyDB()
