@@ -211,12 +211,26 @@ class Loader{
                                                 courseOrder.forEach(diff => courseInfo[diff] = null)
                                                 var coursesByDiff = {}
                                                 charts.forEach(chart => {
-                                                        var legacy = canonicalMap[chart.course]
-                                                        if(!legacy){
+                                                        var canonical = chart.canonical_course
+                                                        var courseKey = null
+                                                        if(canonical && canonicalMap[canonical]){
+                                                                courseKey = canonicalMap[canonical]
+                                                        }else if(typeof chart.course === "string"){
+                                                                var lowered = chart.course.toLowerCase()
+                                                                var matched = null
+                                                                for(var name in canonicalMap){
+                                                                        if(canonicalMap[name] === lowered){
+                                                                                matched = canonicalMap[name]
+                                                                                break
+                                                                        }
+                                                                }
+                                                                courseKey = matched || lowered
+                                                        }
+                                                        if(!courseKey || courseOrder.indexOf(courseKey) === -1){
                                                                 return
                                                         }
-                                                        if(!coursesByDiff[legacy] || (chart.valid && !coursesByDiff[legacy].valid)){
-                                                                coursesByDiff[legacy] = chart
+                                                        if(!coursesByDiff[courseKey] || (chart.valid && !coursesByDiff[courseKey].valid)){
+                                                                coursesByDiff[courseKey] = chart
                                                         }
                                                 })
                                                 song.courses = courseInfo
