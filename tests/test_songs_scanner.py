@@ -5,7 +5,7 @@ import unittest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from songs_scanner import SongScanner, TjaImportRecord, parse_tja
+from songs_scanner import SongScanner, TjaImportRecord, compute_group_key, parse_tja
 
 
 class _MemoryCollection:
@@ -64,6 +64,33 @@ class _MemoryCollection:
         for doc in list(self._docs):
             if self._matches(doc, filter_ or {}):
                 yield self._project(doc, projection or {})
+
+    def find_one_and_update(self, filter_, update, upsert=False, return_document=None, **kwargs):
+        doc = None
+        for candidate in self._docs:
+            if self._matches(candidate, filter_ or {}):
+                doc = candidate
+                break
+        inserted = False
+        if doc is None and upsert:
+            base = dict(update.get('$setOnInsert', {}))
+            for key, value in (filter_ or {}).items():
+                if isinstance(value, dict):
+                    continue
+                base.setdefault(key, value)
+            base.setdefault('_id', len(self._docs) + 1)
+            self._docs.append(base)
+            doc = base
+            inserted = True
+            if hasattr(self, 'inserted'):
+                self.inserted.append(dict(base))
+        if doc is None:
+            return None
+        if '$set' in update:
+            doc.update(update['$set'])
+        if inserted and '$setOnInsert' in update:
+            doc.update(update['$setOnInsert'])
+        return dict(doc)
 
     def insert_one(self, document):
         self._docs.append(dict(document))
@@ -910,7 +937,7 @@ class TestSongsScanner(unittest.TestCase):
         )
 
         key_with_hash = scanner._determine_group_key(record_with_hash)
-        self.assertEqual(key_with_hash, "audio:deadbeef:Pack")
+        self.assertEqual(key_with_hash, "audio:deadbeef:pack")
 
         record_missing_audio = TjaImportRecord(
             relative_path="pack/oni.tja",
@@ -944,8 +971,55 @@ class TestSongsScanner(unittest.TestCase):
         )
 
         key_missing_audio = scanner._determine_group_key(record_missing_audio)
-        self.assertTrue(key_missing_audio.startswith("missing:Pack:"))
+        self.assertTrue(key_missing_audio.startswith("missing:pack:"))
         self.assertIn("fallback title", key_missing_audio)
+
+    def test_compute_group_key_normalises_variants(self):
+        base_kwargs = dict(
+            relative_path="Pack%20Name/Sub/Filename.tja",
+            relative_dir="Pack%20Name\\Sub",
+            tja_url="/songs/Pack%20Name/Sub/Filename.tja",
+            dir_url="/songs/Pack%20Name/Sub/",
+            audio_url="/songs/audio.ogg",
+            audio_path="Pack%20Name/Sub/audio.ogg",
+            audio_hash="deadbeef",
+            audio_mtime_ns=None,
+            audio_size=None,
+            music_type=None,
+            diagnostics=[],
+            title="Normalize Test",
+            title_ja=None,
+            subtitle="",
+            subtitle_ja=None,
+            locale={},
+            offset=0.0,
+            preview=0.0,
+            fingerprint="fp",
+            tja_hash="hash",
+            wave="audio.ogg",
+            song_id=None,
+            genre=None,
+            category_id=0,
+            category_title="Unsorted",
+            charts=[],
+            import_issues=[],
+            normalized_title="normalize test",
+        )
+        record_a = TjaImportRecord(**base_kwargs)
+        variant_kwargs = dict(base_kwargs)
+        variant_kwargs.update(
+            {
+                'relative_path': "pack name//sub//filename.tja",
+                'relative_dir': "PACK%20NAME/sub\\\\",
+            }
+        )
+        record_b = TjaImportRecord(**variant_kwargs)
+
+        key_a = compute_group_key(record_a)
+        key_b = compute_group_key(record_b)
+
+        self.assertEqual(key_a, "audio:deadbeef:pack name")
+        self.assertEqual(key_a, key_b)
 
     def test_scanner_normalizes_alias_courses_and_genre_fallback(self):
         tmp_dir = Path(self._tmp_dir())

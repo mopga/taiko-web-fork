@@ -1,6 +1,7 @@
 """Song scanning and parsing utilities for Taiko Web."""
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import hashlib
 import logging
@@ -11,13 +12,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Callable
+from urllib.parse import unquote
 import unicodedata
 
 from pymongo.database import Database
 
 try:  # pragma: no cover - pymongo always available in production
+    from pymongo import ReturnDocument
     from pymongo.errors import DuplicateKeyError, PyMongoError
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
+    class _ReturnDocumentFallback:
+        BEFORE = 0
+        AFTER = 1
+
+    ReturnDocument = _ReturnDocumentFallback()  # type: ignore[assignment]
     DuplicateKeyError = None  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
 
@@ -102,6 +110,61 @@ ZERO_WIDTH_CHARACTERS = {
     "\u2060",  # word joiner
     "\u180e",  # mongolian vowel separator
 }
+
+
+_GROUP_KEY_SLASH_RE = re.compile(r"/+")
+_GROUP_KEY_SPACE_RE = re.compile(r"\s+")
+
+
+def _normalise_group_text(value: Optional[str], *, casefold_value: bool, strip_slashes: bool = False) -> str:
+    text = value or ""
+    if not text:
+        return ""
+    text = unquote(text)
+    text = unicodedata.normalize("NFC", text)
+    text = text.replace("\\", "/")
+    text = _GROUP_KEY_SLASH_RE.sub("/", text)
+    if strip_slashes:
+        text = text.strip("/")
+    text = text.strip()
+    text = _GROUP_KEY_SPACE_RE.sub(" ", text)
+    text = _clean_metadata_value(text)
+    if casefold_value:
+        text = text.casefold()
+    return text
+
+
+def _folder_token_from_record(record: "TjaImportRecord") -> str:
+    relative_dir = _normalise_group_text(record.relative_dir, casefold_value=True, strip_slashes=True)
+    if not relative_dir or relative_dir == ".":
+        return "_root"
+    first_segment = relative_dir.split("/", 1)[0]
+    token = first_segment.replace(":", "_")
+    token = token.strip()
+    token = _GROUP_KEY_SPACE_RE.sub(" ", token)
+    return token or "_root"
+
+
+def compute_group_key(record: "TjaImportRecord") -> str:
+    """Return the deterministic group key for a TJA import record."""
+
+    if record.song_id:
+        song_token = _normalise_group_text(str(record.song_id), casefold_value=False)
+        return f"songid:{song_token}"
+
+    folder_token = _folder_token_from_record(record)
+
+    if record.audio_hash:
+        audio_token = _normalise_group_text(record.audio_hash, casefold_value=False)
+        return f"audio:{audio_token}:{folder_token}"
+
+    fallback_title = record.normalized_title or _normalise_title_key(record.title)
+    title_token = _normalise_group_text(fallback_title, casefold_value=True)
+    relative_dir = _normalise_group_text(record.relative_dir, casefold_value=False)
+    relative_path = _normalise_group_text(record.relative_path, casefold_value=False)
+    missing_part = f"{relative_dir}:{relative_path}" if (relative_dir or relative_path) else "missing"
+    missing_token = _normalise_group_text(missing_part, casefold_value=False)
+    return f"missing:{folder_token}:{title_token}:{missing_token}"
 
 
 @dataclass
@@ -536,6 +599,8 @@ class SongScanner:
         self._next_song_id: Optional[int] = None
         self._max_song_id: int = 0
         self._scan_lock = threading.Lock()
+        self._group_locks: Dict[str, threading.Lock] = {}
+        self._group_locks_guard = threading.Lock()
         self._state_collection = getattr(self.db, 'song_scanner_state', None)
         if self._state_collection is not None:
             try:
@@ -811,26 +876,24 @@ class SongScanner:
             LOGGER.debug('Failed to reconstruct TJA record from state payload')
             return None
 
-    def _extract_folder_token(self, record: TjaImportRecord) -> str:
-        relative_dir = (record.relative_dir or '').strip()
-        if not relative_dir or relative_dir == '.':
-            return ''
-        parts = Path(relative_dir).parts
-        if not parts:
-            return ''
-        folder = _clean_metadata_value(parts[0])
-        folder = folder.replace(':', '_') if folder else ''
-        return folder
-
     def _determine_group_key(self, record: TjaImportRecord) -> str:
-        if record.song_id:
-            return f"songid:{record.song_id}"
-        folder_token = self._extract_folder_token(record) or '_root'
-        if record.audio_hash:
-            return f"audio:{record.audio_hash}:{folder_token}"
-        fallback_title = record.normalized_title or _normalise_title_key(record.title)
-        missing_part = f"{record.relative_dir}:{record.relative_path}"
-        return f"missing:{folder_token}:{fallback_title}:{missing_part}"
+        return compute_group_key(record)
+
+    @contextlib.contextmanager
+    def _group_key_lock(self, key: str):
+        if not key:
+            yield
+            return
+        with self._group_locks_guard:
+            lock = self._group_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._group_locks[key] = lock
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _select_base_record(self, records: List[TjaImportRecord]) -> TjaImportRecord:
         def _score(record: TjaImportRecord) -> Tuple[int, int, bool]:
@@ -1211,7 +1274,7 @@ class SongScanner:
                     if record:
                         file_hash = str(state_doc.get('tja_hash') or record.tja_hash)
                         fingerprint = str(state_doc.get('fingerprint') or record.fingerprint)
-                        group_key_by_path[tja_key] = state_doc.get('group_key', '') or self._determine_group_key(record)
+                        group_key_by_path[tja_key] = compute_group_key(record)
                         summary['skipped'] += 1
                 if record is None:
                     needs_processing = True
@@ -1275,7 +1338,7 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
 
-            key = group_key_by_path.get(tja_key) or self._determine_group_key(record)
+            key = group_key_by_path.get(tja_key) or compute_group_key(record)
             group_key_by_path[tja_key] = key
             aggregated_records[key].append(record)
             records_by_path[tja_key] = record
@@ -1300,60 +1363,95 @@ class SongScanner:
         for key in sorted(aggregated_records.keys()):
             records = aggregated_records[key]
             document = self._build_song_document(key, records)
-            existing = None
-            if key:
-                existing = self.db.songs.find_one({'group_key': key})
-            if not existing and document.get('audioHash') and document.get('titleNormalized'):
-                existing = self.db.songs.find_one({'audioHash': document['audioHash'], 'titleNormalized': document['titleNormalized']})
-            if not existing and records:
-                existing = self.db.songs.find_one({'paths.tja_url': records[0].tja_url})
-
-            if existing:
-                if key not in dirty_groups:
-                    seen_song_ids.add(existing['id'])
-                    song_id_by_key[key] = existing['id']
-                    continue
-                document.pop('_id', None)
-                document['id'] = existing['id']
-                document['order'] = existing.get('order', existing['id'])
-                self.db.songs.update_one({'id': existing['id']}, {'$set': document})
-                summary['updated'] += 1
-                seen_song_ids.add(existing['id'])
-                song_id_by_key[key] = existing['id']
-            else:
-                new_id = self._get_next_song_id()
-                document['id'] = new_id
-                document['order'] = new_id
+            base_document = {k: v for k, v in document.items() if k not in {'id', 'order', '_id'}}
+            lookup_filter: Dict[str, object] = {'group_key': key}
+            update_filter: Dict[str, object] = {'group_key': key}
+            existing_doc: Optional[Dict[str, object]] = None
+            try:
+                if key:
+                    existing_doc = self.db.songs.find_one({'group_key': key})
+            except Exception:  # pragma: no cover - defensive
+                existing_doc = None
+            if (
+                existing_doc is None
+                and document.get('audioHash')
+                and document.get('titleNormalized')
+            ):
                 try:
-                    self.db.songs.insert_one(document)
-                    summary['inserted'] += 1
-                    seen_song_ids.add(new_id)
-                    song_id_by_key[key] = new_id
-                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
-                    handled = False
-                    if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
-                        fallback = self.db.songs.find_one({'group_key': key})
-                        if not fallback and records:
-                            fallback = self.db.songs.find_one({'paths.tja_url': records[0].tja_url})
-                        if fallback:
-                            document.pop('_id', None)
-                            document['id'] = fallback['id']
-                            document['order'] = fallback.get('order', fallback['id'])
-                            self.db.songs.update_one({'id': fallback['id']}, {'$set': document})
-                            summary['updated'] += 1
-                            seen_song_ids.add(fallback['id'])
-                            song_id_by_key[key] = fallback['id']
-                            handled = True
-                        else:
-                            LOGGER.warning("Duplicate key when inserting %s but no existing song was found", key)
-                            summary['errors'] += 1
-                            handled = True
-                    elif PyMongoError and isinstance(exc, PyMongoError):
-                        LOGGER.exception("Failed to insert aggregated song for %s", key)
-                        summary['errors'] += 1
-                        handled = True
-                    if not handled:
+                    existing_doc = self.db.songs.find_one(
+                        {'audioHash': document['audioHash'], 'titleNormalized': document['titleNormalized']}
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    existing_doc = None
+            if existing_doc is None and records:
+                try:
+                    existing_doc = self.db.songs.find_one({'paths.tja_url': records[0].tja_url})
+                except Exception:  # pragma: no cover - defensive
+                    existing_doc = None
+            if existing_doc is not None:
+                existing_key = existing_doc.get('group_key') or key
+                if existing_doc.get('_id') is not None:
+                    lookup_filter = {'_id': existing_doc['_id']}
+                    update_filter = {'_id': existing_doc['_id']}
+                elif existing_doc.get('id') is not None:
+                    lookup_filter = {'id': existing_doc['id']}
+                    update_filter = {'id': existing_doc['id']}
+                else:
+                    lookup_filter = {'group_key': existing_key}
+                    update_filter = {'group_key': existing_key}
+
+            result_doc: Optional[Dict[str, object]] = None
+
+            with self._group_key_lock(key):
+                for attempt in range(3):
+                    try:
+                        result_doc = self.db.songs.find_one_and_update(
+                            lookup_filter,
+                            {'$setOnInsert': base_document},
+                            upsert=True,
+                            return_document=ReturnDocument.AFTER,
+                        )
+                        break
+                    except Exception as exc:  # pragma: no cover - exercised with real MongoDB
+                        if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
+                            time.sleep(0.05 * (attempt + 1))
+                            continue
                         raise
+
+            if result_doc is None:
+                LOGGER.warning("Failed to upsert aggregated song for %s", key)
+                summary['errors'] += 1
+                continue
+
+            song_id = result_doc.get('id') if isinstance(result_doc, dict) else None
+            inserted = song_id is None
+
+            if inserted:
+                new_id = self._get_next_song_id()
+                try:
+                    self.db.songs.update_one(update_filter, {'$set': {'id': new_id, 'order': new_id}})
+                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
+                    if PyMongoError and isinstance(exc, PyMongoError):
+                        LOGGER.exception("Failed to assign song id for %s", key)
+                        summary['errors'] += 1
+                        continue
+                    raise
+                song_id = new_id
+                summary['inserted'] += 1
+            elif key in dirty_groups:
+                try:
+                    self.db.songs.update_one(update_filter, {'$set': base_document})
+                    summary['updated'] += 1
+                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
+                    if PyMongoError and isinstance(exc, PyMongoError):
+                        LOGGER.exception("Failed to update aggregated song for %s", key)
+                        summary['errors'] += 1
+                    else:
+                        raise
+
+            if song_id is not None:
+                seen_song_ids.add(song_id)
+                song_id_by_key[key] = song_id
 
         if self._state_collection is not None:
             for tja_key, record in records_by_path.items():
