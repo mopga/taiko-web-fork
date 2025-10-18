@@ -1,0 +1,273 @@
+﻿2025-10-18 10:53:19.359 | [2025-10-18 07:53:19 +0000] [1] [INFO] Starting gunicorn 23.0.0
+2025-10-18 10:53:19.360 | [2025-10-18 07:53:19 +0000] [1] [INFO] Listening at: http://0.0.0.0:8000 (1)
+2025-10-18 10:53:19.360 | [2025-10-18 07:53:19 +0000] [1] [INFO] Using worker: gthread
+2025-10-18 10:53:19.361 | [2025-10-18 07:53:19 +0000] [7] [INFO] Booting worker with pid: 7
+2025-10-18 10:53:19.419 | [2025-10-18 07:53:19 +0000] [8] [INFO] Booting worker with pid: 8
+2025-10-18 10:53:28.760 | Unknown COURSE '2' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:28.760 | Unknown COURSE '1' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:28.760 | Unknown COURSE '2' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:28.760 | Unknown COURSE '0' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:28.760 | Unknown COURSE '1' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:28.761 | Unknown COURSE '0' in /app/public/songs/01 Pop/Ao to Natsu/Ao to Natsu.tja
+2025-10-18 10:53:29.384 | [2025-10-18 07:53:29 +0000] [1] [ERROR] Worker (pid:21) exited with code 1
+2025-10-18 10:53:29.384 | [2025-10-18 07:53:29 +0000] [1] [ERROR] Worker (pid:21) exited with code 1.
+2025-10-18 10:53:32.043 | Unknown COURSE '1' in /app/public/songs/01 Pop/Dakara Boku wa Ongaku wo Yameta/Dakara Boku wa Ongaku wo Yameta -Original Version-.tja
+2025-10-18 10:53:32.043 | Unknown COURSE '0' in /app/public/songs/01 Pop/Dakara Boku wa Ongaku wo Yameta/Dakara Boku wa Ongaku wo Yameta -Original Version-.tja
+2025-10-18 10:53:32.043 | Unknown COURSE '1' in /app/public/songs/01 Pop/Dakara Boku wa Ongaku wo Yameta/Dakara Boku wa Ongaku wo Yameta -Original Version-.tja
+2025-10-18 10:53:32.044 | Unknown COURSE '0' in /app/public/songs/01 Pop/Dakara Boku wa Ongaku wo Yameta/Dakara Boku wa Ongaku wo Yameta -Original Version-.tja
+2025-10-18 10:53:33.558 | Unknown COURSE '1' in /app/public/songs/01 Pop/Favorite Days/Favorite Days.tja
+2025-10-18 10:53:33.558 | Unknown COURSE '0' in /app/public/songs/01 Pop/Favorite Days/Favorite Days.tja
+2025-10-18 10:53:33.558 | Unknown COURSE '1' in /app/public/songs/01 Pop/Favorite Days/Favorite Days.tja
+2025-10-18 10:53:33.559 | Unknown COURSE '0' in /app/public/songs/01 Pop/Favorite Days/Favorite Days.tja
+2025-10-18 10:53:35.594 | Unknown COURSE '1' in /app/public/songs/01 Pop/Hand Over/Hand Over.tja
+2025-10-18 10:53:35.594 | Unknown COURSE '0' in /app/public/songs/01 Pop/Hand Over/Hand Over.tja
+2025-10-18 10:53:35.595 | Unknown COURSE '1' in /app/public/songs/01 Pop/Hand Over/Hand Over.tja
+2025-10-18 10:53:35.595 | Unknown COURSE '0' in /app/public/songs/01 Pop/Hand Over/Hand Over.tja
+2025-10-18 10:53:35.677 | Unknown COURSE '1' in /app/public/songs/01 Pop/Haru wo Tsugeru/Haru wo Tsugeru.tja
+2025-10-18 10:53:35.677 | Unknown COURSE '0' in /app/public/songs/01 Pop/Haru wo Tsugeru/Haru wo Tsugeru.tja
+2025-10-18 10:53:35.677 | Unknown COURSE '1' in /app/public/songs/01 Pop/Haru wo Tsugeru/Haru wo Tsugeru.tja
+2025-10-18 10:53:35.678 | Unknown COURSE '0' in /app/public/songs/01 Pop/Haru wo Tsugeru/Haru wo Tsugeru.tja
+2025-10-18 10:53:36.542 | Unknown COURSE '3' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:36.542 | Unknown COURSE '3' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:36.543 | Unknown COURSE '1' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:36.543 | Unknown COURSE '0' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:36.543 | Unknown COURSE '1' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:36.544 | Unknown COURSE '0' in /app/public/songs/01 Pop/Hyper Bass/Hyper Bass.tja
+2025-10-18 10:53:37.212 | Unknown COURSE '1' in /app/public/songs/01 Pop/Idol Kyousenshi/Idol Kyousenshi.tja
+2025-10-18 10:53:37.212 | Unknown COURSE '0' in /app/public/songs/01 Pop/Idol Kyousenshi/Idol Kyousenshi.tja
+2025-10-18 10:53:37.212 | Unknown COURSE '1' in /app/public/songs/01 Pop/Idol Kyousenshi/Idol Kyousenshi.tja
+2025-10-18 10:53:37.213 | Unknown COURSE '0' in /app/public/songs/01 Pop/Idol Kyousenshi/Idol Kyousenshi.tja
+2025-10-18 10:53:37.986 | Unknown COURSE '1' in /app/public/songs/01 Pop/Itadaki Babel/Itadaki Babel.tja
+2025-10-18 10:53:37.987 | Unknown COURSE '0' in /app/public/songs/01 Pop/Itadaki Babel/Itadaki Babel.tja
+2025-10-18 10:53:37.987 | Unknown COURSE '1' in /app/public/songs/01 Pop/Itadaki Babel/Itadaki Babel.tja
+2025-10-18 10:53:37.987 | Unknown COURSE '0' in /app/public/songs/01 Pop/Itadaki Babel/Itadaki Babel.tja
+2025-10-18 10:53:38.799 | Unknown COURSE '2' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:38.799 | Unknown COURSE '1' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:38.799 | Unknown COURSE '2' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:38.800 | Unknown COURSE '0' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:38.800 | Unknown COURSE '1' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:38.800 | Unknown COURSE '0' in /app/public/songs/01 Pop/Kanden/Kanden.tja
+2025-10-18 10:53:39.426 | [2025-10-18 07:53:39 +0000] [1] [ERROR] Worker (pid:28) exited with code 1
+2025-10-18 10:53:39.426 | [2025-10-18 07:53:39 +0000] [1] [ERROR] Worker (pid:28) exited with code 1.
+2025-10-18 10:53:40.562 | Unknown COURSE '1' in /app/public/songs/01 Pop/Kousui/Kousui.tja
+2025-10-18 10:53:40.562 | Unknown COURSE '0' in /app/public/songs/01 Pop/Kousui/Kousui.tja
+2025-10-18 10:53:40.562 | Unknown COURSE '1' in /app/public/songs/01 Pop/Kousui/Kousui.tja
+2025-10-18 10:53:40.562 | Unknown COURSE '0' in /app/public/songs/01 Pop/Kousui/Kousui.tja
+2025-10-18 10:53:42.217 | Unknown COURSE '1' in /app/public/songs/01 Pop/Mani Mani/Mani Mani.tja
+2025-10-18 10:53:42.217 | Unknown COURSE '0' in /app/public/songs/01 Pop/Mani Mani/Mani Mani.tja
+2025-10-18 10:53:42.217 | Unknown COURSE '1' in /app/public/songs/01 Pop/Mani Mani/Mani Mani.tja
+2025-10-18 10:53:42.218 | Unknown COURSE '0' in /app/public/songs/01 Pop/Mani Mani/Mani Mani.tja
+2025-10-18 10:53:43.064 | Unknown COURSE '1' in /app/public/songs/01 Pop/Mikazuki/Mikazuki.tja
+2025-10-18 10:53:43.064 | Unknown COURSE '0' in /app/public/songs/01 Pop/Mikazuki/Mikazuki.tja
+2025-10-18 10:53:43.064 | Unknown COURSE '1' in /app/public/songs/01 Pop/Mikazuki/Mikazuki.tja
+2025-10-18 10:53:43.064 | Unknown COURSE '0' in /app/public/songs/01 Pop/Mikazuki/Mikazuki.tja
+2025-10-18 10:53:44.728 | Unknown COURSE '1' in /app/public/songs/01 Pop/Neko/Neko.tja
+2025-10-18 10:53:44.729 | Unknown COURSE '0' in /app/public/songs/01 Pop/Neko/Neko.tja
+2025-10-18 10:53:44.729 | Unknown COURSE '1' in /app/public/songs/01 Pop/Neko/Neko.tja
+2025-10-18 10:53:44.729 | Unknown COURSE '0' in /app/public/songs/01 Pop/Neko/Neko.tja
+2025-10-18 10:53:47.915 | Unknown COURSE '1' in /app/public/songs/01 Pop/ROCKET DIVE/ROCKET DIVE.tja
+2025-10-18 10:53:47.915 | Unknown COURSE '0' in /app/public/songs/01 Pop/ROCKET DIVE/ROCKET DIVE.tja
+2025-10-18 10:53:47.915 | Unknown COURSE '1' in /app/public/songs/01 Pop/ROCKET DIVE/ROCKET DIVE.tja
+2025-10-18 10:53:47.915 | Unknown COURSE '0' in /app/public/songs/01 Pop/ROCKET DIVE/ROCKET DIVE.tja
+2025-10-18 10:53:50.346 | Unknown COURSE '1' in /app/public/songs/01 Pop/Shining Lights/Shining Lights.tja
+2025-10-18 10:53:50.346 | Unknown COURSE '0' in /app/public/songs/01 Pop/Shining Lights/Shining Lights.tja
+2025-10-18 10:53:50.347 | Unknown COURSE '1' in /app/public/songs/01 Pop/Shining Lights/Shining Lights.tja
+2025-10-18 10:53:50.347 | Unknown COURSE '0' in /app/public/songs/01 Pop/Shining Lights/Shining Lights.tja
+2025-10-18 10:53:54.471 | [2025-10-18 07:53:54 +0000] [1] [ERROR] Worker (pid:35) exited with code 1
+2025-10-18 10:53:54.471 | [2025-10-18 07:53:54 +0000] [1] [ERROR] Worker (pid:35) exited with code 1.
+2025-10-18 10:53:57.036 | Unknown COURSE '2' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:57.037 | Unknown COURSE '1' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:57.037 | Unknown COURSE '2' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:57.037 | Unknown COURSE '0' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:57.037 | Unknown COURSE '1' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:57.038 | Unknown COURSE '0' in /app/public/songs/01 Pop/Yoku Asobi Yoku Manabe/Yoku Asobi Yoku Manabe.tja
+2025-10-18 10:53:58.172 | Unknown COURSE '1' in /app/public/songs/02 Anime/1・2・3/1 2 3.tja
+2025-10-18 10:53:58.173 | Unknown COURSE '1' in /app/public/songs/02 Anime/1・2・3/1 2 3.tja
+2025-10-18 10:53:58.173 | Unknown COURSE '0' in /app/public/songs/02 Anime/1・2・3/1 2 3.tja
+2025-10-18 10:53:58.173 | Unknown COURSE '0' in /app/public/songs/02 Anime/1・2・3/1 2 3.tja
+2025-10-18 10:53:59.785 | Unknown COURSE '1' in /app/public/songs/02 Anime/BLUE SAPPHIRE/BLUE SAPPHIRE.tja
+2025-10-18 10:53:59.785 | Unknown COURSE '0' in /app/public/songs/02 Anime/BLUE SAPPHIRE/BLUE SAPPHIRE.tja
+2025-10-18 10:53:59.785 | Unknown COURSE '1' in /app/public/songs/02 Anime/BLUE SAPPHIRE/BLUE SAPPHIRE.tja
+2025-10-18 10:53:59.785 | Unknown COURSE '0' in /app/public/songs/02 Anime/BLUE SAPPHIRE/BLUE SAPPHIRE.tja
+2025-10-18 10:54:01.620 | Unknown COURSE '1' in /app/public/songs/02 Anime/Connect/Connect.tja
+2025-10-18 10:54:01.620 | Unknown COURSE '0' in /app/public/songs/02 Anime/Connect/Connect.tja
+2025-10-18 10:54:01.621 | Unknown COURSE '1' in /app/public/songs/02 Anime/Connect/Connect.tja
+2025-10-18 10:54:01.621 | Unknown COURSE '0' in /app/public/songs/02 Anime/Connect/Connect.tja
+2025-10-18 10:54:03.063 | Unknown COURSE '1' in /app/public/songs/02 Anime/Dragon Soul/Dragon Soul.tja
+2025-10-18 10:54:03.063 | Unknown COURSE '0' in /app/public/songs/02 Anime/Dragon Soul/Dragon Soul.tja
+2025-10-18 10:54:03.063 | Unknown COURSE '1' in /app/public/songs/02 Anime/Dragon Soul/Dragon Soul.tja
+2025-10-18 10:54:03.063 | Unknown COURSE '0' in /app/public/songs/02 Anime/Dragon Soul/Dragon Soul.tja
+2025-10-18 10:54:04.751 | Unknown COURSE '1' in /app/public/songs/02 Anime/Gomakashi/Gomakashi.tja
+2025-10-18 10:54:04.752 | Unknown COURSE '1' in /app/public/songs/02 Anime/Gomakashi/Gomakashi.tja
+2025-10-18 10:54:04.752 | Unknown COURSE '0' in /app/public/songs/02 Anime/Gomakashi/Gomakashi.tja
+2025-10-18 10:54:04.752 | Unknown COURSE '0' in /app/public/songs/02 Anime/Gomakashi/Gomakashi.tja
+2025-10-18 10:54:06.473 | Unknown COURSE '1' in /app/public/songs/02 Anime/Homura/Homura.tja
+2025-10-18 10:54:06.473 | Unknown COURSE '0' in /app/public/songs/02 Anime/Homura/Homura.tja
+2025-10-18 10:54:06.473 | Unknown COURSE '1' in /app/public/songs/02 Anime/Homura/Homura.tja
+2025-10-18 10:54:06.473 | Unknown COURSE '0' in /app/public/songs/02 Anime/Homura/Homura.tja
+2025-10-18 10:54:07.189 | Unknown COURSE '1' in /app/public/songs/02 Anime/Inferno/Inferno.tja
+2025-10-18 10:54:07.189 | Unknown COURSE '0' in /app/public/songs/02 Anime/Inferno/Inferno.tja
+2025-10-18 10:54:07.189 | Unknown COURSE '1' in /app/public/songs/02 Anime/Inferno/Inferno.tja
+2025-10-18 10:54:07.190 | Unknown COURSE '0' in /app/public/songs/02 Anime/Inferno/Inferno.tja
+2025-10-18 10:54:08.445 | Unknown COURSE '1' in /app/public/songs/02 Anime/Kazetachi no Koe/Kazetachi no Koe.tja
+2025-10-18 10:54:08.446 | Unknown COURSE '0' in /app/public/songs/02 Anime/Kazetachi no Koe/Kazetachi no Koe.tja
+2025-10-18 10:54:08.446 | Unknown COURSE '1' in /app/public/songs/02 Anime/Kazetachi no Koe/Kazetachi no Koe.tja
+2025-10-18 10:54:08.446 | Unknown COURSE '0' in /app/public/songs/02 Anime/Kazetachi no Koe/Kazetachi no Koe.tja
+2025-10-18 10:54:09.017 | Unknown COURSE '1' in /app/public/songs/02 Anime/Kishiryu Sentai Ryusoulger/Kishiryu Sentai Ryusoulger.tja
+2025-10-18 10:54:09.018 | Unknown COURSE '0' in /app/public/songs/02 Anime/Kishiryu Sentai Ryusoulger/Kishiryu Sentai Ryusoulger.tja
+2025-10-18 10:54:09.018 | Unknown COURSE '1' in /app/public/songs/02 Anime/Kishiryu Sentai Ryusoulger/Kishiryu Sentai Ryusoulger.tja
+2025-10-18 10:54:09.018 | Unknown COURSE '0' in /app/public/songs/02 Anime/Kishiryu Sentai Ryusoulger/Kishiryu Sentai Ryusoulger.tja
+2025-10-18 10:54:09.512 | [2025-10-18 07:54:09 +0000] [1] [ERROR] Worker (pid:42) exited with code 1
+2025-10-18 10:54:09.512 | [2025-10-18 07:54:09 +0000] [1] [ERROR] Worker (pid:42) exited with code 1.
+2025-10-18 10:54:10.367 | Unknown COURSE '1' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -New Audio-.tja
+2025-10-18 10:54:10.368 | Unknown COURSE '0' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -New Audio-.tja
+2025-10-18 10:54:10.368 | Unknown COURSE '1' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -New Audio-.tja
+2025-10-18 10:54:10.368 | Unknown COURSE '0' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -New Audio-.tja
+2025-10-18 10:54:10.412 | Unknown COURSE '1' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -Old Audio-.tja
+2025-10-18 10:54:10.413 | Unknown COURSE '0' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -Old Audio-.tja
+2025-10-18 10:54:10.413 | Unknown COURSE '1' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -Old Audio-.tja
+2025-10-18 10:54:10.413 | Unknown COURSE '0' in /app/public/songs/02 Anime/Makafushigi Adventure!/Makafushigi Adventure! -Old Audio-.tja
+2025-10-18 10:54:12.854 | Unknown COURSE '1' in /app/public/songs/02 Anime/PHOENIX/PHOENIX.tja
+2025-10-18 10:54:12.854 | Unknown COURSE '0' in /app/public/songs/02 Anime/PHOENIX/PHOENIX.tja
+2025-10-18 10:54:12.854 | Unknown COURSE '1' in /app/public/songs/02 Anime/PHOENIX/PHOENIX.tja
+2025-10-18 10:54:12.855 | Unknown COURSE '0' in /app/public/songs/02 Anime/PHOENIX/PHOENIX.tja
+2025-10-18 10:54:14.925 | Unknown COURSE '1' in /app/public/songs/02 Anime/Shinkalion/Shinkalion.tja
+2025-10-18 10:54:14.925 | Unknown COURSE '0' in /app/public/songs/02 Anime/Shinkalion/Shinkalion.tja
+2025-10-18 10:54:14.925 | Unknown COURSE '1' in /app/public/songs/02 Anime/Shinkalion/Shinkalion.tja
+2025-10-18 10:54:14.925 | Unknown COURSE '0' in /app/public/songs/02 Anime/Shinkalion/Shinkalion.tja
+2025-10-18 10:54:20.631 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Dareka no Shinzou ni Nareta Nara/Dareka no Shinzou ni Nareta Nara.tja
+2025-10-18 10:54:20.631 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Dareka no Shinzou ni Nareta Nara/Dareka no Shinzou ni Nareta Nara.tja
+2025-10-18 10:54:20.631 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Dareka no Shinzou ni Nareta Nara/Dareka no Shinzou ni Nareta Nara.tja
+2025-10-18 10:54:20.632 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Dareka no Shinzou ni Nareta Nara/Dareka no Shinzou ni Nareta Nara.tja
+2025-10-18 10:54:21.087 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Future Melody -Kokoro Kara Mirai e-/Future Melody -Kokoro Kara Mirai e-.tja
+2025-10-18 10:54:21.088 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Future Melody -Kokoro Kara Mirai e-/Future Melody -Kokoro Kara Mirai e-.tja
+2025-10-18 10:54:21.088 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Future Melody -Kokoro Kara Mirai e-/Future Melody -Kokoro Kara Mirai e-.tja
+2025-10-18 10:54:21.088 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Future Melody -Kokoro Kara Mirai e-/Future Melody -Kokoro Kara Mirai e-.tja
+2025-10-18 10:54:21.945 | Unknown COURSE '2' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:21.945 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:21.945 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:21.945 | Unknown COURSE '2' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:21.946 | Unknown COURSE '1' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:21.946 | Unknown COURSE '0' in /app/public/songs/03 Vocaloid/Inochi ni Kirawarete iru/Inochi ni Kirawarete iru..tja
+2025-10-18 10:54:24.541 | [2025-10-18 07:54:24 +0000] [1] [ERROR] Worker (pid:49) exited with code 1
+2025-10-18 10:54:24.541 | [2025-10-18 07:54:24 +0000] [1] [ERROR] Worker (pid:49) exited with code 1.
+2025-10-18 10:54:39.582 | [2025-10-18 07:54:39 +0000] [1] [ERROR] Worker (pid:56) exited with code 1
+2025-10-18 10:54:39.582 | [2025-10-18 07:54:39 +0000] [1] [ERROR] Worker (pid:56) exited with code 1.
+2025-10-18 10:54:49.792 | Unknown COURSE '2' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:49.793 | Unknown COURSE '2' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:49.793 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:49.793 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:49.793 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:49.793 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Music Revolver/Music Revolver.tja
+2025-10-18 10:54:50.572 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Nihiki wa Neko Tomo!/Nihiki wa Neko Tomo!.tja
+2025-10-18 10:54:50.572 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Nihiki wa Neko Tomo!/Nihiki wa Neko Tomo!.tja
+2025-10-18 10:54:50.572 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Nihiki wa Neko Tomo!/Nihiki wa Neko Tomo!.tja
+2025-10-18 10:54:50.573 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Nihiki wa Neko Tomo!/Nihiki wa Neko Tomo!.tja
+2025-10-18 10:54:54.621 | [2025-10-18 07:54:54 +0000] [1] [ERROR] Worker (pid:63) exited with code 1
+2025-10-18 10:54:54.621 | [2025-10-18 07:54:54 +0000] [1] [ERROR] Worker (pid:63) exited with code 1.
+2025-10-18 10:54:55.907 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Tanoshii Taiko Dojo/Tanoshii Taiko Dojo.tja
+2025-10-18 10:54:55.907 | Unknown COURSE '1' in /app/public/songs/07 Game Music/Tanoshii Taiko Dojo/Tanoshii Taiko Dojo.tja
+2025-10-18 10:54:55.926 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Tanoshii Taiko Dojo/Tanoshii Taiko Dojo.tja
+2025-10-18 10:54:55.926 | Unknown COURSE '0' in /app/public/songs/07 Game Music/Tanoshii Taiko Dojo/Tanoshii Taiko Dojo.tja
+2025-10-18 10:55:00.705 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Atashi Ikasama Koi wa Ikasama/Atashi Ikasama Koi wa Ikasama.tja
+2025-10-18 10:55:00.705 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Atashi Ikasama Koi wa Ikasama/Atashi Ikasama Koi wa Ikasama.tja
+2025-10-18 10:55:00.706 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Atashi Ikasama Koi wa Ikasama/Atashi Ikasama Koi wa Ikasama.tja
+2025-10-18 10:55:00.706 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Atashi Ikasama Koi wa Ikasama/Atashi Ikasama Koi wa Ikasama.tja
+2025-10-18 10:55:05.217 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Drawin’☆Dream!/Drawin Dream!.tja
+2025-10-18 10:55:05.217 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Drawin’☆Dream!/Drawin Dream!.tja
+2025-10-18 10:55:05.217 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Drawin’☆Dream!/Drawin Dream!.tja
+2025-10-18 10:55:05.218 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Drawin’☆Dream!/Drawin Dream!.tja
+2025-10-18 10:55:07.154 | Unknown COURSE '2' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.154 | Unknown COURSE '2' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.154 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.155 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.155 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.155 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Growing Up/Growing Up.tja
+2025-10-18 10:55:07.965 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin/Hibike! Taiko no Tatsujin.tja
+2025-10-18 10:55:07.965 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin/Hibike! Taiko no Tatsujin.tja
+2025-10-18 10:55:07.965 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin/Hibike! Taiko no Tatsujin.tja
+2025-10-18 10:55:07.965 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin/Hibike! Taiko no Tatsujin.tja
+2025-10-18 10:55:08.001 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin -Long Version-/Hibike! Taiko no Tatsujin -Long Version-.tja
+2025-10-18 10:55:08.001 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin -Long Version-/Hibike! Taiko no Tatsujin -Long Version-.tja
+2025-10-18 10:55:08.002 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin -Long Version-/Hibike! Taiko no Tatsujin -Long Version-.tja
+2025-10-18 10:55:08.002 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Hibike! Taiko no Tatsujin -Long Version-/Hibike! Taiko no Tatsujin -Long Version-.tja
+2025-10-18 10:55:09.669 | [2025-10-18 07:55:09 +0000] [1] [ERROR] Worker (pid:70) exited with code 1
+2025-10-18 10:55:09.669 | [2025-10-18 07:55:09 +0000] [1] [ERROR] Worker (pid:70) exited with code 1.
+2025-10-18 10:55:11.150 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Kimi to Hibiku Harmony/Kimi to Hibiku Harmony.tja
+2025-10-18 10:55:11.150 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Kimi to Hibiku Harmony/Kimi to Hibiku Harmony.tja
+2025-10-18 10:55:11.150 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Kimi to Hibiku Harmony/Kimi to Hibiku Harmony.tja
+2025-10-18 10:55:11.151 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Kimi to Hibiku Harmony/Kimi to Hibiku Harmony.tja
+2025-10-18 10:55:11.890 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Kumo Made Todoke!/Kumo Made Todoke!.tja
+2025-10-18 10:55:11.891 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Kumo Made Todoke!/Kumo Made Todoke!.tja
+2025-10-18 10:55:11.891 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Kumo Made Todoke!/Kumo Made Todoke!.tja
+2025-10-18 10:55:11.891 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Kumo Made Todoke!/Kumo Made Todoke!.tja
+2025-10-18 10:55:12.570 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Lalala☆Happiness/Lalala Happiness.tja
+2025-10-18 10:55:12.570 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Lalala☆Happiness/Lalala Happiness.tja
+2025-10-18 10:55:12.570 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Lalala☆Happiness/Lalala Happiness.tja
+2025-10-18 10:55:12.571 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Lalala☆Happiness/Lalala Happiness.tja
+2025-10-18 10:55:12.997 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/MATSURI D A/MATSURI D A.tja
+2025-10-18 10:55:12.997 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/MATSURI D A/MATSURI D A.tja
+2025-10-18 10:55:12.997 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/MATSURI D A/MATSURI D A.tja
+2025-10-18 10:55:12.998 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/MATSURI D A/MATSURI D A.tja
+2025-10-18 10:55:13.536 | Unknown COURSE '2' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:13.536 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:13.536 | Unknown COURSE '2' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:13.536 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:13.536 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:13.537 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Marble Heart/Marble Heart.tja
+2025-10-18 10:55:14.830 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Nanairo Harmony/Nanairo Harmony.tja
+2025-10-18 10:55:14.830 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Nanairo Harmony/Nanairo Harmony.tja
+2025-10-18 10:55:14.830 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Nanairo Harmony/Nanairo Harmony.tja
+2025-10-18 10:55:14.831 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Nanairo Harmony/Nanairo Harmony.tja
+2025-10-18 10:55:15.589 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Obsession Latino/Obsession Latino.tja
+2025-10-18 10:55:15.589 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Obsession Latino/Obsession Latino.tja
+2025-10-18 10:55:15.590 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Obsession Latino/Obsession Latino.tja
+2025-10-18 10:55:15.590 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Obsession Latino/Obsession Latino.tja
+2025-10-18 10:55:16.494 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Parallel Lollipop/Parallel Lollipop.tja
+2025-10-18 10:55:16.494 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Parallel Lollipop/Parallel Lollipop.tja
+2025-10-18 10:55:16.494 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Parallel Lollipop/Parallel Lollipop.tja
+2025-10-18 10:55:16.494 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Parallel Lollipop/Parallel Lollipop.tja
+2025-10-18 10:55:17.377 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Ramen de Yo-Men!!/Ramen de Yo-Men!!.tja
+2025-10-18 10:55:17.377 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Ramen de Yo-Men!!/Ramen de Yo-Men!!.tja
+2025-10-18 10:55:17.377 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Ramen de Yo-Men!!/Ramen de Yo-Men!!.tja
+2025-10-18 10:55:17.378 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Ramen de Yo-Men!!/Ramen de Yo-Men!!.tja
+2025-10-18 10:55:17.501 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Rei Wadaiko/Rei Wadaiko.tja
+2025-10-18 10:55:17.501 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Rei Wadaiko/Rei Wadaiko.tja
+2025-10-18 10:55:17.501 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Rei Wadaiko/Rei Wadaiko.tja
+2025-10-18 10:55:17.501 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Rei Wadaiko/Rei Wadaiko.tja
+2025-10-18 10:55:18.287 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/SORA-V Cosmic Bird/SORA-V Cosmic Bird.tja
+2025-10-18 10:55:18.288 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/SORA-V Cosmic Bird/SORA-V Cosmic Bird.tja
+2025-10-18 10:55:18.288 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/SORA-V Cosmic Bird/SORA-V Cosmic Bird.tja
+2025-10-18 10:55:18.288 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/SORA-V Cosmic Bird/SORA-V Cosmic Bird.tja
+2025-10-18 10:55:22.079 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/The Carnivorous Carnival/The Carnivorous Carnival.tja
+2025-10-18 10:55:22.080 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/The Carnivorous Carnival/The Carnivorous Carnival.tja
+2025-10-18 10:55:22.080 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/The Carnivorous Carnival/The Carnivorous Carnival.tja
+2025-10-18 10:55:22.080 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/The Carnivorous Carnival/The Carnivorous Carnival.tja
+2025-10-18 10:55:22.506 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Todoroke! Taiko no Tatsujin/Todoroke! Taiko no Tatsujin.tja
+2025-10-18 10:55:22.507 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Todoroke! Taiko no Tatsujin/Todoroke! Taiko no Tatsujin.tja
+2025-10-18 10:55:22.507 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Todoroke! Taiko no Tatsujin/Todoroke! Taiko no Tatsujin.tja
+2025-10-18 10:55:22.507 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Todoroke! Taiko no Tatsujin/Todoroke! Taiko no Tatsujin.tja
+2025-10-18 10:55:22.729 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Tonde Mite/Tonde Mite.tja
+2025-10-18 10:55:22.730 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Tonde Mite/Tonde Mite.tja
+2025-10-18 10:55:22.730 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Tonde Mite/Tonde Mite.tja
+2025-10-18 10:55:22.730 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Tonde Mite/Tonde Mite.tja
+2025-10-18 10:55:23.086 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Tsunagare! Hirogare! Uchiagare!/Tsunagare! Hirogare! Uchiagare!.tja
+2025-10-18 10:55:23.086 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Tsunagare! Hirogare! Uchiagare!/Tsunagare! Hirogare! Uchiagare!.tja
+2025-10-18 10:55:23.086 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Tsunagare! Hirogare! Uchiagare!/Tsunagare! Hirogare! Uchiagare!.tja
+2025-10-18 10:55:23.086 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Tsunagare! Hirogare! Uchiagare!/Tsunagare! Hirogare! Uchiagare!.tja
+2025-10-18 10:55:24.034 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Wavy Baby/Wavy Baby.tja
+2025-10-18 10:55:24.035 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Wavy Baby/Wavy Baby.tja
+2025-10-18 10:55:24.035 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Wavy Baby/Wavy Baby.tja
+2025-10-18 10:55:24.035 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Wavy Baby/Wavy Baby.tja
+2025-10-18 10:55:24.078 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Welcome to the Taiko Stadium!/Welcome to the Taiko Stadium!.tja
+2025-10-18 10:55:24.079 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/Welcome to the Taiko Stadium!/Welcome to the Taiko Stadium!.tja
+2025-10-18 10:55:24.079 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Welcome to the Taiko Stadium!/Welcome to the Taiko Stadium!.tja
+2025-10-18 10:55:24.079 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/Welcome to the Taiko Stadium!/Welcome to the Taiko Stadium!.tja
+2025-10-18 10:55:24.706 | [2025-10-18 07:55:24 +0000] [1] [ERROR] Worker (pid:77) exited with code 1
+2025-10-18 10:55:24.706 | [2025-10-18 07:55:24 +0000] [1] [ERROR] Worker (pid:77) exited with code 1.
+2025-10-18 10:55:25.570 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/integral/∫ -integral-.tja
+2025-10-18 10:55:25.571 | Unknown COURSE '1' in /app/public/songs/09 Namco Original/integral/∫ -integral-.tja
+2025-10-18 10:55:25.571 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/integral/∫ -integral-.tja
+2025-10-18 10:55:25.571 | Unknown COURSE '0' in /app/public/songs/09 Namco Original/integral/∫ -integral-.tja
+2025-10-18 10:55:49.850 | [2025-10-18 07:55:49 +0000] [1] [ERROR] Worker (pid:98) exited with code 1
+2025-10-18 10:55:49.851 | [2025-10-18 07:55:49 +0000] [1] [ERROR] Worker (pid:98) exited with code 1.
