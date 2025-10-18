@@ -291,7 +291,8 @@ class TestSongsScanner(unittest.TestCase):
         course = parsed.courses[0]
         self.assertEqual(course.start_blocks, 1)
         self.assertEqual(course.end_blocks, 1)
-        self.assertEqual(course.total_notes, 2)
+        self.assertEqual(course.total_notes, 4)
+        self.assertEqual(course.hit_notes, 2)
         self.assertEqual(course.first_note_preview, "1,0")
 
     def test_parse_tja_preserves_metadata_with_comment_markers(self):
@@ -313,6 +314,115 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(parsed.wave, "http://cdn.example.com/song.ogg")
         course = parsed.courses[0]
         self.assertEqual(course.total_notes, 1)
+
+    def test_parse_tja_allows_safe_directives_between_measures(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = Path(tmp_dir) / "directives.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Directive Test",
+            "WAVE:dummy.ogg",
+            "COURSE:Oni",
+            "LEVEL:6",
+            "#START",
+            "1110,",
+            "#BPMCHANGE 72.5",
+            "#MEASURE 3/4",
+            "2220,",
+            "#SCROLL 0.75",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+        self.assertEqual(len(parsed.courses), 1)
+        course = parsed.courses[0]
+        self.assertEqual(course.start_blocks, 1)
+        self.assertEqual(course.end_blocks, 1)
+        self.assertGreaterEqual(course.total_notes, 8)
+        self.assertEqual(course.hit_notes, 6)
+
+    def test_parse_tja_maps_numeric_and_taste_aliases(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = Path(tmp_dir) / "aliases.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Alias Test",
+            "WAVE:dummy.ogg",
+            "COURSE:0",
+            "LEVEL:1",
+            "#START",
+            "1",
+            "#END",
+            "COURSE:辛口",
+            "LEVEL:4",
+            "#START",
+            "1",
+            "#END",
+            "COURSE:4",
+            "LEVEL:9",
+            "#START",
+            "1",
+            "#END",
+            "COURSE:7",
+            "LEVEL:1",
+            "#START",
+            "1",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+        courses = {course.canonical: course for course in parsed.courses}
+        self.assertIn("Easy", courses)
+        self.assertIn("Normal", courses)
+        self.assertIn("UraOni", courses)
+        unknown_courses = [course for course in parsed.courses if course.canonical == "Unknown"]
+        self.assertTrue(unknown_courses)
+        self.assertIn("unknown_course_numeric", unknown_courses[0].issues)
+
+    def test_resolve_course_uses_path_markers_for_tower(self):
+        tmp_dir = Path(self._tmp_dir())
+
+        oni_path = Path(tmp_dir) / "tower" / "tower.tja"
+        oni_path.parent.mkdir(parents=True, exist_ok=True)
+        oni_path.write_text("\n".join([
+            "TITLE:Tower Oni",
+            "WAVE:dummy.ogg",
+            "COURSE:Tower",
+            "LEVEL:8",
+            "#START",
+            "1",
+            "#END",
+        ]), encoding="utf-8")
+
+        easy_path = Path(tmp_dir) / "Tower Ama" / "chart.tja"
+        easy_path.parent.mkdir(parents=True, exist_ok=True)
+        easy_path.write_text("\n".join([
+            "TITLE:Tower Easy",
+            "WAVE:dummy.ogg",
+            "COURSE:Tower",
+            "LEVEL:2",
+            "#START",
+            "1",
+            "#END",
+        ]), encoding="utf-8")
+
+        normal_path = Path(tmp_dir) / "Tower" / "Tower Kara.tja"
+        normal_path.parent.mkdir(parents=True, exist_ok=True)
+        normal_path.write_text("\n".join([
+            "TITLE:Tower Normal",
+            "WAVE:dummy.ogg",
+            "COURSE:Tower",
+            "LEVEL:4",
+            "#START",
+            "1",
+            "#END",
+        ]), encoding="utf-8")
+
+        oni_course = parse_tja(oni_path).courses[0]
+        easy_course = parse_tja(easy_path).courses[0]
+        normal_course = parse_tja(normal_path).courses[0]
+
+        self.assertEqual(oni_course.canonical, "Oni")
+        self.assertEqual(easy_course.canonical, "Easy")
+        self.assertEqual(normal_course.canonical, "Normal")
 
     def test_scanner_merges_multiple_tja_into_single_song(self):
         tmp_dir = Path(self._tmp_dir())
@@ -371,6 +481,98 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(followup_summary['skipped'], 2)
         existing = db.songs._docs[0]
         self.assertEqual(len(existing['charts']), 2)
+
+    def test_scanner_marks_duplicate_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = songs_dir / "dup.ogg"
+        audio_path.write_bytes(b"duplicate-audio")
+
+        first_tja = songs_dir / "oni_a.tja"
+        first_tja.write_text("\n".join([
+            "TITLE:Duplicate Oni",
+            "WAVE:dup.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        second_tja = songs_dir / "oni_b.tja"
+        second_tja.write_text("\n".join([
+            "TITLE:Duplicate Oni",
+            "WAVE:dup.ogg",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(len(inserted['charts']), 1)
+        self.assertIn('duplicate_course', inserted.get('import_issues', []))
+        self.assertEqual(inserted['charts'][0]['course'], 'Oni')
+
+    def test_scanner_groups_tower_flavour_files_into_single_song(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        pack_dir = songs_dir / "Tower Pack"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = pack_dir / "tower.ogg"
+        audio_path.write_bytes(b"tower-audio")
+
+        ama_tja = pack_dir / "Tower Ama.tja"
+        ama_tja.write_text("\n".join([
+            "TITLE:Tower Ama",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:2",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        kara_tja = pack_dir / "Tower Kara.tja"
+        kara_tja.write_text("\n".join([
+            "TITLE:Tower Kara",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:4",
+            "#START",
+            "1,0",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        courses = {chart['course'] for chart in inserted['charts']}
+        self.assertIn('Easy', courses)
+        self.assertIn('Normal', courses)
+        self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
 
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
         db = _DummyDB()
