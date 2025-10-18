@@ -71,7 +71,7 @@ def migrate_songs():
         db.songs.insert_one(song)
         last_song = song['id']
     
-    db.seq.insert_one({'name': 'songs', 'value': last_song})
+    db.counters.update_one({'_id': 'songs'}, {'$set': {'seq': last_song}}, upsert=True)
 
 def migrate_makers():
     curs.execute('select * from makers')

@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,10 +32,13 @@ from flask_caching import Cache
 from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
 from redis import Redis
 
 from songs_scanner import SongScanner
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_config_module():
@@ -134,6 +138,10 @@ try:
     db.song_scanner_state.create_index('tja_path', unique=True)
 except Exception:
     app.logger.debug('Could not ensure song_scanner_state index')
+try:
+    db.counters.update_one({'_id': 'songs'}, {'$setOnInsert': {'seq': 0}}, upsert=True)
+except Exception:
+    app.logger.debug('Could not ensure songs counter document')
 
 
 @app.route('/healthz')
@@ -408,15 +416,128 @@ def route_admin_songs_id(id):
         song=song, categories=categories, song_skins=song_skins, makers=makers, admin=user, config=get_config())
 
 
+def _current_song_id_ceiling(*, include_counter: bool = True) -> int:
+    current = 0
+    if include_counter:
+        counter = getattr(db, 'counters', None)
+        if counter is not None:
+            try:
+                counter_doc = counter.find_one({'_id': 'songs'})
+            except Exception:
+                counter_doc = None
+            if counter_doc and isinstance(counter_doc.get('seq'), int):
+                current = max(current, counter_doc['seq'])
+    seq = getattr(db, 'seq', None)
+    if seq is not None:
+        try:
+            seq_doc = seq.find_one({'name': 'songs'})
+        except Exception:
+            seq_doc = None
+        if seq_doc and isinstance(seq_doc.get('value'), int):
+            current = max(current, seq_doc['value'])
+    try:
+        highest_song = db.songs.find_one(sort=[('id', -1)])
+    except Exception:
+        highest_song = None
+    if highest_song and isinstance(highest_song.get('id'), int):
+        current = max(current, highest_song['id'])
+    return current
+
+
+def _peek_next_song_id():
+    return _current_song_id_ceiling() + 1
+
+
 def _get_next_song_id():
-    seq = db.seq.find_one({'name': 'songs'})
-    seq_value = seq['value'] if seq else 0
-
+    counter = getattr(db, 'counters', None)
+    if counter is not None:
+        floor = _current_song_id_ceiling()
+        try:
+            counter.update_one(
+                {'_id': 'songs'},
+                {
+                    '$setOnInsert': {'seq': floor},
+                    '$max': {'seq': floor},
+                },
+                upsert=True,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                'Failed to ensure songs counter floor at %d: %s',
+                floor,
+                exc,
+                exc_info=True,
+            )
+        last_failure = None
+        for attempt in range(3):
+            try:
+                doc = counter.find_one_and_update(
+                    {'_id': 'songs'},
+                    {'$inc': {'seq': 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+            except Exception as exc:
+                last_failure = exc
+                delay = 0.05 * (attempt + 1)
+                LOGGER.warning(
+                    'Failed to increment songs counter (attempt %d/3); retrying in %.2fs: %s',
+                    attempt + 1,
+                    delay,
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(delay)
+                continue
+            if isinstance(doc, dict) and isinstance(doc.get('seq'), int):
+                seq_value = doc['seq']
+                ceiling = _current_song_id_ceiling(include_counter=False)
+                if seq_value <= ceiling:
+                    last_failure = RuntimeError(
+                        f'songs counter returned stale value {seq_value} <= ceiling {ceiling}'
+                    )
+                    LOGGER.warning(
+                        'Songs counter returned %d which is not above the ceiling %d; repairing and retrying',
+                        seq_value,
+                        ceiling,
+                    )
+                    try:
+                        counter.update_one(
+                            {'_id': 'songs'},
+                            {
+                                '$setOnInsert': {'seq': ceiling},
+                                '$max': {'seq': ceiling},
+                            },
+                            upsert=True,
+                        )
+                    except Exception as clamp_exc:
+                        last_failure = clamp_exc
+                        LOGGER.warning(
+                            'Failed to clamp songs counter to %d: %s',
+                            ceiling,
+                            clamp_exc,
+                            exc_info=True,
+                        )
+                        break
+                    floor = max(floor, ceiling)
+                    continue
+                return seq_value
+        if last_failure is not None:
+            LOGGER.warning('Falling back to legacy song id allocation after counter failures')
+    seq = getattr(db, 'seq', None)
+    if seq is not None:
+        seq_doc = seq.find_one({'name': 'songs'})
+        seq_value = seq_doc['value'] if seq_doc else 0
+        highest_song = db.songs.find_one(sort=[('id', -1)])
+        if highest_song and highest_song['id'] > seq_value:
+            seq_value = highest_song['id']
+        next_value = seq_value + 1
+        seq.update_one({'name': 'songs'}, {'$set': {'value': next_value}}, upsert=True)
+        return next_value
     highest_song = db.songs.find_one(sort=[('id', -1)])
-    if highest_song and highest_song['id'] > seq_value:
-        seq_value = highest_song['id']
-
-    return seq_value + 1
+    if highest_song and highest_song['id']:
+        return highest_song['id'] + 1
+    return 1
 
 
 @app.route(basedir + 'admin/songs/new')
@@ -425,7 +546,7 @@ def route_admin_songs_new():
     categories = list(db.categories.find({}))
     song_skins = list(db.song_skins.find({}))
     makers = list(db.makers.find({}))
-    seq_new = _get_next_song_id()
+    seq_new = _peek_next_song_id()
 
     return render_template('admin_song_new.html', categories=categories, song_skins=song_skins, makers=makers, config=get_config(), id=seq_new)
 
@@ -475,8 +596,6 @@ def route_admin_songs_new_post():
     db.songs.insert_one(output)
     if not hash_error:
         flash('Song created.')
-    
-    db.seq.update_one({'name': 'songs'}, {'$set': {'value': seq_new}}, upsert=True)
     
     return redirect(basedir + 'admin/songs/%s' % str(seq_new))
 
