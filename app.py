@@ -416,9 +416,9 @@ def route_admin_songs_id(id):
         song=song, categories=categories, song_skins=song_skins, makers=makers, admin=user, config=get_config())
 
 
-def _peek_next_song_id():
-    counter = getattr(db, 'counters', None)
+def _current_song_id_ceiling() -> int:
     current = 0
+    counter = getattr(db, 'counters', None)
     if counter is not None:
         try:
             counter_doc = counter.find_one({'_id': 'songs'})
@@ -440,12 +440,33 @@ def _peek_next_song_id():
         highest_song = None
     if highest_song and isinstance(highest_song.get('id'), int):
         current = max(current, highest_song['id'])
-    return current + 1
+    return current
+
+
+def _peek_next_song_id():
+    return _current_song_id_ceiling() + 1
 
 
 def _get_next_song_id():
     counter = getattr(db, 'counters', None)
     if counter is not None:
+        floor = _current_song_id_ceiling()
+        try:
+            counter.update_one(
+                {'_id': 'songs'},
+                {
+                    '$setOnInsert': {'seq': floor},
+                    '$max': {'seq': floor},
+                },
+                upsert=True,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                'Failed to ensure songs counter floor at %d: %s',
+                floor,
+                exc,
+                exc_info=True,
+            )
         last_failure = None
         for attempt in range(3):
             try:
@@ -468,7 +489,18 @@ def _get_next_song_id():
                 time.sleep(delay)
                 continue
             if isinstance(doc, dict) and isinstance(doc.get('seq'), int):
-                return doc['seq']
+                seq_value = doc['seq']
+                if seq_value <= floor:
+                    last_failure = RuntimeError(
+                        f'songs counter returned stale value {seq_value} <= floor {floor}'
+                    )
+                    LOGGER.warning(
+                        'Songs counter returned %d which is not above the floor %d; retrying',
+                        seq_value,
+                        floor,
+                    )
+                    continue
+                return seq_value
         if last_failure is not None:
             LOGGER.warning('Falling back to legacy song id allocation after counter failures')
     seq = getattr(db, 'seq', None)

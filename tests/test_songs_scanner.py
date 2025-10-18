@@ -187,6 +187,11 @@ class _MemoryCollection:
                 if not isinstance(current, (int, float)):
                     current = 0
                 self._set_path(doc, key, current + amount)
+        if '$max' in update:
+            for key, value in update['$max'].items():
+                current = self._resolve_key(doc, key)
+                if current is None or current < value:
+                    self._set_path(doc, key, self._clone(value))
         if '$addToSet' in update:
             for key, value in update['$addToSet'].items():
                 array = doc.setdefault(key, [])
@@ -823,6 +828,27 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(allocated, [1, 2, 3, 4, 5])
         counter_docs = [doc for doc in db.counters._docs if doc.get('_id') == 'songs']
         self.assertEqual(counter_docs[0]['seq'], 5)
+
+    def test_get_next_song_id_respects_existing_records(self):
+        tmp_dir = Path(self._tmp_dir())
+        db = _DummyDB()
+        db.songs.insert_one({'id': 25})
+        db.seq.update_one({'name': 'songs'}, {'$set': {'value': 10}})
+        db.counters._docs[0]['seq'] = 0
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=tmp_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        next_id = scanner._get_next_song_id()
+
+        self.assertEqual(next_id, 26)
+        counter_doc = db.counters.find_one({'_id': 'songs'})
+        self.assertIsNotNone(counter_doc)
+        self.assertEqual(counter_doc['seq'], 26)
 
     def test_concurrent_id_allocation_has_no_gaps(self):
         songs_dir = Path(self._tmp_dir())

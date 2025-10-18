@@ -1622,9 +1622,47 @@ class SongScanner:
             document['audioHash'] = audio_hash
         return document
 
+    def _current_song_id_ceiling(self) -> int:
+        current = 0
+        counters = getattr(self.db, 'counters', None)
+        if counters is not None:
+            try:
+                counter_doc = counters.find_one({'_id': 'songs'})
+            except Exception:  # pragma: no cover - tolerate driver errors
+                counter_doc = None
+            if counter_doc and isinstance(counter_doc.get('seq'), int):
+                current = max(current, int(counter_doc['seq']))
+        seq = getattr(self.db, 'seq', None)
+        if seq is not None:
+            try:
+                seq_doc = seq.find_one({'name': 'songs'})
+            except Exception:  # pragma: no cover - tolerate driver errors
+                seq_doc = None
+            if seq_doc and isinstance(seq_doc.get('value'), int):
+                current = max(current, int(seq_doc['value']))
+        try:
+            max_song = self.db.songs.find_one(sort=[('id', -1)])
+        except Exception:  # pragma: no cover - tolerate driver errors
+            max_song = None
+        if max_song and isinstance(max_song.get('id'), int):
+            current = max(current, int(max_song['id']))
+        return current
+
     def _get_next_song_id(self) -> int:
         counters = getattr(self.db, 'counters', None)
         if counters is not None:
+            floor = self._current_song_id_ceiling()
+            try:
+                counters.update_one(
+                    {'_id': 'songs'},
+                    {
+                        '$setOnInsert': {'seq': floor},
+                        '$max': {'seq': floor},
+                    },
+                    upsert=True,
+                )
+            except Exception:  # pragma: no cover - tolerate driver issues
+                LOGGER.debug('Failed to ensure songs counter floor at %d', floor, exc_info=True)
             try:
                 result = counters.find_one_and_update(
                     {'_id': 'songs'},
@@ -1639,12 +1677,20 @@ class SongScanner:
                     LOGGER.debug('Failed to increment songs counter: %s', exc)
             else:
                 if isinstance(result, dict) and isinstance(result.get('seq'), int):
-                    return int(result['seq'])
+                    seq_value = int(result['seq'])
+                    if seq_value <= floor:
+                        LOGGER.warning(
+                            'Songs counter returned %d which is not above the floor %d; falling back',
+                            seq_value,
+                            floor,
+                        )
+                    else:
+                        return seq_value
 
         seq = getattr(self.db, 'seq', None)
         if seq is not None:
             try:
-                current = 0
+                current = self._current_song_id_ceiling()
                 seq_doc = seq.find_one({'name': 'songs'})
                 max_song = self.db.songs.find_one(sort=[('id', -1)])
                 if seq_doc and isinstance(seq_doc.get('value'), int):
