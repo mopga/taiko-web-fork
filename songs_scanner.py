@@ -1622,16 +1622,17 @@ class SongScanner:
             document['audioHash'] = audio_hash
         return document
 
-    def _current_song_id_ceiling(self) -> int:
+    def _current_song_id_ceiling(self, *, include_counter: bool = True) -> int:
         current = 0
-        counters = getattr(self.db, 'counters', None)
-        if counters is not None:
-            try:
-                counter_doc = counters.find_one({'_id': 'songs'})
-            except Exception:  # pragma: no cover - tolerate driver errors
-                counter_doc = None
-            if counter_doc and isinstance(counter_doc.get('seq'), int):
-                current = max(current, int(counter_doc['seq']))
+        if include_counter:
+            counters = getattr(self.db, 'counters', None)
+            if counters is not None:
+                try:
+                    counter_doc = counters.find_one({'_id': 'songs'})
+                except Exception:  # pragma: no cover - tolerate driver errors
+                    counter_doc = None
+                if counter_doc and isinstance(counter_doc.get('seq'), int):
+                    current = max(current, int(counter_doc['seq']))
         seq = getattr(self.db, 'seq', None)
         if seq is not None:
             try:
@@ -1663,29 +1664,52 @@ class SongScanner:
                 )
             except Exception:  # pragma: no cover - tolerate driver issues
                 LOGGER.debug('Failed to ensure songs counter floor at %d', floor, exc_info=True)
-            try:
-                result = counters.find_one_and_update(
-                    {'_id': 'songs'},
-                    {'$inc': {'seq': 1}},
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
-            except Exception as exc:  # pragma: no cover - tolerate transient driver issues
-                if PyMongoError and isinstance(exc, PyMongoError):
-                    LOGGER.exception('Failed to increment songs counter')
-                else:
-                    LOGGER.debug('Failed to increment songs counter: %s', exc)
-            else:
-                if isinstance(result, dict) and isinstance(result.get('seq'), int):
-                    seq_value = int(result['seq'])
-                    if seq_value <= floor:
+            for attempt in range(3):
+                try:
+                    result = counters.find_one_and_update(
+                        {'_id': 'songs'},
+                        {'$inc': {'seq': 1}},
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except Exception as exc:  # pragma: no cover - tolerate transient driver issues
+                    if PyMongoError and isinstance(exc, PyMongoError):
                         LOGGER.warning(
-                            'Songs counter returned %d which is not above the floor %d; falling back',
-                            seq_value,
-                            floor,
+                            'Failed to increment songs counter (attempt %d/3)',
+                            attempt + 1,
+                            exc_info=True,
                         )
                     else:
-                        return seq_value
+                        LOGGER.debug('Failed to increment songs counter on attempt %d: %s', attempt + 1, exc)
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                if isinstance(result, dict) and isinstance(result.get('seq'), int):
+                    seq_value = int(result['seq'])
+                    existing_ceiling = self._current_song_id_ceiling(include_counter=False)
+                    if seq_value <= existing_ceiling:
+                        LOGGER.warning(
+                            'Songs counter produced stale value %d (existing ceiling %d); clamping and retrying',
+                            seq_value,
+                            existing_ceiling,
+                        )
+                        try:
+                            counters.update_one(
+                                {'_id': 'songs'},
+                                {
+                                    '$setOnInsert': {'seq': existing_ceiling},
+                                    '$max': {'seq': existing_ceiling},
+                                },
+                                upsert=True,
+                            )
+                        except Exception:  # pragma: no cover - tolerate driver issues
+                            LOGGER.debug('Failed to clamp songs counter to %d', existing_ceiling, exc_info=True)
+                            break
+                        floor = max(floor, existing_ceiling)
+                        continue
+                    return seq_value
+                break
+            else:
+                LOGGER.warning('Failed to increment songs counter after retries; falling back')
 
         seq = getattr(self.db, 'seq', None)
         if seq is not None:

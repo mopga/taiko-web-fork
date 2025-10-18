@@ -850,6 +850,41 @@ class TestSongsScanner(unittest.TestCase):
         self.assertIsNotNone(counter_doc)
         self.assertEqual(counter_doc['seq'], 26)
 
+    def test_get_next_song_id_clamps_after_stale_increment(self):
+        tmp_dir = Path(self._tmp_dir())
+        db = _DummyDB()
+        db.songs.insert_one({'id': 40})
+        db.seq.update_one({'name': 'songs'}, {'$set': {'value': 30}})
+        db.counters._docs[0]['seq'] = 0
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=tmp_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        original_update_one = db.counters.update_one
+        call_count = {'value': 0}
+
+        def flaky_update(filter_, update, upsert=False):
+            call_count['value'] += 1
+            if call_count['value'] == 1:
+                raise RuntimeError('simulated failure')
+            return original_update_one(filter_, update, upsert)
+
+        db.counters.update_one = flaky_update  # type: ignore[assignment]
+
+        try:
+            next_id = scanner._get_next_song_id()
+        finally:
+            db.counters.update_one = original_update_one  # type: ignore[assignment]
+
+        self.assertEqual(next_id, 41)
+        counter_doc = db.counters.find_one({'_id': 'songs'})
+        self.assertIsNotNone(counter_doc)
+        self.assertEqual(counter_doc['seq'], 41)
+
     def test_concurrent_id_allocation_has_no_gaps(self):
         songs_dir = Path(self._tmp_dir())
         db = _DummyDB()

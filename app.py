@@ -416,16 +416,17 @@ def route_admin_songs_id(id):
         song=song, categories=categories, song_skins=song_skins, makers=makers, admin=user, config=get_config())
 
 
-def _current_song_id_ceiling() -> int:
+def _current_song_id_ceiling(*, include_counter: bool = True) -> int:
     current = 0
-    counter = getattr(db, 'counters', None)
-    if counter is not None:
-        try:
-            counter_doc = counter.find_one({'_id': 'songs'})
-        except Exception:
-            counter_doc = None
-        if counter_doc and isinstance(counter_doc.get('seq'), int):
-            current = max(current, counter_doc['seq'])
+    if include_counter:
+        counter = getattr(db, 'counters', None)
+        if counter is not None:
+            try:
+                counter_doc = counter.find_one({'_id': 'songs'})
+            except Exception:
+                counter_doc = None
+            if counter_doc and isinstance(counter_doc.get('seq'), int):
+                current = max(current, counter_doc['seq'])
     seq = getattr(db, 'seq', None)
     if seq is not None:
         try:
@@ -490,15 +491,35 @@ def _get_next_song_id():
                 continue
             if isinstance(doc, dict) and isinstance(doc.get('seq'), int):
                 seq_value = doc['seq']
-                if seq_value <= floor:
+                ceiling = _current_song_id_ceiling(include_counter=False)
+                if seq_value <= ceiling:
                     last_failure = RuntimeError(
-                        f'songs counter returned stale value {seq_value} <= floor {floor}'
+                        f'songs counter returned stale value {seq_value} <= ceiling {ceiling}'
                     )
                     LOGGER.warning(
-                        'Songs counter returned %d which is not above the floor %d; retrying',
+                        'Songs counter returned %d which is not above the ceiling %d; repairing and retrying',
                         seq_value,
-                        floor,
+                        ceiling,
                     )
+                    try:
+                        counter.update_one(
+                            {'_id': 'songs'},
+                            {
+                                '$setOnInsert': {'seq': ceiling},
+                                '$max': {'seq': ceiling},
+                            },
+                            upsert=True,
+                        )
+                    except Exception as clamp_exc:
+                        last_failure = clamp_exc
+                        LOGGER.warning(
+                            'Failed to clamp songs counter to %d: %s',
+                            ceiling,
+                            clamp_exc,
+                            exc_info=True,
+                        )
+                        break
+                    floor = max(floor, ceiling)
                     continue
                 return seq_value
         if last_failure is not None:
