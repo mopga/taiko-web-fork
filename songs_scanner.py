@@ -99,7 +99,7 @@ UNKNOWN_VALUE = "Unknown"
 ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
 NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-8]")
-NOTE_LINE_RE = re.compile(r"^[0-8,\s]+$")
+NOTE_LINE_RE = re.compile(r"^[0-9,\s\|]+$")
 
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
