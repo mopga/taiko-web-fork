@@ -159,6 +159,28 @@ class TestSongsScanner(unittest.TestCase):
         self.assertTrue(courses["Oni"].branch)
         self.assertEqual(courses["Hard"].stars, 5)
 
+    def test_parse_tja_directive_after_start_preserves_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Directive Test",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "#BPMCHANGE 80",
+            "1110,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 4)
+        self.assertEqual(chart.hit_notes, 3)
+        self.assertEqual(chart.measures, 1)
+        self.assertEqual(chart.first_note_preview, "1110,")
+
     def test_determine_category_from_directory(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
@@ -291,7 +313,7 @@ class TestSongsScanner(unittest.TestCase):
         course = parsed.courses[0]
         self.assertEqual(course.start_blocks, 1)
         self.assertEqual(course.end_blocks, 1)
-        self.assertEqual(course.total_notes, 4)
+        self.assertEqual(course.total_notes, 5)
         self.assertEqual(course.hit_notes, 2)
         self.assertEqual(course.first_note_preview, "1,0")
 
@@ -574,6 +596,56 @@ class TestSongsScanner(unittest.TestCase):
         self.assertIn('Easy', courses)
         self.assertIn('Normal', courses)
         self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
+
+    def test_scanner_keeps_distinct_unknown_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        pack_dir = songs_dir / "Custom Pack"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = pack_dir / "shared.ogg"
+        audio_path.write_bytes(b"shared-audio")
+
+        alpha_tja = pack_dir / "alpha.tja"
+        alpha_tja.write_text("\n".join([
+            "TITLE:Unknown Alpha",
+            "WAVE:shared.ogg",
+            "COURSE:Custom Alpha",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        beta_tja = pack_dir / "beta.tja"
+        beta_tja.write_text("\n".join([
+            "TITLE:Unknown Beta",
+            "WAVE:shared.ogg",
+            "COURSE:Custom Beta",
+            "LEVEL:7",
+            "#START",
+            "2222,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
+
+        unknown_charts = [chart for chart in inserted['charts'] if chart['course'] == 'Unknown']
+        self.assertEqual(len(unknown_charts), 2)
+        raw_names = {chart['raw_course'] for chart in unknown_charts}
+        self.assertEqual(raw_names, {'Custom Alpha', 'Custom Beta'})
 
     def test_scanner_handles_realistic_tower_taste_pair(self):
         tmp_dir = Path(self._tmp_dir())
@@ -959,7 +1031,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertFalse(chart['valid'])
         self.assertIn('empty-chart', chart['issues'])
         self.assertIn('empty-chart', inserted['import_issues'])
-        self.assertEqual(chart.get('total_notes'), 0)
+        self.assertEqual(chart.get('total_notes'), 2)
+        self.assertEqual(chart.get('hit_notes'), 0)
         issues = db.import_issues._docs
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]['reason'], 'empty_chart')

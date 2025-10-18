@@ -92,6 +92,8 @@ NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-8]")
 
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
+HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
+
 ZERO_WIDTH_CHARACTERS = {
     "\u200b",  # zero width space
     "\u200c",  # zero width non-joiner
@@ -115,6 +117,7 @@ class CourseInfo:
     issues: List[str] = field(default_factory=list)
     hit_notes: int = 0
     total_notes: int = 0
+    measures: int = 0
     first_note_preview: Optional[str] = None
 
     def add_issue(self, issue: str) -> None:
@@ -150,6 +153,7 @@ class ChartRecord:
     coerced: bool = False
     hit_notes: int = 0
     total_notes: int = 0
+    measures: int = 0
     first_note_preview: Optional[str] = None
 
 
@@ -402,10 +406,11 @@ def parse_tja(path: Path) -> ParsedTJA:
                     continue
                 saw_digits = True
                 notes = [int(ch) for ch in cleaned]
-                hit_count = sum(1 for note in notes if note != 0)
+                hit_count = sum(1 for note in notes if note in HIT_NOTE_VALUES)
                 if hit_count:
                     current_notes_course.hit_notes += hit_count
-                    current_notes_course.total_notes += len(notes)
+                current_notes_course.total_notes += len(notes)
+                current_notes_course.measures += 1
             if saw_digits and current_notes_course.first_note_preview is None:
                 preview = stripped_comments.strip()
                 if preview:
@@ -575,7 +580,7 @@ class SongScanner:
 
             if course.start_blocks == 0 or course.end_blocks == 0 or course.end_blocks < course.start_blocks:
                 issues.append("missing-chart-content")
-            if course.total_notes == 0:
+            if course.total_notes == 0 or course.hit_notes == 0:
                 issues.append("empty-chart")
             if course.branch:
                 required_sections = {"N", "E", "M"}
@@ -608,7 +613,16 @@ class SongScanner:
                 coerced=coerced,
                 hit_notes=course.hit_notes,
                 total_notes=course.total_notes,
+                measures=course.measures,
                 first_note_preview=course.first_note_preview,
+            )
+            LOGGER.debug(
+                "Chart summary %s (raw=%s): notes=%d measures=%d first=\"%s\"",
+                record.course,
+                course.raw_name,
+                record.total_notes,
+                record.measures,
+                (record.first_note_preview or ""),
             )
             records.append(record)
 
@@ -757,6 +771,7 @@ class SongScanner:
                     coerced=bool(item.get('coerced', False)),
                     hit_notes=int(item.get('hit_notes', 0)) if item.get('hit_notes') is not None else 0,
                     total_notes=int(item.get('total_notes', 0)) if item.get('total_notes') is not None else 0,
+                    measures=int(item.get('measures', 0)) if item.get('measures') is not None else 0,
                     first_note_preview=item.get('first_note_preview'),
                 )
                 for item in charts_raw
@@ -829,8 +844,15 @@ class SongScanner:
 
         sorted_records = sorted(records, key=lambda rec: rec.relative_path)
 
-        chart_by_course: Dict[str, Dict[str, object]] = {}
+        chart_by_key: Dict[Tuple[str, Optional[str]], Dict[str, object]] = {}
         duplicate_courses: Set[str] = set()
+
+        def _dedup_key(chart: ChartRecord) -> Tuple[str, Optional[str]]:
+            if chart.course == UNKNOWN_VALUE:
+                raw = chart.raw_course or chart.normalised or ""
+                return (chart.course, raw)
+            return (chart.course, None)
+
         for record in sorted_records:
             for chart in record.charts:
                 entry_issues = sorted(set(chart.issues))
@@ -844,21 +866,26 @@ class SongScanner:
                     'coerced': chart.coerced,
                     'hit_notes': chart.hit_notes,
                     'total_notes': chart.total_notes,
+                    'measures': chart.measures,
                     'first_note_preview': chart.first_note_preview,
                     'tja_path': record.relative_path,
                     'tja_url': record.tja_url,
                 }
-                existing = chart_by_course.get(chart.course)
+                key = _dedup_key(chart)
+                existing = chart_by_key.get(key)
                 if existing is None:
-                    chart_by_course[chart.course] = entry
+                    chart_by_key[key] = entry
                 else:
-                    duplicate_courses.add(chart.course)
+                    label = chart.course
+                    if chart.course == UNKNOWN_VALUE:
+                        label = f"Unknown:{chart.raw_course or chart.normalised or ''}"
+                    duplicate_courses.add(label)
                     existing_issues = set(existing.get('issues', []))
                     existing_issues.add('duplicate-course')
                     existing['issues'] = sorted(existing_issues)
                     entry['issues'] = sorted(set(entry['issues']) | {'duplicate-course'})
                     if not existing['valid'] and chart.valid:
-                        chart_by_course[chart.course] = entry
+                        chart_by_key[key] = entry
 
         def _chart_sort_key(item: Dict[str, object]) -> Tuple[int, str, str]:
             course = str(item.get('course', ''))
@@ -868,7 +895,7 @@ class SongScanner:
                 index = len(COURSE_ORDER)
             return (index, course, str(item.get('tja_path', '')))
 
-        charts_payload = sorted(chart_by_course.values(), key=_chart_sort_key)
+        charts_payload = sorted(chart_by_key.values(), key=_chart_sort_key)
 
         canonical_map: Dict[str, Dict[str, object]] = {
             entry['course']: entry for entry in charts_payload if entry['course'] in COURSE_ORDER
