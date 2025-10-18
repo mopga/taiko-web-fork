@@ -580,7 +580,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.hit_notes, 6)
         self.assertEqual(course.measures, 2)
         self.assertEqual(course.unknown_directives, 0)
-        self.assertTrue(any('mapped-course: Dan→Oni (parser)' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): Dan→Oni' in message for message in logs.output))
 
     def test_parse_tja_tower_downcasts_to_oni(self):
         tmp_dir = Path(self._tmp_dir())
@@ -603,7 +603,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.canonical, "Oni")
         self.assertEqual(course.mode, "standard")
         self.assertIn("mapped-course", course.issues)
-        self.assertTrue(any('mapped-course: Tower→Oni (parser)' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): Tower→Oni' in message for message in logs.output))
 
     def test_parse_tja_skips_comments_before_start_and_counts_notes(self):
         tmp_dir = Path(self._tmp_dir())
@@ -631,7 +631,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertGreater(course.total_notes, 0)
         self.assertGreater(course.hit_notes, 0)
         self.assertIn("mapped-course", course.issues)
-        self.assertTrue(any('mapped-course: Tower→Oni (parser)' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): Tower→Oni' in message for message in logs.output))
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
@@ -819,7 +819,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(summary['errors'], 0)
         self.assertEqual(len(db.songs.inserted), 1)
         chart = db.songs.inserted[0]['charts'][0]
-        self.assertEqual(chart.get('course'), 'Oni')
+        self.assertEqual(chart.get('course'), 'oni')
+        self.assertEqual(chart.get('canonical_course'), 'Oni')
         self.assertEqual(chart.get('mode'), 'standard')
         self.assertTrue(chart.get('valid'))
         self.assertIn('mapped-course', chart.get('issues', []))
@@ -1080,7 +1081,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(summary['inserted'], 1)
         self.assertEqual(len(db.songs._docs), 1)
         charts = db.songs._docs[0]['charts']
-        courses = {chart['course'] for chart in charts}
+        courses = {chart['canonical_course'] for chart in charts}
         self.assertEqual(courses, {'Easy', 'Oni'})
 
     def test_upsert_retries_on_duplicate_key(self):
@@ -1393,7 +1394,7 @@ class TestSongsScanner(unittest.TestCase):
         inserted = db.songs.inserted[0]
         self.assertEqual(inserted['title'], 'Merge Easy')
         self.assertIn('charts', inserted)
-        courses = {chart['course']: chart for chart in inserted['charts']}
+        courses = {chart['canonical_course']: chart for chart in inserted['charts']}
         self.assertIn('Easy', courses)
         self.assertIn('Oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
@@ -1450,7 +1451,8 @@ class TestSongsScanner(unittest.TestCase):
         inserted = db.songs.inserted[0]
         self.assertEqual(len(inserted['charts']), 1)
         self.assertIn('duplicate_course', inserted.get('import_issues', []))
-        self.assertEqual(inserted['charts'][0]['course'], 'Oni')
+        self.assertEqual(inserted['charts'][0]['course'], 'oni')
+        self.assertEqual(inserted['charts'][0]['canonical_course'], 'Oni')
         self.assertIn('duplicate-course', inserted['charts'][0]['issues'])
 
     def test_scanner_groups_tower_flavour_files_into_single_song(self):
@@ -1495,7 +1497,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
-        courses = {chart['course'] for chart in inserted['charts']}
+        courses = {chart['canonical_course'] for chart in inserted['charts']}
         self.assertEqual(courses, {'Oni'})
         self.assertIn('duplicate_course', inserted.get('import_issues', []))
         chart = inserted['charts'][0]
@@ -1594,7 +1596,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(len(docs), 1)
         charts = docs[0].get('charts', [])
         self.assertEqual(len(charts), 1)
-        self.assertEqual(charts[0]['course'], 'Oni')
+        self.assertEqual(charts[0]['course'], 'oni')
+        self.assertEqual(charts[0]['canonical_course'], 'Oni')
 
     def test_scanner_atomic_upsert_merges_distinct_courses(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1647,7 +1650,7 @@ class TestSongsScanner(unittest.TestCase):
 
         docs = list(db.songs.find())
         self.assertEqual(len(docs), 1)
-        courses = sorted(chart['course'] for chart in docs[0].get('charts', []))
+        courses = sorted(chart['canonical_course'] for chart in docs[0].get('charts', []))
         self.assertEqual(courses, ['Easy', 'Oni'])
 
     def test_scanner_repeated_scan_is_idempotent(self):
@@ -1914,7 +1917,8 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(inserted['charts']), 1)
         chart = inserted['charts'][0]
-        self.assertEqual(chart['course'], 'Oni')
+        self.assertEqual(chart['course'], 'oni')
+        self.assertEqual(chart['canonical_course'], 'Oni')
         self.assertTrue(chart['valid'])
         self.assertIn('duplicate-course', chart.get('issues', []))
         self.assertIn('mapped-course', chart.get('issues', []))
@@ -2116,7 +2120,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
-        courses = {chart['course']: chart for chart in inserted['charts']}
+        courses = {chart['canonical_course']: chart for chart in inserted['charts']}
         self.assertIn('Oni', courses)
         self.assertIn('Easy', courses)
         self.assertIn('Normal', courses)

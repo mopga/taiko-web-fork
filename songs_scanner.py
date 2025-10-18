@@ -530,25 +530,20 @@ def parse_tja(path: Path) -> ParsedTJA:
             state.current_segment['end_measure'] = state.measure_index
         state.current_segment = None
 
-    first_line = True
     line_number = 0
     for raw_line in normalised_text.splitlines():
         line_number += 1
-        if first_line:
-            raw_line = raw_line.lstrip("\ufeff")
-            first_line = False
-        trimmed_left = raw_line.lstrip()
-        if trimmed_left.startswith("//") or trimmed_left.startswith(";"):
+        raw_line = raw_line.lstrip("\ufeff")
+        stripped_pre = raw_line.strip()
+        if not stripped_pre:
+            continue
+        if stripped_pre.startswith("//") or stripped_pre.startswith(";"):
             continue
         stripped_comments = _strip_inline_comments(
             raw_line, allow_without_whitespace=parsing_notes
         )
         line = stripped_comments.strip()
         if not line:
-            continue
-        if line == "...":
-            continue
-        if parsing_notes and set(line) <= {',', ';'}:
             continue
         if line.startswith("#"):
             upper_line = line.upper()
@@ -731,7 +726,7 @@ def parse_tja(path: Path) -> ParsedTJA:
                     parsing_notes = False
                 else:
                     if issue == "mapped-course":
-                        LOGGER.info("mapped-course: %s→%s (parser)", raw_course_value, canonical)
+                        LOGGER.info("mapped-course(parser): %s→%s", raw_course_value, canonical)
                         parsed.mapped_courses += 1
                     existing = known_courses.get(canonical)
                     if existing:
@@ -1119,9 +1114,23 @@ class SongScanner:
     def _record_from_state(self, payload: Dict[str, object]) -> Optional[TjaImportRecord]:
         try:
             charts_raw = payload.get('charts') or []
+
+            def _restore_course(item: Dict[str, object]) -> str:
+                canonical = item.get('canonical_course')
+                if isinstance(canonical, str) and canonical:
+                    return canonical
+                stored = str(item.get('course', ''))
+                lowered = stored.casefold()
+                for canonical_name, legacy in COURSE_LEGACY_MAP.items():
+                    if lowered == legacy:
+                        return canonical_name
+                if lowered == UNKNOWN_VALUE.casefold():
+                    return UNKNOWN_VALUE
+                return stored or UNKNOWN_VALUE
+
             charts = [
                 ChartRecord(
-                    course=str(item.get('course', 'Unknown')),
+                    course=_restore_course(item),
                     raw_course=str(item.get('raw_course', '')),
                     normalised=str(item.get('normalised', '')),
                     level=int(item.get('level', 0)) if item.get('level') is not None else None,
@@ -1402,13 +1411,22 @@ class SongScanner:
             chart_doc = dict(chart)
             chart_doc['updatedAt'] = int(time.time() * 1000)
             course_name = chart_doc.get('course')
+            canonical_course = chart_doc.get('canonical_course')
             if isinstance(course_name, str):
                 desired_courses.add(course_name)
             raw_course = chart_doc.get('raw_course')
             if course_name == UNKNOWN_VALUE and isinstance(raw_course, str):
                 unknown_raw_courses.add(raw_course)
 
-            match_filter: Dict[str, object] = {'c.course': course_name}
+            match_values: List[str] = []
+            if isinstance(course_name, str) and course_name:
+                match_values.append(course_name)
+            if isinstance(canonical_course, str) and canonical_course:
+                match_values.append(canonical_course)
+            if match_values:
+                match_filter = {'c.course': {'$in': match_values}}
+            else:
+                match_filter = {'c.course': course_name}
             if course_name == UNKNOWN_VALUE and isinstance(raw_course, str):
                 match_filter['c.raw_course'] = raw_course
             array_filters = [match_filter]
@@ -1487,12 +1505,21 @@ class SongScanner:
                 return (chart.course, raw)
             return (chart.course, None)
 
+        def _storage_course_key(chart: ChartRecord) -> str:
+            canonical = chart.course or ""
+            if canonical in COURSE_LEGACY_MAP:
+                return COURSE_LEGACY_MAP[canonical]
+            return canonical.casefold()
+
         for record in sorted_records:
             for chart in record.charts:
                 entry_issues = sorted(set(chart.issues))
+                storage_course = _storage_course_key(chart)
                 entry = {
-                    'course': chart.course,
+                    'course': storage_course,
+                    'canonical_course': chart.course,
                     'raw_course': chart.raw_course,
+                    'normalised': chart.normalised,
                     'mode': chart.mode,
                     'display_course': chart.display_course,
                     'level': chart.level,
@@ -1528,20 +1555,22 @@ class SongScanner:
                         chart_by_key[key] = entry
 
         def _chart_sort_key(item: Dict[str, object]) -> Tuple[int, str, str]:
-            course = str(item.get('course', ''))
+            canonical_course = str(item.get('canonical_course') or item.get('course', ''))
             mode = str(item.get('mode', 'standard'))
             try:
-                index = COURSE_ORDER.index(course)
+                index = COURSE_ORDER.index(canonical_course)
             except ValueError:
                 index = len(COURSE_ORDER)
             mode_rank = 0 if mode == 'standard' else 1
-            return (mode_rank, index, course, str(item.get('tja_path', '')))
+            return (mode_rank, index, canonical_course, str(item.get('tja_path', '')))
 
         charts_payload = sorted(chart_by_key.values(), key=_chart_sort_key)
 
-        canonical_map: Dict[str, Dict[str, object]] = {
-            entry['course']: entry for entry in charts_payload if entry['course'] in COURSE_ORDER
-        }
+        canonical_map: Dict[str, Dict[str, object]] = {}
+        for entry in charts_payload:
+            canonical_course = entry.get('canonical_course') or entry.get('course')
+            if canonical_course in COURSE_ORDER:
+                canonical_map[canonical_course] = entry
 
         courses_doc: Dict[str, Optional[Dict[str, object]]] = {
             legacy: None for legacy in COURSE_LEGACY_MAP.values()
