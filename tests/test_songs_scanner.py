@@ -412,6 +412,46 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(chart.measures, 2)
         self.assertEqual(chart.first_note_preview, "1110,")
 
+    def test_parse_tja_counts_measures_with_nine_token(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "nine.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Nine Token",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "10000900,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 1)
+        self.assertEqual(chart.measures, 1)
+
+    def test_parse_tja_counts_other_tokens_when_nine_present(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "mixed_nine.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Mixed Nine",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1,2,90001,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 7)
+        self.assertEqual(chart.hit_notes, 3)
+        self.assertEqual(chart.measures, 3)
+
     def test_parse_tja_unknown_directive_does_not_reset_counts(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "unknown_directive.tja"
@@ -436,6 +476,34 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(chart.first_note_preview, "1110,")
         self.assertEqual(chart.unknown_directives, 1)
         self.assertEqual(parsed.unknown_directives, 1)
+
+    def test_branching_directives_do_not_increment_unknown_counters(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "branching.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Branching",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "#BRANCHSTART",
+            "#N",
+            "1110,",
+            "#BRANCHSWITCH",
+            "#E",
+            "2220,",
+            "#BRANCHEND",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        chart = parsed.courses[0]
+        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.hit_notes, 6)
+        self.assertEqual(chart.measures, 2)
+        self.assertEqual(chart.unknown_directives, 0)
+        self.assertEqual(parsed.unknown_directives, 0)
 
     def test_parse_tja_dojo_segments(self):
         tmp_dir = Path(self._tmp_dir())
