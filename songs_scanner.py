@@ -246,6 +246,7 @@ class ParsedTJA:
     fingerprint: str = ""
     unknown_directives: int = 0
     has_dojo_course: bool = False
+    skipped_charts: int = 0
 
 
 @dataclass
@@ -432,13 +433,6 @@ def _resolve_course(value: str, *, path: Optional[Path] = None) -> Tuple[str, st
     downcast = COURSE_DOWNCAST_MAP.get(token)
     if downcast:
         canonical = downcast
-        location = f" in {path}" if path else ""
-        LOGGER.warning(
-            'Unknown COURSE "%s" mapped to "%s"%s',
-            value.strip(),
-            canonical,
-            location,
-        )
         issue = "mapped-course"
     else:
         canonical = COURSE_ALIASES.get(token)
@@ -704,30 +698,28 @@ def parse_tja(path: Path) -> ParsedTJA:
                 parsed.courses.append(active_course)
                 parsed.has_dojo_course = True
             else:
-                canonical, token, issue = _resolve_course(value_stripped, path=path)
+                canonical, token, issue = _resolve_course(raw_course_value, path=path)
                 if canonical == "Unknown":
                     if issue == "unknown_course_numeric":
-                        LOGGER.warning("Unknown numeric COURSE '%s' in %s", value_stripped, path)
+                        LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
                     else:
-                        LOGGER.warning("Unknown COURSE '%s' in %s", value_stripped, path)
-                    active_course = CourseInfo(
-                        canonical="Unknown",
-                        raw_name=value_stripped,
-                        normalised=token,
-                    )
-                    if issue:
-                        active_course.add_issue(issue)
-                    parsed.courses.append(active_course)
+                        LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
+                    parsed.skipped_charts += 1
+                    active_course = None
+                    current_notes_course = None
+                    parsing_notes = False
                 else:
+                    if issue == "mapped-course":
+                        LOGGER.warning("mapped-course: %s→%s (parser)", raw_course_value, canonical)
                     existing = known_courses.get(canonical)
                     if existing:
                         active_course = existing
-                        active_course.raw_name = value_stripped
+                        active_course.raw_name = raw_course_value
                         active_course.normalised = token
                     else:
                         active_course = CourseInfo(
                             canonical=canonical,
-                            raw_name=value_stripped,
+                            raw_name=raw_course_value,
                             normalised=token,
                         )
                         known_courses[canonical] = active_course
@@ -1962,6 +1954,8 @@ class SongScanner:
                         self._metrics.increment('tja_notes_total', total_notes)
                     if parsed.unknown_directives:
                         self._metrics.increment('tja_unknown_directives_total', parsed.unknown_directives)
+                    if parsed.skipped_charts:
+                        self._metrics.increment('tja_skipped_charts_total', parsed.skipped_charts)
                     if parsed.has_dojo_course:
                         self._metrics.increment('tja_dojo_parsed_total')
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
@@ -2188,6 +2182,7 @@ class _ScanMetrics:
             'tja_dojo_parsed_total': 0,
             'tja_notes_total': 0,
             'tja_unknown_directives_total': 0,
+            'tja_skipped_charts_total': 0,
         }
         self._last_logged = 0.0
 

@@ -580,7 +580,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.hit_notes, 6)
         self.assertEqual(course.measures, 2)
         self.assertEqual(course.unknown_directives, 0)
-        self.assertTrue(any('Unknown COURSE "Dan" mapped to "Oni"' in message for message in logs.output))
+        self.assertTrue(any('mapped-course: Dan→Oni (parser)' in message for message in logs.output))
 
     def test_parse_tja_tower_downcasts_to_oni(self):
         tmp_dir = Path(self._tmp_dir())
@@ -603,7 +603,27 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.canonical, "Oni")
         self.assertEqual(course.mode, "standard")
         self.assertIn("mapped-course", course.issues)
-        self.assertTrue(any('Unknown COURSE "Tower" mapped to "Oni"' in message for message in logs.output))
+        self.assertTrue(any('mapped-course: Tower→Oni (parser)' in message for message in logs.output))
+
+    def test_parse_tja_unknown_course_skips_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "Unknown" / "unknown.tja"
+        tja_path.parent.mkdir(parents=True, exist_ok=True)
+        tja_path.write_text("\n".join([
+            "TITLE:Unknown Course",
+            "COURSE:Custom Alpha",
+            "LEVEL:3",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+            parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 0)
+        self.assertEqual(parsed.skipped_charts, 1)
+        self.assertTrue(any('Unknown COURSE "Custom Alpha" → skip chart block' in message for message in logs.output))
 
     def test_determine_category_from_directory(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1249,9 +1269,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertIn("Easy", courses)
         self.assertIn("Normal", courses)
         self.assertIn("UraOni", courses)
-        unknown_courses = [course for course in parsed.courses if course.canonical == "Unknown"]
-        self.assertTrue(unknown_courses)
-        self.assertIn("unknown_course_numeric", unknown_courses[0].issues)
+        self.assertEqual(parsed.skipped_charts, 1)
 
     def test_resolve_course_downcasts_tower_to_oni(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1455,7 +1473,7 @@ class TestSongsScanner(unittest.TestCase):
         chart = inserted['charts'][0]
         self.assertIn('mapped-course', chart.get('issues', []))
 
-    def test_scanner_keeps_distinct_unknown_courses(self):
+    def test_scanner_skips_unknown_courses(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
         pack_dir = songs_dir / "Custom Pack"
@@ -1499,11 +1517,10 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
         self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
-
-        unknown_charts = [chart for chart in inserted['charts'] if chart['course'] == 'Unknown']
-        self.assertEqual(len(unknown_charts), 2)
-        raw_names = {chart['raw_course'] for chart in unknown_charts}
-        self.assertEqual(raw_names, {'Custom Alpha', 'Custom Beta'})
+        self.assertIn('no-courses', inserted.get('import_issues', []))
+        self.assertIn('no-valid-course', inserted.get('import_issues', []))
+        self.assertEqual(inserted['charts'], [])
+        self.assertEqual(scanner._metrics._counters['tja_skipped_charts_total'], 2)
 
     def test_scanner_atomic_upsert_same_chart_twice(self):
         tmp_dir = Path(self._tmp_dir())
