@@ -575,6 +575,228 @@ class TestSongsScanner(unittest.TestCase):
         self.assertIn('Normal', courses)
         self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
 
+    def test_scanner_handles_realistic_tower_taste_pair(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        track_dir = songs_dir / "Taiko Tower 01"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = track_dir / "Metronome Track 1.ogg"
+        audio_path.write_bytes(b"tower-audio-bytes")
+
+        ama_tja = track_dir / "Taiko Tower 1 Ama-kuchi.tja"
+        ama_tja.write_text("\n".join([
+            "//TJADB Project",
+            "TITLE:Taiko Tower 1 Ama-kuchi",
+            "SUBTITLE:--Metronome Track 1",
+            "BPM:70",
+            "WAVE:Metronome Track 1.ogg",
+            "OFFSET:-3.531",
+            "DEMOSTART:3.531",
+            "LIFE:5",
+            "",
+            "COURSE:Tower",
+            "LEVEL:1",
+            "SCOREINIT:3500",
+            "SCOREDIFF:610",
+            "",
+            "",
+            "#START",
+            "",
+            "",
+            "1110,",
+            "#BPMCHANGE 72.5",
+            "1110,",
+            "#BPMCHANGE 75",
+            "1110,",
+            "#BPMCHANGE 77.5",
+            "2220,",
+            "#BPMCHANGE 80",
+            "1110,",
+            "#BPMCHANGE 82.5",
+            "1110,",
+            "#BPMCHANGE 85",
+            "1110,",
+            "#BPMCHANGE 87.5",
+            "2220,",
+            "#BPMCHANGE 90",
+            "1011,",
+            "#BPMCHANGE 92.5",
+            "1011,",
+            "#BPMCHANGE 95",
+            "1011,",
+            "#BPMCHANGE 97.5",
+            "1,",
+            "#BPMCHANGE 100",
+            "1011,",
+            "#BPMCHANGE 102.5",
+            "1011,",
+            "#BPMCHANGE 105",
+            "1022,",
+            "#BPMCHANGE 107.5",
+            "2,",
+            "#BPMCHANGE 110",
+            "1011,",
+            "#BPMCHANGE 112.5",
+            "1011,",
+            "#BPMCHANGE 115",
+            "1011,",
+            "#BPMCHANGE 117.5",
+            "1,",
+            "#BPMCHANGE 120",
+            "1011,",
+            "#BPMCHANGE 122.5",
+            "1011,",
+            "#BPMCHANGE 125",
+            "1022,",
+            "#BPMCHANGE 127.5",
+            "2,",
+            "#BPMCHANGE 130",
+            "1110,",
+            "#BPMCHANGE 132.5",
+            "2220,",
+            "#BPMCHANGE 135",
+            "1011,",
+            "#BPMCHANGE 137.5",
+            "1,",
+            "#BPMCHANGE 140",
+            "1110,",
+            "#BPMCHANGE 142.5",
+            "2220,",
+            "#BPMCHANGE 145",
+            "1011,",
+            "#BPMCHANGE 147.5",
+            "500000000000000000000000000008000000000000000000,",
+            "#MEASURE 2/4",
+            "#BPMCHANGE 150",
+            "3,",
+            "",
+            "",
+            "#END",
+            "",
+        ]), encoding="utf-8")
+
+        kara_tja = track_dir / "Taiko Tower 1 Kara-kuchi.tja"
+        kara_tja.write_text("\n".join([
+            "//TJADB Project",
+            "TITLE:Taiko Tower 1 Kara-kuchi",
+            "SUBTITLE:--Metronome Track 1",
+            "BPM:70",
+            "WAVE:Metronome Track 1.ogg",
+            "OFFSET:-3.531",
+            "DEMOSTART:3.531",
+            "LIFE:5",
+            "",
+            "COURSE:Tower",
+            "LEVEL:1",
+            "SCOREINIT:2300",
+            "SCOREDIFF:500",
+            "",
+            "",
+            "#START",
+            "",
+            "",
+            "1011100010000000,",
+            "#BPMCHANGE 72.5",
+            "1011100010000000,",
+            "#BPMCHANGE 75",
+            "1011100010111000,",
+            "#BPMCHANGE 77.5",
+            "1011100030000000,",
+            "#BPMCHANGE 80",
+            "1011100010000000,",
+            "#BPMCHANGE 82.5",
+            "1011100010000000,",
+            "#BPMCHANGE 85",
+            "1011100010111000,",
+            "#BPMCHANGE 87.5",
+            "2022200030000000,",
+            "#BPMCHANGE 90",
+            "1011100010000000,",
+            "#BPMCHANGE 92.5",
+            "1011100010000000,",
+            "#BPMCHANGE 95",
+            "1011100010111000,",
+            "#BPMCHANGE 97.5",
+            "1011100030000000,",
+            "#BPMCHANGE 100",
+            "1011100010000000,",
+            "#BPMCHANGE 102.5",
+            "1011100010000000,",
+            "#BPMCHANGE 105",
+            "1011100010111000,",
+            "#BPMCHANGE 107.5",
+            "2022200030000000,",
+            "#BPMCHANGE 110",
+            "1011100020000000,",
+            "#BPMCHANGE 112.5",
+            "11221000,",
+            "#BPMCHANGE 115",
+            "1110100020000000,",
+            "#BPMCHANGE 117.5",
+            "11103000,",
+            "#BPMCHANGE 120",
+            "1011100020000000,",
+            "#BPMCHANGE 122.5",
+            "11221000,",
+            "#BPMCHANGE 125",
+            "1110100020000000,",
+            "#BPMCHANGE 127.5",
+            "11103000,",
+            "#BPMCHANGE 130",
+            "10101110,",
+            "#BPMCHANGE 132.5",
+            "22201110,",
+            "#BPMCHANGE 135",
+            "10101110,",
+            "#BPMCHANGE 137.5",
+            "22203000,",
+            "#BPMCHANGE 140",
+            "10101110,",
+            "#BPMCHANGE 142.5",
+            "11102220,",
+            "#BPMCHANGE 145",
+            "10101110,",
+            "#BPMCHANGE 147.5",
+            "500000000000000000000000000008000000000000000000,",
+            "#MEASURE 2/4",
+            "#BPMCHANGE 150",
+            "3,",
+            "",
+            "",
+            "#END",
+            "",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
+        self.assertNotIn('unknown-course', inserted.get('import_issues', []))
+        self.assertEqual(inserted.get('valid_chart_count'), 2)
+
+        charts = {chart['course']: chart for chart in inserted['charts']}
+        self.assertEqual(set(charts.keys()), {'Easy', 'Normal'})
+        easy_chart = charts['Easy']
+        normal_chart = charts['Normal']
+        self.assertTrue(easy_chart['valid'])
+        self.assertTrue(normal_chart['valid'])
+        self.assertGreater(easy_chart['hit_notes'], 0)
+        self.assertGreater(normal_chart['hit_notes'], 0)
+        self.assertGreater(easy_chart['total_notes'], easy_chart['hit_notes'])
+        self.assertGreater(normal_chart['total_notes'], normal_chart['hit_notes'])
+        self.assertTrue(easy_chart.get('first_note_preview', '').startswith('1110'))
+        self.assertTrue(normal_chart.get('first_note_preview', '').startswith('1011'))
+
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
         db = _DummyDB()
         scanner = SongScanner(
