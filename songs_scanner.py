@@ -5,6 +5,7 @@ import contextlib
 import fnmatch
 import hashlib
 import logging
+import random
 import re
 import threading
 import time
@@ -12,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Callable
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 import unicodedata
 
 from pymongo.database import Database
@@ -134,37 +135,63 @@ def _normalise_group_text(value: Optional[str], *, casefold_value: bool, strip_s
     return text
 
 
+def _sanitise_group_token(token: str, *, fallback: str = "_") -> str:
+    cleaned = token.replace(":", "_").strip()
+    cleaned = _GROUP_KEY_SPACE_RE.sub(" ", cleaned)
+    return cleaned or fallback
+
+
 def _folder_token_from_record(record: "TjaImportRecord") -> str:
-    relative_dir = _normalise_group_text(record.relative_dir, casefold_value=True, strip_slashes=True)
-    if not relative_dir or relative_dir == ".":
-        return "_root"
-    first_segment = relative_dir.split("/", 1)[0]
-    token = first_segment.replace(":", "_")
-    token = token.strip()
-    token = _GROUP_KEY_SPACE_RE.sub(" ", token)
+    folder_source = ""
+    if record.dir_url:
+        try:
+            parsed = urlparse(record.dir_url)
+        except Exception:
+            parsed = None
+        else:
+            folder_source = parsed.path or ""
+    if not folder_source:
+        folder_source = record.relative_dir or ""
+    if not folder_source and record.relative_path:
+        folder_source = Path(record.relative_path).parent.as_posix()
+    normalised = _normalise_group_text(folder_source, casefold_value=True, strip_slashes=True)
+    if not normalised or normalised == ".":
+        normalised = ""
+    first_segment = normalised.split("/", 1)[0] if normalised else ""
+    relative_normalised = _normalise_group_text(record.relative_dir, casefold_value=True, strip_slashes=True)
+    relative_first = relative_normalised.split("/", 1)[0] if relative_normalised and relative_normalised != "." else ""
+    if relative_first and first_segment != relative_first:
+        if not first_segment or f"/{relative_first}" in normalised or normalised.endswith(relative_first):
+            first_segment = relative_first
+    token = _sanitise_group_token(first_segment, fallback="_root")
     return token or "_root"
+
+
+def _stable_path_hash(record: "TjaImportRecord") -> str:
+    relative_dir = _normalise_group_text(record.relative_dir, casefold_value=True, strip_slashes=True)
+    relative_path = _normalise_group_text(record.relative_path, casefold_value=True)
+    components = [component for component in (relative_dir, relative_path) if component]
+    combined = "/".join(components)
+    if not combined:
+        combined = record.relative_path or record.relative_dir or record.tja_hash or record.fingerprint or "missing"
+    return md5_text(combined)
 
 
 def compute_group_key(record: "TjaImportRecord") -> str:
     """Return the deterministic group key for a TJA import record."""
 
-    if record.song_id:
-        song_token = _normalise_group_text(str(record.song_id), casefold_value=False)
-        return f"songid:{song_token}"
-
     folder_token = _folder_token_from_record(record)
 
     if record.audio_hash:
         audio_token = _normalise_group_text(record.audio_hash, casefold_value=False)
+        audio_token = _sanitise_group_token(audio_token, fallback="missing-hash")
         return f"audio:{audio_token}:{folder_token}"
 
     fallback_title = record.normalized_title or _normalise_title_key(record.title)
     title_token = _normalise_group_text(fallback_title, casefold_value=True)
-    relative_dir = _normalise_group_text(record.relative_dir, casefold_value=False)
-    relative_path = _normalise_group_text(record.relative_path, casefold_value=False)
-    missing_part = f"{relative_dir}:{relative_path}" if (relative_dir or relative_path) else "missing"
-    missing_token = _normalise_group_text(missing_part, casefold_value=False)
-    return f"missing:{folder_token}:{title_token}:{missing_token}"
+    title_token = _sanitise_group_token(title_token, fallback="untitled")
+    stable_hash = _stable_path_hash(record)
+    return f"missing:{folder_token}:{title_token}:{stable_hash}"
 
 
 @dataclass
@@ -608,7 +635,11 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
         try:
-            self.db.songs.create_index('group_key', unique=True)
+            self.db.songs.create_index(
+                'group_key',
+                unique=True,
+                partialFilterExpression={'group_key': {'$type': 'string'}},
+            )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure unique index for songs collection')
         self._import_issues_collection = getattr(self.db, 'import_issues', None)
@@ -621,6 +652,7 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for import issues collection')
         self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
+        self._metrics = _ScanMetrics()
 
     def _build_chart_records(self, parsed: ParsedTJA, tja_path: Path) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
@@ -894,6 +926,165 @@ class SongScanner:
             yield
         finally:
             lock.release()
+
+    def _record_invalid_group_key(self, records: List[TjaImportRecord], key: Optional[str]) -> None:
+        if self._import_issues_collection is None:
+            return
+        first_record = records[0] if records else None
+        payload = {
+            'reason': 'invalid_group_key',
+            'group_key': key,
+            'paths': [record.relative_path for record in records],
+        }
+        if first_record is not None:
+            payload['path'] = first_record.relative_path
+            payload['tja_url'] = first_record.tja_url
+            payload['dir_url'] = first_record.dir_url
+        try:
+            self._import_issues_collection.insert_one(payload)
+        except Exception:  # pragma: no cover - diagnostics must not crash the scanner
+            LOGGER.debug('Failed to record invalid group key issue for %s', key)
+
+    def _upsert_song_document(
+        self,
+        key: str,
+        records: List[TjaImportRecord],
+        document: Dict[str, object],
+        charts_payload: List[Dict[str, object]],
+        dirty_groups: Set[str],
+        summary: Dict[str, int],
+    ) -> Optional[int]:
+        if not isinstance(key, str) or not key:
+            self._metrics.increment('invalid_group_key_total')
+            self._record_invalid_group_key(records, key)
+            summary['errors'] += 1
+            return None
+
+        base_document = {
+            k: v for k, v in document.items() if k not in {'id', 'order', '_id', 'charts'}
+        }
+        base_document['group_key'] = key
+
+        insert_document = dict(base_document)
+        insert_document['charts'] = []
+
+        result_doc: Optional[Dict[str, object]] = None
+
+        with self._group_key_lock(key):
+            for attempt in range(3):
+                try:
+                    result_doc = self.db.songs.find_one_and_update(
+                        {'group_key': key},
+                        {'$setOnInsert': insert_document},
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    break
+                except Exception as exc:  # pragma: no cover - defensive around DB driver
+                    if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
+                        self._metrics.increment('duplicate_key_retries_total')
+                        jitter = random.random() * 0.025
+                        time.sleep(0.05 * (attempt + 1) + jitter)
+                        continue
+                    raise
+
+        if result_doc is None:
+            LOGGER.warning("Failed to upsert aggregated song for %s", key)
+            summary['errors'] += 1
+            return None
+
+        self._metrics.increment('songs_upserted_total')
+
+        song_filter: Dict[str, object] = {'group_key': key}
+        if isinstance(result_doc, dict):
+            if result_doc.get('_id') is not None:
+                song_filter = {'_id': result_doc['_id']}
+            elif result_doc.get('id') is not None:
+                song_filter = {'id': result_doc['id']}
+
+        existing_id = None
+        if isinstance(result_doc, dict) and isinstance(result_doc.get('id'), int):
+            existing_id = result_doc['id']
+
+        inserted = existing_id is None
+        song_id = existing_id
+
+        if inserted:
+            new_id = self._get_next_song_id()
+            try:
+                self.db.songs.update_one(song_filter, {'$set': {'id': new_id, 'order': new_id}})
+            except Exception as exc:  # pragma: no cover - tolerate transient driver issues
+                if PyMongoError and isinstance(exc, PyMongoError):
+                    LOGGER.exception("Failed to assign song id for %s", key)
+                    summary['errors'] += 1
+                    return None
+                raise
+            song_id = new_id
+            summary['inserted'] += 1
+
+        needs_refresh = inserted or key in dirty_groups
+
+        if needs_refresh:
+            try:
+                self.db.songs.update_one(song_filter, {'$set': base_document})
+                if key in dirty_groups and not inserted:
+                    summary['updated'] += 1
+            except Exception as exc:  # pragma: no cover - tolerate transient driver issues
+                if PyMongoError and isinstance(exc, PyMongoError):
+                    LOGGER.exception("Failed to update aggregated song for %s", key)
+                    summary['errors'] += 1
+                else:
+                    raise
+
+            try:
+                self._sync_song_charts(song_filter, charts_payload)
+            except Exception:  # pragma: no cover - tolerate chart sync issues
+                LOGGER.debug('Failed to synchronise charts for %s', key)
+            else:
+                self._metrics.increment('charts_synced_total')
+
+        return song_id
+
+    def _cleanup_invalid_group_keys(self) -> None:
+        songs_collection = getattr(self.db, 'songs', None)
+        if songs_collection is None:
+            return
+        try:
+            candidates = list(songs_collection.find())
+        except Exception:  # pragma: no cover - tolerate missing find support
+            LOGGER.debug('Failed to enumerate songs for invalid group key cleanup')
+            return
+        invalid_docs: List[Dict[str, object]] = []
+        for doc in candidates:
+            if not isinstance(doc, dict):
+                continue
+            if not isinstance(doc.get('group_key'), str):
+                invalid_docs.append(doc)
+        if not invalid_docs:
+            return
+        invalid_keys: Set[Optional[str]] = set()
+        for doc in invalid_docs:
+            group_key = doc.get('group_key')
+            invalid_keys.add(group_key)
+            delete_filter: Dict[str, object]
+            if doc.get('_id') is not None:
+                delete_filter = {'_id': doc['_id']}
+            else:
+                delete_filter = {'group_key': group_key}
+            try:
+                songs_collection.delete_many(delete_filter)
+            except TypeError:
+                songs_collection.delete_many({'group_key': group_key})
+            except Exception:  # pragma: no cover - tolerate transient issues
+                LOGGER.debug('Failed to delete invalid song document for %s', group_key)
+        if self._state_collection is not None and invalid_keys:
+            for key in invalid_keys:
+                try:
+                    self._state_collection.delete_many({'group_key': key})
+                except TypeError:
+                    self._state_collection.delete_many({'group_key': key})
+                except Exception:  # pragma: no cover - tolerate transient issues
+                    LOGGER.debug('Failed to prune state for invalid group key %r', key)
 
     def _sync_song_charts(
         self,
@@ -1260,6 +1451,7 @@ class SongScanner:
             'errors': 0,
             'skipped': 0,
         }
+        self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
         managed_songs: Dict[int, bool] = {}
         seen_song_ids: Set[int] = set()
@@ -1444,109 +1636,14 @@ class SongScanner:
             records = aggregated_records[key]
             document = self._build_song_document(key, records)
             charts_payload: List[Dict[str, object]] = list(document.get('charts', []))
-            base_document = {
-                k: v for k, v in document.items() if k not in {'id', 'order', '_id', 'charts'}
-            }
-            insert_document = dict(base_document)
-            insert_document['charts'] = []
-            lookup_filter: Dict[str, object] = {'group_key': key}
-            existing_doc: Optional[Dict[str, object]] = None
-            try:
-                if key:
-                    existing_doc = self.db.songs.find_one({'group_key': key})
-            except Exception:  # pragma: no cover - defensive
-                existing_doc = None
-            if (
-                existing_doc is None
-                and document.get('audioHash')
-                and document.get('titleNormalized')
-            ):
-                try:
-                    existing_doc = self.db.songs.find_one(
-                        {'audioHash': document['audioHash'], 'titleNormalized': document['titleNormalized']}
-                    )
-                except Exception:  # pragma: no cover - defensive
-                    existing_doc = None
-            if existing_doc is None and records:
-                try:
-                    existing_doc = self.db.songs.find_one({'paths.tja_url': records[0].tja_url})
-                except Exception:  # pragma: no cover - defensive
-                    existing_doc = None
-            if existing_doc is not None:
-                existing_key = existing_doc.get('group_key') or key
-                if existing_doc.get('_id') is not None:
-                    lookup_filter = {'_id': existing_doc['_id']}
-                elif existing_doc.get('id') is not None:
-                    lookup_filter = {'id': existing_doc['id']}
-                else:
-                    lookup_filter = {'group_key': existing_key}
-
-            result_doc: Optional[Dict[str, object]] = None
-
-            with self._group_key_lock(key):
-                for attempt in range(3):
-                    try:
-                        result_doc = self.db.songs.find_one_and_update(
-                            lookup_filter,
-                            {'$setOnInsert': insert_document},
-                            upsert=True,
-                            return_document=ReturnDocument.AFTER,
-                        )
-                        break
-                    except Exception as exc:  # pragma: no cover - exercised with real MongoDB
-                        if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
-                            time.sleep(0.05 * (attempt + 1))
-                            continue
-                        raise
-
-            if result_doc is None:
-                LOGGER.warning("Failed to upsert aggregated song for %s", key)
-                summary['errors'] += 1
-                continue
-
-            song_filter: Dict[str, object]
-            if result_doc.get('_id') is not None:
-                song_filter = {'_id': result_doc['_id']}
-            elif result_doc.get('id') is not None:
-                song_filter = {'id': result_doc['id']}
-            else:
-                song_filter = {'group_key': key}
-
-            song_id = result_doc.get('id') if isinstance(result_doc, dict) else None
-            inserted = song_id is None
-
-            if inserted:
-                new_id = self._get_next_song_id()
-                try:
-                    self.db.songs.update_one(song_filter, {'$set': {'id': new_id, 'order': new_id}})
-                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
-                    if PyMongoError and isinstance(exc, PyMongoError):
-                        LOGGER.exception("Failed to assign song id for %s", key)
-                        summary['errors'] += 1
-                        continue
-                    raise
-                song_id = new_id
-                summary['inserted'] += 1
-
-            needs_refresh = inserted or key in dirty_groups
-
-            if needs_refresh:
-                try:
-                    self.db.songs.update_one(song_filter, {'$set': base_document})
-                    if key in dirty_groups and not inserted:
-                        summary['updated'] += 1
-                except Exception as exc:  # pragma: no cover - exercised with real MongoDB
-                    if PyMongoError and isinstance(exc, PyMongoError):
-                        LOGGER.exception("Failed to update aggregated song for %s", key)
-                        summary['errors'] += 1
-                    else:
-                        raise
-
-                try:
-                    self._sync_song_charts(song_filter, charts_payload)
-                except Exception:  # pragma: no cover - tolerate chart sync issues
-                    LOGGER.debug('Failed to synchronise charts for %s', key)
-
+            song_id = self._upsert_song_document(
+                key,
+                records,
+                document,
+                charts_payload,
+                dirty_groups,
+                summary,
+            )
             if song_id is not None:
                 seen_song_ids.add(song_id)
                 song_id_by_key[key] = song_id
@@ -1612,6 +1709,8 @@ class SongScanner:
             if previous_enabled:
                 summary['disabled'] += 1
 
+        self._metrics.flush()
+
         return summary
 
     @property
@@ -1669,3 +1768,39 @@ class SongScanner:
                     LOGGER.debug('Failed to stop song directory watcher cleanly')
 
         return _WatcherHandle(observer, handler)
+
+class _ScanMetrics:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counters = {
+            'songs_upserted_total': 0,
+            'invalid_group_key_total': 0,
+            'duplicate_key_retries_total': 0,
+            'charts_synced_total': 0,
+        }
+        self._last_logged = 0.0
+
+    def increment(self, name: str, amount: int = 1) -> None:
+        if name not in self._counters:
+            return
+        with self._lock:
+            self._counters[name] += amount
+            self._maybe_log_locked()
+
+    def _maybe_log_locked(self) -> None:
+        now = time.time()
+        if now - self._last_logged < 1.0:
+            return
+        if all(value == 0 for value in self._counters.values()):
+            self._last_logged = now
+            return
+        snapshot = {key: self._counters[key] for key in sorted(self._counters)}
+        message = ", ".join(f"{key}={value}" for key, value in snapshot.items())
+        LOGGER.info("scanner counters: %s", message)
+        self._last_logged = now
+
+    def flush(self) -> None:
+        with self._lock:
+            self._last_logged = 0.0
+            self._maybe_log_locked()
+
