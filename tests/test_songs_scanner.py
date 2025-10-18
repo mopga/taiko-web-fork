@@ -567,7 +567,7 @@ class TestSongsScanner(unittest.TestCase):
             "#END",
         ]), encoding="utf-8")
 
-        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
             parsed = parse_tja(tja_path)
 
         self.assertFalse(parsed.has_dojo_course)
@@ -595,13 +595,41 @@ class TestSongsScanner(unittest.TestCase):
             "#END",
         ]), encoding="utf-8")
 
-        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
             parsed = parse_tja(tja_path)
 
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
         self.assertEqual(course.canonical, "Oni")
         self.assertEqual(course.mode, "standard")
+        self.assertIn("mapped-course", course.issues)
+        self.assertTrue(any('mapped-course: Tower→Oni (parser)' in message for message in logs.output))
+
+    def test_parse_tja_skips_comments_before_start_and_counts_notes(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "Tower" / "tower-comment.tja"
+        tja_path.parent.mkdir(parents=True, exist_ok=True)
+        tja_path.write_text("\n".join([
+            "// leading comment",
+            "",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "1110,",
+            "#END",
+        ]), encoding="utf-8-sig")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+            parsed = parse_tja(tja_path)
+
+        self.assertEqual(parsed.mapped_courses, 1)
+        self.assertEqual(parsed.skipped_no_course, 0)
+        self.assertEqual(len(parsed.courses), 1)
+        course = parsed.courses[0]
+        self.assertEqual(course.canonical, "Oni")
+        self.assertEqual(course.mode, "standard")
+        self.assertGreater(course.total_notes, 0)
+        self.assertGreater(course.hit_notes, 0)
         self.assertIn("mapped-course", course.issues)
         self.assertTrue(any('mapped-course: Tower→Oni (parser)' in message for message in logs.output))
 

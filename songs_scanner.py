@@ -247,6 +247,9 @@ class ParsedTJA:
     unknown_directives: int = 0
     has_dojo_course: bool = False
     skipped_charts: int = 0
+    mapped_courses: int = 0
+    skipped_no_course: int = 0
+    skipped_unknown_course: int = 0
 
 
 @dataclass
@@ -528,7 +531,9 @@ def parse_tja(path: Path) -> ParsedTJA:
         state.current_segment = None
 
     first_line = True
+    line_number = 0
     for raw_line in normalised_text.splitlines():
+        line_number += 1
         if first_line:
             raw_line = raw_line.lstrip("\ufeff")
             first_line = False
@@ -550,8 +555,13 @@ def parse_tja(path: Path) -> ParsedTJA:
             directive = upper_line.split(None, 1)[0]
             directive_payload = line[len(directive) :].strip()
             handled_directive = False
-            if active_course:
-                if directive == "#START":
+            if directive == "#START":
+                if active_course:
+                    LOGGER.info(
+                        "start-notes: course=%s (line %d)",
+                        active_course.canonical,
+                        line_number,
+                    )
                     active_course.start_blocks += 1
                     current_notes_course = active_course
                     parsing_notes = True
@@ -561,7 +571,17 @@ def parse_tja(path: Path) -> ParsedTJA:
                         _end_segment(current_notes_course)
                         _start_segment(current_notes_course, _current_audio())
                     handled_directive = True
-                elif directive == "#END":
+                else:
+                    LOGGER.warning(
+                        "skip notes: no course before #START (line %d)",
+                        line_number,
+                    )
+                    parsed.skipped_no_course += 1
+                    current_notes_course = None
+                    parsing_notes = False
+                    handled_directive = True
+            elif active_course:
+                if directive == "#END":
                     active_course.end_blocks += 1
                     if current_notes_course and current_notes_course.mode == "dojo":
                         _end_segment(current_notes_course)
@@ -705,12 +725,14 @@ def parse_tja(path: Path) -> ParsedTJA:
                     else:
                         LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
                     parsed.skipped_charts += 1
+                    parsed.skipped_unknown_course += 1
                     active_course = None
                     current_notes_course = None
                     parsing_notes = False
                 else:
                     if issue == "mapped-course":
-                        LOGGER.warning("mapped-course: %s→%s (parser)", raw_course_value, canonical)
+                        LOGGER.info("mapped-course: %s→%s (parser)", raw_course_value, canonical)
+                        parsed.mapped_courses += 1
                     existing = known_courses.get(canonical)
                     if existing:
                         active_course = existing
@@ -1956,6 +1978,12 @@ class SongScanner:
                         self._metrics.increment('tja_unknown_directives_total', parsed.unknown_directives)
                     if parsed.skipped_charts:
                         self._metrics.increment('tja_skipped_charts_total', parsed.skipped_charts)
+                    if parsed.mapped_courses:
+                        self._metrics.increment('tja_mapped_course_total', parsed.mapped_courses)
+                    if parsed.skipped_no_course:
+                        self._metrics.increment('tja_skipped_no_course_total', parsed.skipped_no_course)
+                    if parsed.skipped_unknown_course:
+                        self._metrics.increment('tja_skipped_unknown_course_total', parsed.skipped_unknown_course)
                     if parsed.has_dojo_course:
                         self._metrics.increment('tja_dojo_parsed_total')
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
@@ -2183,6 +2211,9 @@ class _ScanMetrics:
             'tja_notes_total': 0,
             'tja_unknown_directives_total': 0,
             'tja_skipped_charts_total': 0,
+            'tja_mapped_course_total': 0,
+            'tja_skipped_no_course_total': 0,
+            'tja_skipped_unknown_course_total': 0,
         }
         self._last_logged = 0.0
 
