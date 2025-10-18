@@ -105,7 +105,12 @@ SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
 HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
 
-DOJO_COURSE_TOKENS = {"DOJO", "DAN", "KYUU"}
+DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
+
+COURSE_DOWNCAST_MAP = {
+    "TOWER": "Oni",
+    "DAN": "Oni",
+}
 
 ZERO_WIDTH_CHARACTERS = {
     "\u200b",  # zero width space
@@ -422,12 +427,17 @@ def _resolve_course(value: str, *, path: Optional[Path] = None) -> Tuple[str, st
     canonical: Optional[str]
     issue: Optional[str] = None
 
-    if token == "TOWER":
-        marker = _detect_taste_marker(path) if path else None
-        if marker is not None:
-            canonical = marker
-        else:
-            canonical = "Oni"
+    downcast = COURSE_DOWNCAST_MAP.get(token)
+    if downcast:
+        canonical = downcast
+        location = f" in {path}" if path else ""
+        LOGGER.warning(
+            'Unknown COURSE "%s" mapped to "%s"%s',
+            value.strip(),
+            canonical,
+            location,
+        )
+        issue = "mapped-course"
     else:
         canonical = COURSE_ALIASES.get(token)
 
@@ -601,6 +611,8 @@ def parse_tja(path: Path) -> ParsedTJA:
                             )
                 elif directive in SAFE_NOTE_DIRECTIVES:
                     handled_directive = True
+                elif directive.startswith("#EXAM"):
+                    handled_directive = True
             if parsing_notes and current_notes_course and not handled_directive:
                 current_notes_course.unknown_directives += 1
                 parsed.unknown_directives += 1
@@ -714,6 +726,8 @@ def parse_tja(path: Path) -> ParsedTJA:
                         )
                         known_courses[canonical] = active_course
                         parsed.courses.append(active_course)
+                    if issue:
+                        active_course.add_issue(issue)
         elif key_upper == "LEVEL" and active_course:
             try:
                 level_value = float(value_stripped)
@@ -776,8 +790,6 @@ class SongScanner:
                     if canonical.casefold() == lowered or COURSE_LEGACY_MAP[canonical] == lowered:
                         self._coerce_unknown_course = canonical
                         break
-        self._next_song_id: Optional[int] = None
-        self._max_song_id: int = 0
         self._scan_lock = threading.Lock()
         self._group_locks: Dict[str, threading.Lock] = {}
         self._group_locks_guard = threading.Lock()
@@ -795,6 +807,16 @@ class SongScanner:
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure unique index for songs collection')
+        try:
+            counters = getattr(self.db, 'counters', None)
+            if counters is not None:
+                counters.update_one(
+                    {'_id': 'songs'},
+                    {'$setOnInsert': {'seq': 0}},
+                    upsert=True,
+                )
+        except Exception:  # pragma: no cover - tolerate best effort counter initialisation
+            LOGGER.debug('Failed to ensure songs counter document')
         self._import_issues_collection = getattr(self.db, 'import_issues', None)
         if self._import_issues_collection is not None:
             try:
@@ -1235,17 +1257,47 @@ class SongScanner:
         song_id = existing_id
 
         if inserted:
-            new_id = self._get_next_song_id()
-            try:
-                self.db.songs.update_one(song_filter, {'$set': {'id': new_id, 'order': new_id}})
-            except Exception as exc:  # pragma: no cover - tolerate transient driver issues
-                if PyMongoError and isinstance(exc, PyMongoError):
-                    LOGGER.exception("Failed to assign song id for %s", key)
-                    summary['errors'] += 1
-                    return None
-                raise
-            song_id = new_id
-            summary['inserted'] += 1
+            assignment_filter: Dict[str, object] = dict(song_filter)
+            assignment_filter['id'] = {'$exists': False}
+            assigned = False
+            for attempt in range(3):
+                new_id = self._get_next_song_id()
+                try:
+                    self.db.songs.update_one(
+                        assignment_filter,
+                        {'$set': {'id': new_id, 'order': new_id}},
+                    )
+                except Exception as exc:  # pragma: no cover - tolerate transient driver issues
+                    if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
+                        self._metrics.increment('duplicate_key_retries_total')
+                        jitter = random.random() * 0.025
+                        time.sleep(0.05 * (attempt + 1) + jitter)
+                        continue
+                    if PyMongoError and isinstance(exc, PyMongoError):
+                        LOGGER.exception("Failed to assign song id for %s", key)
+                        summary['errors'] += 1
+                        return None
+                    raise
+                latest_doc = None
+                try:
+                    latest_doc = self.db.songs.find_one(song_filter)
+                except Exception:  # pragma: no cover - tolerate missing find support
+                    latest_doc = None
+                if isinstance(latest_doc, dict) and isinstance(latest_doc.get('id'), int):
+                    song_id = latest_doc['id']
+                    if song_id == new_id:
+                        summary['inserted'] += 1
+                    assigned = True
+                    break
+                song_id = new_id
+                summary['inserted'] += 1
+                assigned = True
+                break
+
+            if not assigned or song_id is None:
+                LOGGER.warning("Failed to assign song id for %s", key)
+                summary['errors'] += 1
+                return None
 
         needs_refresh = inserted or key in dirty_groups
 
@@ -1564,34 +1616,45 @@ class SongScanner:
             document['audioHash'] = audio_hash
         return document
 
-    def _ensure_sequence(self) -> None:
-        if self._next_song_id is not None:
-            return
-        seq = self.db.seq.find_one({'name': 'songs'})
-        max_song = self.db.songs.find_one(sort=[('id', -1)])
-        current = 0
-        if seq and isinstance(seq.get('value'), int):
-            current = max(current, seq['value'])
-        if max_song:
-            current = max(current, max_song.get('id', 0))
-        self._max_song_id = current
-        self._next_song_id = current + 1
-
     def _get_next_song_id(self) -> int:
-        self._ensure_sequence()
-        assert self._next_song_id is not None
-        result = self._next_song_id
-        self._next_song_id += 1
-        self._max_song_id = max(self._max_song_id, result)
-        return result
+        counters = getattr(self.db, 'counters', None)
+        if counters is not None:
+            try:
+                result = counters.find_one_and_update(
+                    {'_id': 'songs'},
+                    {'$inc': {'seq': 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+            except Exception as exc:  # pragma: no cover - tolerate transient driver issues
+                if PyMongoError and isinstance(exc, PyMongoError):
+                    LOGGER.exception('Failed to increment songs counter')
+                else:
+                    LOGGER.debug('Failed to increment songs counter: %s', exc)
+            else:
+                if isinstance(result, dict) and isinstance(result.get('seq'), int):
+                    return int(result['seq'])
 
-    def _update_sequence(self) -> None:
-        if self._max_song_id > 0:
-            self.db.seq.update_one(
-                {'name': 'songs'},
-                {'$set': {'value': self._max_song_id}},
-                upsert=True,
-            )
+        seq = getattr(self.db, 'seq', None)
+        if seq is not None:
+            try:
+                current = 0
+                seq_doc = seq.find_one({'name': 'songs'})
+                max_song = self.db.songs.find_one(sort=[('id', -1)])
+                if seq_doc and isinstance(seq_doc.get('value'), int):
+                    current = max(current, seq_doc['value'])
+                if max_song and isinstance(max_song.get('id'), int):
+                    current = max(current, max_song['id'])
+                next_value = current + 1
+                seq.update_one({'name': 'songs'}, {'$set': {'value': next_value}}, upsert=True)
+                return next_value
+            except Exception:  # pragma: no cover - tolerate legacy sequence failures
+                LOGGER.debug('Falling back to on-demand song id allocation')
+
+        max_song = self.db.songs.find_one(sort=[('id', -1)])
+        if max_song and isinstance(max_song.get('id'), int):
+            return int(max_song['id']) + 1
+        return 1
 
     def _iter_tja_files(self) -> Iterable[Path]:
         if not self.songs_dir.exists():
@@ -1654,7 +1717,11 @@ class SongScanner:
                 if candidate.is_file():
                     return candidate, diagnostics
                 diagnostics.append('wave-missing')
-        if parsed.has_dojo_course:
+        has_dojo_charts = parsed.has_dojo_course or any(
+            course.normalised in {"DAN", "DOJO", "KYUU"} for course in parsed.courses
+        )
+
+        if has_dojo_charts:
             playlist = _find_hls_playlist()
             if playlist is not None:
                 return playlist, diagnostics
@@ -1946,8 +2013,6 @@ class SongScanner:
                         self._state_collection.insert_one(payload)
                     except Exception:
                         LOGGER.debug('Failed to insert song scanner state for %s', tja_key)
-
-        self._update_sequence()
 
         if self._state_collection is not None:
             stale_paths = set(state_docs.keys()) - seen_state_paths

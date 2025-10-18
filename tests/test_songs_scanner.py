@@ -1,12 +1,16 @@
 from pathlib import Path
+import logging
+import queue
 import sys
 import tempfile
 import threading
 import unittest
+from typing import List
 from unittest import mock
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import songs_scanner
 from songs_scanner import ChartRecord, SongScanner, TjaImportRecord, compute_group_key, parse_tja
 
 
@@ -22,8 +26,16 @@ class _MemoryCollection:
         if not filter_:
             return True
         for key, expected in filter_.items():
-            value = self._resolve_key(doc, key)
             if isinstance(expected, dict):
+                if '$exists' in expected:
+                    has_field = self._has_path(doc, key)
+                    if expected['$exists'] and not has_field:
+                        return False
+                    if not expected['$exists'] and has_field:
+                        return False
+                    value = self._resolve_key(doc, key)
+                else:
+                    value = self._resolve_key(doc, key)
                 if '$ne' in expected and value == expected['$ne']:
                     return False
                 if '$in' in expected and value not in expected['$in']:
@@ -31,6 +43,7 @@ class _MemoryCollection:
                 if '$nin' in expected and value in expected['$nin']:
                     return False
             else:
+                value = self._resolve_key(doc, key)
                 if value != expected:
                     return False
         return True
@@ -50,6 +63,15 @@ class _MemoryCollection:
         if isinstance(value, list):
             return [self._clone(v) for v in value]
         return value
+
+    def _has_path(self, doc, dotted):
+        current = doc
+        for part in dotted.split('.'):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return False
+        return True
 
     def _set_path(self, doc, dotted, value):
         parts = dotted.split('.')
@@ -159,6 +181,12 @@ class _MemoryCollection:
                     self._apply_array_set(doc, key, value, array_filters)
                 else:
                     self._set_path(doc, key, self._clone(value))
+        if '$inc' in update:
+            for key, amount in update['$inc'].items():
+                current = self._resolve_key(doc, key)
+                if not isinstance(current, (int, float)):
+                    current = 0
+                self._set_path(doc, key, current + amount)
         if '$addToSet' in update:
             for key, value in update['$addToSet'].items():
                 array = doc.setdefault(key, [])
@@ -242,14 +270,18 @@ class _MemoryCollection:
                     if update:
                         self._apply_update(doc, update, array_filters=array_filters)
                     return
-            if upsert and '$set' in update:
-                new_doc = self._clone(update['$set'])
-                if filter_:
-                    for key, value in filter_.items():
-                        if isinstance(value, dict):
-                            continue
-                        new_doc[key] = value
-                self._docs.append(new_doc)
+        if upsert and ('$set' in update or '$setOnInsert' in update):
+            new_doc = {}
+            if '$setOnInsert' in update:
+                new_doc.update(self._clone(update['$setOnInsert']))
+            if '$set' in update:
+                new_doc.update(self._clone(update['$set']))
+            if filter_:
+                for key, value in filter_.items():
+                    if isinstance(value, dict):
+                        continue
+                    new_doc.setdefault(key, value)
+            self._docs.append(new_doc)
 
     def delete_many(self, filter_):
         with self._lock:
@@ -275,6 +307,12 @@ class _SeqCollection(_MemoryCollection):
             super().update_one(filter_, update, upsert=True)
 
 
+class _CountersCollection(_MemoryCollection):
+    def __init__(self):
+        super().__init__()
+        self._docs = [{'_id': 'songs', 'seq': 0}]
+
+
 class _SongsCollection(_MemoryCollection):
     def __init__(self):
         super().__init__()
@@ -289,6 +327,7 @@ class _SongsCollection(_MemoryCollection):
 class _DummyDB:
     def __init__(self):
         self.seq = _SeqCollection()
+        self.counters = _CountersCollection()
         self.songs = _SongsCollection()
         self.categories = _MemoryCollection()
         self.song_scanner_state = _MemoryCollection()
@@ -505,7 +544,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(chart.unknown_directives, 0)
         self.assertEqual(parsed.unknown_directives, 0)
 
-    def test_parse_tja_dojo_segments(self):
+    def test_parse_tja_dan_downcasts_to_standard_course(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "Second Dan" / "dojo.tja"
         tja_path.parent.mkdir(parents=True, exist_ok=True)
@@ -516,30 +555,50 @@ class TestSongsScanner(unittest.TestCase):
             "WAVE:segment1.ogg",
             "#START",
             "1110,",
+            "#EXAM1 0 1 2",
             "#NEXTSONG",
             "WAVE:segment2.ogg",
             "2220,",
             "#END",
         ]), encoding="utf-8")
 
-        parsed = parse_tja(tja_path)
+        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+            parsed = parse_tja(tja_path)
 
-        self.assertTrue(parsed.has_dojo_course)
+        self.assertFalse(parsed.has_dojo_course)
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
-        self.assertEqual(course.mode, "dojo")
+        self.assertEqual(course.mode, "standard")
+        self.assertEqual(course.canonical, "Oni")
+        self.assertIn("mapped-course", course.issues)
         self.assertEqual(course.total_notes, 8)
         self.assertEqual(course.hit_notes, 6)
         self.assertEqual(course.measures, 2)
-        self.assertGreaterEqual(len(course.segments), 2)
-        first_segment = course.segments[0]
-        second_segment = course.segments[1]
-        self.assertEqual(first_segment.get('audio'), 'segment1.ogg')
-        self.assertEqual(first_segment.get('start_measure'), 0)
-        self.assertEqual(first_segment.get('end_measure'), 1)
-        self.assertEqual(second_segment.get('audio'), 'segment2.ogg')
-        self.assertEqual(second_segment.get('start_measure'), 1)
-        self.assertEqual(second_segment.get('end_measure'), 2)
+        self.assertEqual(course.unknown_directives, 0)
+        self.assertTrue(any('Unknown COURSE "Dan" mapped to "Oni"' in message for message in logs.output))
+
+    def test_parse_tja_tower_downcasts_to_oni(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "Tower" / "tower.tja"
+        tja_path.parent.mkdir(parents=True, exist_ok=True)
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Trial",
+            "COURSE:Tower",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+            parsed = parse_tja(tja_path)
+
+        self.assertEqual(len(parsed.courses), 1)
+        course = parsed.courses[0]
+        self.assertEqual(course.canonical, "Oni")
+        self.assertEqual(course.mode, "standard")
+        self.assertIn("mapped-course", course.issues)
+        self.assertTrue(any('Unknown COURSE "Tower" mapped to "Oni"' in message for message in logs.output))
 
     def test_determine_category_from_directory(self):
         tmp_dir = Path(self._tmp_dir())
@@ -668,15 +727,49 @@ class TestSongsScanner(unittest.TestCase):
         charts = inserted['charts']
         self.assertEqual(len(charts), 1)
         chart = charts[0]
-        self.assertEqual(chart.get('mode'), 'dojo')
-        self.assertTrue(chart.get('display_course'))
-        self.assertTrue(chart.get('segments'))
+        self.assertEqual(chart.get('mode'), 'standard')
+        self.assertIn('mapped-course', chart.get('issues', []))
         self.assertTrue(chart['valid'])
-        self.assertNotIn('dojo_no_segments', chart.get('issues', []))
-        self.assertIn('Second Dan', chart.get('display_course'))
         paths = inserted.get('paths', {})
         self.assertIn('audio_url', paths)
         self.assertTrue(paths['audio_url'].endswith('.t3u8'))
+
+    def test_scan_imports_dan_chart_in_mvp_mode(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = songs_dir / "dan.ogg"
+        audio_path.write_bytes(b"dan-audio")
+        tja_path = songs_dir / "dan_chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Trial Dan",
+            "WAVE:dan.ogg",
+            "COURSE:Dan",
+            "LEVEL:8",
+            "#START",
+            "1111,",
+            "#EXAM1 0 1 2",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan()
+
+        self.assertEqual(summary['inserted'], 1)
+        self.assertEqual(summary['errors'], 0)
+        self.assertEqual(len(db.songs.inserted), 1)
+        chart = db.songs.inserted[0]['charts'][0]
+        self.assertEqual(chart.get('course'), 'Oni')
+        self.assertEqual(chart.get('mode'), 'standard')
+        self.assertTrue(chart.get('valid'))
+        self.assertIn('mapped-course', chart.get('issues', []))
 
     def test_concurrent_upsert_same_chart(self):
         db = _DummyDB()
@@ -714,6 +807,129 @@ class TestSongsScanner(unittest.TestCase):
         charts = db.songs._docs[0].get('charts', [])
         self.assertEqual(len(charts), 1)
         self.assertEqual(db.songs._docs[0]['group_key'], key)
+
+    def test_get_next_song_id_monotonic(self):
+        tmp_dir = Path(self._tmp_dir())
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=tmp_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        allocated = [scanner._get_next_song_id() for _ in range(5)]
+
+        self.assertEqual(allocated, [1, 2, 3, 4, 5])
+        counter_docs = [doc for doc in db.counters._docs if doc.get('_id') == 'songs']
+        self.assertEqual(counter_docs[0]['seq'], 5)
+
+    def test_concurrent_id_allocation_has_no_gaps(self):
+        songs_dir = Path(self._tmp_dir())
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        worker_count = 4
+        total_records = 24
+        tasks = queue.Queue()
+        assigned_ids: List[int] = []
+        assigned_lock = threading.Lock()
+        exceptions: List[BaseException] = []
+
+        for index in range(total_records):
+            chart = ChartRecord(
+                course="Oni",
+                raw_course="Oni",
+                normalised="oni",
+                level=7,
+                branch=False,
+                valid=True,
+                issues=[],
+            )
+            record = self._make_record(
+                title=f"Concurrent {index}",
+                normalized_title=f"concurrent-{index}",
+                relative_path=f"Pack/concurrent_{index}.tja",
+                tja_url=f"/songs/Pack/concurrent_{index}.tja",
+                audio_url=f"/songs/Pack/concurrent_{index}.ogg",
+                audio_path=f"Pack/concurrent_{index}.ogg",
+                audio_hash=f"hash-{index}",
+                tja_hash=f"tja-hash-{index}",
+                fingerprint=f"fp-{index}",
+                charts=[chart],
+            )
+            key = compute_group_key(record)
+            document = scanner._build_song_document(key, [record])
+            charts_payload = list(document['charts'])
+            tasks.put((key, record, document, charts_payload))
+
+        for _ in range(worker_count):
+            tasks.put(None)
+
+        class _LogCapture(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records: List[logging.LogRecord] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                self.records.append(record)
+
+        log_handler = _LogCapture()
+        log_handler.setLevel(logging.DEBUG)
+        songs_scanner.LOGGER.addHandler(log_handler)
+
+        def worker() -> None:
+            local_summary = {'inserted': 0, 'updated': 0, 'errors': 0}
+            while True:
+                item = tasks.get()
+                try:
+                    if item is None:
+                        break
+                    key, record, document, charts_payload = item
+                    song_id = scanner._upsert_song_document(
+                        key,
+                        [record],
+                        document,
+                        charts_payload,
+                        set(),
+                        local_summary,
+                    )
+                    if song_id is not None:
+                        with assigned_lock:
+                            assigned_ids.append(song_id)
+                except BaseException as exc:  # pragma: no cover - surfaced after threads join
+                    exceptions.append(exc)
+                finally:
+                    tasks.task_done()
+
+        threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+        for thread in threads:
+            thread.start()
+
+        tasks.join()
+        for thread in threads:
+            thread.join()
+
+        songs_scanner.LOGGER.removeHandler(log_handler)
+
+        if exceptions:
+            raise exceptions[0]
+
+        duplicate_logs = [record for record in log_handler.records if 'DuplicateKeyError' in record.getMessage()]
+        self.assertFalse(duplicate_logs, f"DuplicateKeyError logs found: {[r.getMessage() for r in duplicate_logs]}")
+
+        self.assertEqual(len(db.songs._docs), total_records)
+        ids = sorted(doc.get('id') for doc in db.songs._docs if doc.get('id') is not None)
+        self.assertEqual(ids, list(range(1, total_records + 1)))
+        self.assertEqual(len(assigned_ids), total_records)
+        self.assertEqual(sorted(assigned_ids), ids)
+        counter_value = next(doc['seq'] for doc in db.counters._docs if doc.get('_id') == 'songs')
+        self.assertEqual(counter_value, total_records)
 
     def test_scan_merges_charts_for_shared_wave(self):
         tmp_dir = Path(self._tmp_dir())
@@ -976,7 +1192,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertTrue(unknown_courses)
         self.assertIn("unknown_course_numeric", unknown_courses[0].issues)
 
-    def test_resolve_course_uses_path_markers_for_tower(self):
+    def test_resolve_course_downcasts_tower_to_oni(self):
         tmp_dir = Path(self._tmp_dir())
 
         oni_path = Path(tmp_dir) / "tower" / "tower.tja"
@@ -1020,8 +1236,11 @@ class TestSongsScanner(unittest.TestCase):
         normal_course = parse_tja(normal_path).courses[0]
 
         self.assertEqual(oni_course.canonical, "Oni")
-        self.assertEqual(easy_course.canonical, "Easy")
-        self.assertEqual(normal_course.canonical, "Normal")
+        self.assertEqual(easy_course.canonical, "Oni")
+        self.assertEqual(normal_course.canonical, "Oni")
+        self.assertIn("mapped-course", oni_course.issues)
+        self.assertIn("mapped-course", easy_course.issues)
+        self.assertIn("mapped-course", normal_course.issues)
 
     def test_scanner_merges_multiple_tja_into_single_song(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1170,9 +1389,10 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
         courses = {chart['course'] for chart in inserted['charts']}
-        self.assertIn('Easy', courses)
-        self.assertIn('Normal', courses)
-        self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
+        self.assertEqual(courses, {'Oni'})
+        self.assertIn('duplicate_course', inserted.get('import_issues', []))
+        chart = inserted['charts'][0]
+        self.assertIn('mapped-course', chart.get('issues', []))
 
     def test_scanner_keeps_distinct_unknown_courses(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1583,22 +1803,18 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
-        self.assertNotIn('duplicate_course', inserted.get('import_issues', []))
-        self.assertNotIn('unknown-course', inserted.get('import_issues', []))
-        self.assertEqual(inserted.get('valid_chart_count'), 2)
+        self.assertIn('duplicate_course', inserted.get('import_issues', []))
+        self.assertEqual(inserted.get('valid_chart_count'), 1)
 
-        charts = {chart['course']: chart for chart in inserted['charts']}
-        self.assertEqual(set(charts.keys()), {'Easy', 'Normal'})
-        easy_chart = charts['Easy']
-        normal_chart = charts['Normal']
-        self.assertTrue(easy_chart['valid'])
-        self.assertTrue(normal_chart['valid'])
-        self.assertGreater(easy_chart['hit_notes'], 0)
-        self.assertGreater(normal_chart['hit_notes'], 0)
-        self.assertGreater(easy_chart['total_notes'], easy_chart['hit_notes'])
-        self.assertGreater(normal_chart['total_notes'], normal_chart['hit_notes'])
-        self.assertTrue(easy_chart.get('first_note_preview', '').startswith('1110'))
-        self.assertTrue(normal_chart.get('first_note_preview', '').startswith('1011'))
+        self.assertEqual(len(inserted['charts']), 1)
+        chart = inserted['charts'][0]
+        self.assertEqual(chart['course'], 'Oni')
+        self.assertTrue(chart['valid'])
+        self.assertIn('duplicate-course', chart.get('issues', []))
+        self.assertIn('mapped-course', chart.get('issues', []))
+        self.assertGreater(chart['hit_notes'], 0)
+        self.assertGreater(chart['total_notes'], chart['hit_notes'])
+        self.assertTrue(chart.get('first_note_preview', '').startswith(('1110', '1011')))
 
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
         db = _DummyDB()
