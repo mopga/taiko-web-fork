@@ -526,6 +526,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(len(inserted['charts']), 1)
         self.assertIn('duplicate_course', inserted.get('import_issues', []))
         self.assertEqual(inserted['charts'][0]['course'], 'Oni')
+        self.assertIn('duplicate-course', inserted['charts'][0]['issues'])
 
     def test_scanner_groups_tower_flavour_files_into_single_song(self):
         tmp_dir = Path(self._tmp_dir())
@@ -742,7 +743,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(issues[0]['reason'], 'empty_chart')
         self.assertEqual(issues[0]['path'], 'empty.tja')
         self.assertEqual(issues[0]['course_raw'], 'Oni')
-        self.assertEqual(issues[0].get('after_start_token'), '0,0')
+        self.assertEqual(issues[0].get('first_note_preview'), '0,0')
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

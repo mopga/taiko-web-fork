@@ -90,6 +90,8 @@ ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 
 NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-8]")
 
+SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
+
 ZERO_WIDTH_CHARACTERS = {
     "\u200b",  # zero width space
     "\u200c",  # zero width non-joiner
@@ -371,21 +373,24 @@ def parse_tja(path: Path) -> ParsedTJA:
             continue
         if line.startswith("#"):
             upper_line = line.upper()
+            directive = upper_line.split(None, 1)[0]
             if active_course:
-                if upper_line == "#START":
+                if directive == "#START":
                     active_course.start_blocks += 1
                     current_notes_course = active_course
                     parsing_notes = True
-                elif upper_line == "#END":
+                elif directive == "#END":
                     active_course.end_blocks += 1
                     parsing_notes = False
                     current_notes_course = None
-                elif upper_line.startswith("#BRANCH"):
+                elif directive.startswith("#BRANCH"):
                     active_course.branch = True
-                    if upper_line.startswith("#BRANCHSTART"):
+                    if directive.startswith("#BRANCHSTART"):
                         active_course.branch_sections.add("START")
-                elif upper_line in {"#N", "#E", "#M"}:
-                    active_course.branch_sections.add(upper_line[1:])
+                elif directive in {"#N", "#E", "#M"}:
+                    active_course.branch_sections.add(directive[1:])
+            if parsing_notes and current_notes_course and directive in SAFE_NOTE_DIRECTIVES:
+                continue
             continue
 
         if parsing_notes and current_notes_course:
@@ -570,7 +575,7 @@ class SongScanner:
 
             if course.start_blocks == 0 or course.end_blocks == 0 or course.end_blocks < course.start_blocks:
                 issues.append("missing-chart-content")
-            if course.hit_notes == 0:
+            if course.total_notes == 0:
                 issues.append("empty-chart")
             if course.branch:
                 required_sections = {"N", "E", "M"}
@@ -585,6 +590,7 @@ class SongScanner:
                 course_name in COURSE_ORDER
                 and "missing-chart-content" not in issues
                 and "unknown-course" not in issues
+                and course.total_notes > 0
                 and course.hit_notes > 0
             )
 
@@ -627,7 +633,7 @@ class SongScanner:
                 if 'empty-chart' in chart.issues:
                     payload = dict(filter_doc)
                     if chart.first_note_preview:
-                        payload['after_start_token'] = chart.first_note_preview
+                        payload['first_note_preview'] = chart.first_note_preview
                     self._import_issues_collection.insert_one(payload)
             except Exception:  # pragma: no cover - tolerate collection issues
                 LOGGER.debug('Failed to record empty chart issue for %s (%s)', path, chart.raw_course)
@@ -827,13 +833,14 @@ class SongScanner:
         duplicate_courses: Set[str] = set()
         for record in sorted_records:
             for chart in record.charts:
+                entry_issues = sorted(set(chart.issues))
                 entry = {
                     'course': chart.course,
                     'raw_course': chart.raw_course,
                     'level': chart.level,
                     'branch': chart.branch,
                     'valid': chart.valid,
-                    'issues': chart.issues,
+                    'issues': entry_issues,
                     'coerced': chart.coerced,
                     'hit_notes': chart.hit_notes,
                     'total_notes': chart.total_notes,
@@ -846,6 +853,10 @@ class SongScanner:
                     chart_by_course[chart.course] = entry
                 else:
                     duplicate_courses.add(chart.course)
+                    existing_issues = set(existing.get('issues', []))
+                    existing_issues.add('duplicate-course')
+                    existing['issues'] = sorted(existing_issues)
+                    entry['issues'] = sorted(set(entry['issues']) | {'duplicate-course'})
                     if not existing['valid'] and chart.valid:
                         chart_by_course[chart.course] = entry
 
