@@ -36,6 +36,24 @@ def _resolve_bind_target(parsed_args: argparse.Namespace) -> tuple[str, int]:
         return bind_host, bind_port
 
 
+def _normalize_origins(raw_origins):
+        if not raw_origins:
+                return None
+
+        if isinstance(raw_origins, (list, tuple)):
+                tokens = raw_origins
+        else:
+                tokens = [raw_origins]
+
+        normalized = [
+                part.strip()
+                for token in tokens
+                for part in token.split(",")
+                if part.strip()
+        ]
+        return normalized or None
+
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('taiko.server')
 
@@ -448,8 +466,9 @@ async def main():
         parser = _build_parser()
         args = parser.parse_args()
         host, port = _resolve_bind_target(args)
+        origins = _normalize_origins(getattr(args, 'allow_origin', None))
         log.info("taiko-server-online: host=%s port=%d", host, port)
-        await _start_ws_server(connection, host, port, origins=args.allow_origin)
+        await _start_ws_server(connection, host, port, origins=origins)
 
 
 if __name__ == "__main__":
