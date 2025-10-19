@@ -131,14 +131,14 @@ HEADER_KEYS = {
     "BALLOONEX",
 }
 
-HIT_NOTE_VALUES = {1, 2, 3, 4}
-
-LENIENT_NOTE_TYPE_MAP = {
-    "1": "don",
-    "2": "ka",
-    "3": "don",
-    "4": "ka",
+HIT_NOTE_TYPE_MAP = {
+    1: "don",
+    2: "ka",
+    3: "don",
+    4: "ka",
 }
+
+HIT_NOTE_VALUES = set(HIT_NOTE_TYPE_MAP.keys())
 
 LONG_NOTE_START_MAP = {
     5: {"kind": "drumroll", "big": False},
@@ -739,7 +739,7 @@ def _parse_tja_strict(
             at_value = int(round(state.measure_start_time_ms + position * duration_ms))
 
             if note_value in HIT_NOTE_VALUES:
-                note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+                note_type = HIT_NOTE_TYPE_MAP.get(note_value)
                 if note_type:
                     notes.append({'type': note_type, 'at': at_value})
                 continue
@@ -1480,7 +1480,7 @@ def _parse_tja_lenient(
                 position = (index / total_slots) if total_slots else 0.0
                 at_value = int(round(measure_start_time_ms + position * duration_ms))
                 if note_value in HIT_NOTE_VALUES:
-                    note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+                    note_type = HIT_NOTE_TYPE_MAP.get(note_value)
                     if note_type:
                         measure_notes.append({'type': note_type, 'at': at_value})
                     continue
@@ -1743,7 +1743,7 @@ def parse_tja(path: Path) -> ParsedTJA:
         return parsed
 
     has_courses = bool(parsed.courses)
-    has_valid_course = any(course.hit_notes > 0 for course in parsed.courses)
+    has_valid_course = any(course.total_notes > 0 for course in parsed.courses)
     if has_valid_course or not has_courses:
         return parsed
 
