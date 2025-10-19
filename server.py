@@ -5,10 +5,12 @@ import asyncio
 import json
 import logging
 import random
+import signal
 import sys
 from typing import Optional
 
 import websockets
+from websockets.server import serve as ws_serve
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -19,10 +21,6 @@ def _build_parser() -> argparse.ArgumentParser:
         parser.add_argument('-b', '--bind-address', dest='bind_address', help='[deprecated] Bind server to address.')
         parser.add_argument('-o', '--allow-origin', action='append', help='Limit incoming connections to the specified origin. Can be specified multiple times.')
         return parser
-
-
-parser = _build_parser()
-args = parser.parse_args()
 
 
 def _resolve_bind_target(parsed_args: argparse.Namespace) -> tuple[str, int]:
@@ -37,8 +35,6 @@ def _resolve_bind_target(parsed_args: argparse.Namespace) -> tuple[str, int]:
         bind_host = next((candidate for candidate in host_candidates if candidate), '0.0.0.0')
         return bind_host, bind_port
 
-
-HOST, PORT = _resolve_bind_target(args)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('taiko.server')
@@ -421,27 +417,44 @@ async def connection(ws, path):
                 elif user["action"] == "invite" and user["session"] in server_status["invites"]:
                         del server_status["invites"][user["session"]]
 
-log.info("taiko-server-online: host=%s port=%d", HOST, PORT)
-loop = asyncio.get_event_loop()
-tasks = asyncio.gather(
-        websockets.serve(connection, HOST, PORT, origins=args.allow_origin)
-)
-try:
-	loop.run_until_complete(tasks)
-	loop.run_forever()
-except KeyboardInterrupt:
-	print("Stopping server")
-	def shutdown_exception_handler(loop, context):
-		if "exception" not in context or not isinstance(context["exception"], asyncio.CancelledError):
-			loop.default_exception_handler(context)
-	loop.set_exception_handler(shutdown_exception_handler)
-	tasks = asyncio.gather(*asyncio.all_tasks(loop=loop), loop=loop, return_exceptions=True)
-	tasks.add_done_callback(lambda t: loop.stop())
-	tasks.cancel()
-	while not tasks.done() and not loop.is_closed():
-		loop.run_forever()
-finally:
-	if hasattr(loop, "shutdown_asyncgens"):
-		loop.run_until_complete(loop.shutdown_asyncgens())
-	loop.close()
+async def _start_ws_server(connection, host, port, origins):
+        """
+        Стартует websockets-сервер и ждёт завершения, пока не придёт сигнал.
+        """
+        stop = asyncio.Event()
+
+        def _set_stop(*_):
+                stop.set()
+
+        loop = asyncio.get_running_loop()
+        registered_signals = []
+        for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                        loop.add_signal_handler(sig, _set_stop)
+                except NotImplementedError:
+                        pass
+                else:
+                        registered_signals.append(sig)
+
+        try:
+                async with ws_serve(connection, host, port, origins=origins):
+                        await stop.wait()
+        finally:
+                for sig in registered_signals:
+                        loop.remove_signal_handler(sig)
+
+
+async def main():
+        parser = _build_parser()
+        args = parser.parse_args()
+        host, port = _resolve_bind_target(args)
+        log.info("taiko-server-online: host=%s port=%d", host, port)
+        await _start_ws_server(connection, host, port, origins=args.allow_origin)
+
+
+if __name__ == "__main__":
+        try:
+                asyncio.run(main())
+        except KeyboardInterrupt:
+                pass
 
