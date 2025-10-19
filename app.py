@@ -36,6 +36,7 @@ from pymongo import MongoClient, ReturnDocument
 from redis import Redis
 
 from songs_scanner import SongScanner
+from tower_chart_selection import select_best_chart
 
 
 LOGGER = logging.getLogger(__name__)
@@ -861,6 +862,59 @@ def route_api_songs():
             song['music_type'] = paths['audio_url'].split('.')[-1].lower()
 
     return cache_wrap(flask.jsonify(songs), 60)
+
+@app.route(basedir + 'api/tower/chart')
+@app.cache.cached(timeout=15, query_string=True)
+def route_api_tower_chart():
+    title = request.args.get('title', '').strip()
+    if not title:
+        return jsonify({'status': 'error', 'message': 'missing_title'}), 400
+    course_param = request.args.get('course', '').strip().casefold() or 'oni'
+
+    projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
+    song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
+    if song is None:
+        normalised_title = title.casefold()
+        song = db.songs.find_one({'titleNormalized': normalised_title}, projection)
+    if song is None:
+        return jsonify({'status': 'error', 'message': 'not_found'}), 404
+
+    charts = song.get('charts') if isinstance(song.get('charts'), list) else []
+    best_chart = select_best_chart(charts, course_param)
+
+    if best_chart is None:
+        return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
+
+    chart_data_source = best_chart.get('chart_data')
+    if isinstance(chart_data_source, dict):
+        chart_data = dict(chart_data_source)
+    else:
+        chart_data = {
+            'course': best_chart.get('canonical_course') or best_chart.get('course'),
+            'total_notes': best_chart.get('total_notes', 0),
+            'measures': best_chart.get('measures', []),
+        }
+    measures = chart_data.get('measures')
+    if not isinstance(measures, list):
+        measures = []
+        chart_data['measures'] = measures
+    duration_value = chart_data.get('duration_ms')
+    try:
+        duration_ms = int(duration_value)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    if duration_ms < 0:
+        duration_ms = 0
+    chart_data['duration_ms'] = duration_ms
+
+    response = {
+        'status': 'ok',
+        'title': song.get('title'),
+        'mode': best_chart.get('mode'),
+        'display_course': best_chart.get('display_course'),
+        'chart_data': chart_data,
+    }
+    return jsonify(response)
 
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)

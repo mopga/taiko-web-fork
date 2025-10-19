@@ -21,10 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Создаём точки монтирования для песен/ассетов и конфигурации
 RUN mkdir -p /data/songs /app/config
 
-# По умолчанию gunicorn слушает 0.0.0.0:8000
-ENV GUNICORN_CMD_ARGS="--bind 0.0.0.0:8000 --workers 2 --threads 4"
+# По умолчанию HTTP слушает 0.0.0.0:8000
 EXPOSE 8000
 
-# Запуск — gunicorn wsgi:app (если в проекте точка входа app.py с app=Flask(...), то wsgi может называться иначе)
-# В форке yuuki/taiko-web Flask-приложение доступно как app в app.py — значит модуль 'app:app'
-CMD ["gunicorn", "app:app"]
+COPY start.sh /app/start.sh
+RUN sed -i 's/\r$//' /app/start.sh \
+    && chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]
