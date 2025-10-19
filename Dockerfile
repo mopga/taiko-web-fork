@@ -24,7 +24,9 @@ RUN mkdir -p /data/songs /app/config
 # По умолчанию HTTP слушает 0.0.0.0:8000
 EXPOSE 8000
 
-COPY start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+COPY entrypoint.sh /app/entrypoint.sh
+COPY start.sh      /app/start.sh
+RUN chmod 0755 /app/entrypoint.sh /app/start.sh \
+ && sed -i 's/\r$//' /app/start.sh
 
-CMD ["/app/start.sh"]
+ENTRYPOINT ["/bin/sh","/app/entrypoint.sh"]
