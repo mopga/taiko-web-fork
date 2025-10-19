@@ -466,9 +466,9 @@ async def main():
         parser = _build_parser()
         args = parser.parse_args()
         host, port = _resolve_bind_target(args)
-        normalized_origins = _normalize_origins(getattr(args, 'allow_origin', None))
+        origins = _normalize_origins(getattr(args, 'allow_origin', None))
         log.info("taiko-server-online: host=%s port=%d", host, port)
-        await _start_ws_server(connection, host, port, origins=normalized_origins)
+        await _start_ws_server(connection, host, port, origins=origins)
 
 
 if __name__ == "__main__":
