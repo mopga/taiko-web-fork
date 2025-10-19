@@ -22,7 +22,7 @@ from pymongo.database import Database
 
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReturnDocument
-    from pymongo.errors import DuplicateKeyError, PyMongoError
+    from pymongo.errors import DuplicateKeyError, PyMongoError, WriteError
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
     class _ReturnDocumentFallback:
         BEFORE = 0
@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - fallback when pymongo unavailable
     ReturnDocument = _ReturnDocumentFallback()  # type: ignore[assignment]
     DuplicateKeyError = None  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
+    WriteError = None  # type: ignore[assignment]
 
 
 try:  # pragma: no cover - watchdog is optional during tests
@@ -2341,14 +2342,6 @@ class SongScanner:
         }
         base_document['group_key'] = key
 
-        insert_document = dict(base_document)
-        insert_document['charts'] = []
-
-        now_utc = datetime.now(UTC)
-        base_document['updated_at'] = now_utc
-        insert_document['updated_at'] = now_utc
-        insert_document['created_at'] = now_utc
-
         stable_song_id = None
         if isinstance(document.get('scanner_stable_id'), str):
             stable_song_id = document['scanner_stable_id'] or None
@@ -2357,12 +2350,44 @@ class SongScanner:
             summary['errors'] += 1
             return None
 
+        now_utc = datetime.now(UTC)
+        base_document['updated_at'] = now_utc
+
+        insert_only_fields = {'title', 'group_key', 'scanner_stable_id'}
+        mutable_fields = {'charts', 'summary', 'tags', 'last_scanned_at', 'metadata'}
+
+        insert_document = {
+            field: base_document[field]
+            for field in insert_only_fields
+            if field in base_document
+        }
+        insert_document['created_at'] = now_utc
+
+        mutable_conflicts = mutable_fields.intersection(insert_document.keys())
+        assert not mutable_conflicts, f"insert-once-mutable-conflict: {mutable_conflicts}"
+
+        base_document = {
+            k: v for k, v in base_document.items() if k not in insert_only_fields
+        }
+
+        insert_document.setdefault('scanner_stable_id', stable_song_id)
+
         stable_group_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id, 'group_key': key}
         stable_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
         legacy_filter: Dict[str, object] = {'group_key': key, 'scanner_stable_id': {'$exists': False}}
 
+        def _validate_update_doc(update: Dict[str, Dict[str, object]]) -> None:
+            if '$set' in update and '$setOnInsert' in update:
+                dup = set(update['$set']).intersection(update['$setOnInsert'])
+                assert not dup, f"update-conflict-keys: {dup}"
+
         update_existing = {'$set': base_document}
+        legacy_update_existing = {'$set': dict(base_document)}
+        legacy_update_existing['$set']['scanner_stable_id'] = stable_song_id
         update_insert = {'$setOnInsert': insert_document, '$set': base_document}
+
+        _validate_update_doc(update_existing)
+        _validate_update_doc(update_insert)
 
         result_doc: Optional[Dict[str, object]] = None
         final_mode = 'unknown'
@@ -2417,6 +2442,15 @@ class SongScanner:
                 try:
                     return self.db.songs.update_one(filter_doc, update_doc, upsert=upsert)
                 except Exception as exc:  # pragma: no cover - defensive around DB driver
+                    if WriteError and isinstance(exc, WriteError):
+                        if getattr(exc, 'code', None) == 40:
+                            LOGGER.error(
+                                "write-error-40: conflict at path; set=%s setOnInsert=%s",
+                                list(update_doc.get('$set', {}).keys()),
+                                list(update_doc.get('$setOnInsert', {}).keys()),
+                                exc_info=True,
+                            )
+                            return None
                     if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
                         self._metrics.increment('duplicate_key_retries_total')
                         _log_duplicate(exc, attempt, phase)
@@ -2437,6 +2471,16 @@ class SongScanner:
                         jitter = random.random() * 0.025
                         time.sleep(0.05 * (attempt + 1) + jitter)
                         continue
+                    if PyMongoError and isinstance(exc, PyMongoError):
+                        if attempt == 0:
+                            LOGGER.warning(
+                                'transient write error during %s phase; retrying',
+                                phase,
+                                exc_info=True,
+                            )
+                            jitter = random.random() * 0.025
+                            time.sleep(0.05 + jitter)
+                            continue
                     raise
             return None
 
@@ -2453,7 +2497,12 @@ class SongScanner:
                     final_mode = 'new'
                     mode_detail = 'stable-only'
                 else:
-                    legacy_result = _execute_update(legacy_filter, update_existing, upsert=False, phase='legacy')
+                    legacy_result = _execute_update(
+                        legacy_filter,
+                        legacy_update_existing,
+                        upsert=False,
+                        phase='legacy',
+                    )
                     if legacy_result and getattr(legacy_result, 'matched_count', 0):
                         final_result = legacy_result
                         final_mode = 'legacy'
