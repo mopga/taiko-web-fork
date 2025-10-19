@@ -755,7 +755,7 @@ LEVEL:7
             with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
                 parsed = parse_tja(tja_path)
 
-        self.assertFalse(any("fallback-to-lenient" in message for message in logs.output))
+        self.assertFalse(any("lenient-trigger" in message for message in logs.output))
         self.assertIn('oni', parsed.charts)
         self.assertGreater(parsed.charts['oni'].total_notes, 0)
         self.assertNotIn('lenient-fallback', parsed.charts['oni'].issues)
@@ -792,7 +792,7 @@ LEVEL:7
         joined_logs = "\n".join(logs.output)
         self.assertIn("end-notes(strict): course=oni", joined_logs)
         self.assertIn("end-notes(strict): course=hard", joined_logs)
-        self.assertNotIn("fallback-to-lenient", joined_logs)
+        self.assertNotIn("lenient-trigger", joined_logs)
         self.assertIn('oni', parsed.charts)
         self.assertIn('hard', parsed.charts)
         self.assertEqual(parsed.charts['oni'].total_notes, 0)
@@ -828,15 +828,15 @@ LEVEL:7
                 parsed = parse_tja(tja_path)
 
         joined_logs = "\n".join(logs.output)
-        self.assertIn("fallback-to-lenient: file=", joined_logs)
-        self.assertIn("reason=no-valid-courses", joined_logs)
+        self.assertNotIn("lenient-trigger: file=", joined_logs)
+        self.assertIn("synth-notes: injected=", joined_logs)
         courses = {course.canonical: course for course in parsed.courses}
         self.assertIn('normal', courses)
         self.assertIn('easy', courses)
         course = courses['normal']
-        self.assertIn('lenient-fallback', course.issues)
+        self.assertNotIn('lenient-fallback', course.issues)
         chart_data = course.chart_data or {}
-        self.assertEqual(chart_data.get('total_notes', 0), 0)
+        self.assertGreater(chart_data.get('total_notes', 0), 0)
         measures = chart_data.get('measures', [])
         self.assertTrue(measures)
         self.assertTrue(all('notes' in measure for measure in measures))
@@ -848,8 +848,15 @@ LEVEL:7
             self.assertIn('at', long_note)
             self.assertIn('end_at', long_note)
             self.assertIsInstance(long_note.get('big'), bool)
+        duration_ms = chart_data.get('duration_ms', 0)
+        self.assertGreater(duration_ms, 0)
+        for long_note in longs:
+            self.assertLessEqual(long_note.get('end_at', long_note.get('at', 0)), duration_ms)
         self.assertEqual(courses['easy'].hit_notes, 0)
         self.assertNotIn('lenient-fallback', courses['easy'].issues)
+        easy_chart = courses['easy'].chart_data or {}
+        self.assertGreater(easy_chart.get('total_notes', 0), 0)
+        self.assertGreater(easy_chart.get('duration_ms', 0), 0)
 
     def test_strict_parse_failure_logs_and_preserves_other_courses(self):
         tmp_dir = Path(self._tmp_dir())
@@ -886,7 +893,7 @@ LEVEL:7
 
         joined_logs = "\n".join(logs.output)
         self.assertIn("strict-parse-failed: course=oni", joined_logs)
-        self.assertNotIn("fallback-to-lenient", joined_logs)
+        self.assertNotIn("lenient-trigger", joined_logs)
         self.assertIn('oni', parsed.charts)
         self.assertIn('hard', parsed.charts)
         self.assertEqual(parsed.charts['oni'].total_notes, 0)
@@ -983,7 +990,14 @@ LEVEL:7
             self.assertGreaterEqual(long_note['end_at'], long_note['at'] + 1)
         self.assertGreaterEqual(longs[0]['end_at'], longs[1]['at'])
         notes = [note for measure in measures for note in measure.get('notes', [])]
-        self.assertFalse(any(note.get('synthetic') for note in notes))
+        self.assertTrue(notes)
+        synthetic_notes = [note for note in notes if note.get('synthetic')]
+        self.assertEqual(len(synthetic_notes), len(notes))
+        self.assertEqual(len(synthetic_notes), len(longs))
+        duration_ms = chart_data.get('duration_ms', 0)
+        self.assertGreater(duration_ms, 0)
+        for long_note in longs:
+            self.assertLessEqual(long_note.get('end_at'), duration_ms)
 
     def test_strict_closes_longs_at_end_of_file(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1032,6 +1046,7 @@ LEVEL:7
         self.assertIn('end-notes(strict): course=dojo', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
+        self.assertIn('synth-notes: injected=', joined_logs)
 
         course = parsed.charts['dojo']
         self.assertGreater(course.total_notes, 0)
@@ -1047,6 +1062,9 @@ LEVEL:7
         self.assertTrue(all(note['type'] == 'don' for note in synthetic_notes))
         longs = [long for measure in measures for long in measure.get('longs', [])]
         self.assertEqual(len(synthetic_notes), len(longs))
+        self.assertGreater(chart_data.get('duration_ms', 0), 0)
+        for long_note in longs:
+            self.assertLessEqual(long_note.get('at', 0), chart_data.get('duration_ms', 0))
 
     def test_tower_long_only_chart_injects_synthetic_notes(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1068,6 +1086,7 @@ LEVEL:7
         self.assertIn('end-notes(strict): course=oni', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
+        self.assertIn('synth-notes: injected=', joined_logs)
 
         course = parsed.charts['oni']
         self.assertEqual(course.normalised, 'TOWER')
@@ -1083,6 +1102,11 @@ LEVEL:7
         self.assertEqual(len(synthetic_notes), len(notes))
         longs = [long for measure in measures for long in measure.get('longs', [])]
         self.assertEqual(len(longs), len(synthetic_notes))
+        duration_ms = chart_data.get('duration_ms', 0)
+        self.assertGreater(duration_ms, 0)
+        for long_note in longs:
+            end_at = long_note.get('end_at', long_note.get('at', 0))
+            self.assertLessEqual(end_at, duration_ms)
 
     def test_standard_chart_with_hits_has_no_synthetic_notes(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1137,10 +1161,11 @@ LEVEL:7
                     parsed = parse_tja(tja_path)
 
         joined_logs = "\n".join(logs.output)
-        self.assertIn('fallback-to-lenient: file=', joined_logs)
+        self.assertIn('lenient-trigger: file=', joined_logs)
         self.assertIn('end-notes(lenient): course=dojo', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
+        self.assertIn('synth-notes: injected=', joined_logs)
 
         course = parsed.courses[0]
         self.assertEqual(course.canonical, 'dojo')
@@ -1153,6 +1178,10 @@ LEVEL:7
         self.assertTrue(all(note.get('synthetic') for note in notes))
         longs = [long for measure in measures for long in measure.get('longs', [])]
         self.assertEqual(len(notes), len(longs))
+        self.assertGreater(chart_data.get('duration_ms', 0), 0)
+        for long_note in longs:
+            end_at = long_note.get('end_at', long_note.get('at', 0))
+            self.assertLessEqual(end_at, chart_data.get('duration_ms', 0))
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
