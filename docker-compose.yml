@@ -51,6 +51,7 @@ services:
       TAIKO_WEB_REDIS_HOST: "redis"
       TAIKO_WEB_REDIS_PORT: "6379"
       TAIKO_WEB_REDIS_DB: "0"
+      TJA_LENIENT_FALLBACK: "1"
       # basepath — если хочешь в подпуть, поставь, например, /taiko/
       BASEDIR: "${BASEDIR:-/}"
     ports:
