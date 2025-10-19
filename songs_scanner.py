@@ -150,6 +150,47 @@ LONG_NOTE_START_MAP = {
 
 LONG_NOTE_END_TOKEN = 8
 
+# Charts that rely on long-note visualisation in the front-end despite lacking hit notes.
+SYNTHETIC_NOTE_COURSE_TOKENS = {"TOWER"}
+
+
+def _resolve_long_end(entry: Dict[str, object], candidate_end: int) -> int:
+    """Ensure that a long note entry is terminated at or after its start time."""
+
+    try:
+        start_at = int(entry.get('at'))
+    except (TypeError, ValueError):
+        start_at = None
+    if start_at is not None:
+        candidate_end = max(candidate_end, start_at + 1)
+    entry['end_at'] = candidate_end
+    return candidate_end
+
+
+def _build_synthetic_notes_from_longs(
+    long_entries: Sequence[Dict[str, object]]
+) -> List[Dict[str, object]]:
+    synthetic: List[Dict[str, object]] = []
+    for long_entry in long_entries:
+        if not isinstance(long_entry, dict):
+            continue
+        at_value = long_entry.get('at')
+        try:
+            at_int = int(at_value)
+        except (TypeError, ValueError):
+            continue
+        synthetic.append({'type': 'don', 'at': at_int, 'synthetic': True})
+    return synthetic
+
+
+def _normalised_requires_synthetic_notes(
+    normalised: Optional[str], *, mode: Optional[str] = None
+) -> bool:
+    if mode == "dojo":
+        return True
+    token = (normalised or "").upper()
+    return token in SYNTHETIC_NOTE_COURSE_TOKENS
+
 # NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
 # can be scanned in MVP mode without full exam support.
 DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
@@ -320,6 +361,10 @@ class CourseInfo:
         return self.total_notes
 
 
+def _course_requires_synthetic_notes(course: CourseInfo) -> bool:
+    return _normalised_requires_synthetic_notes(course.normalised, mode=course.mode)
+
+
 @dataclass
 class ParsedTJA:
     title: str = ""
@@ -421,7 +466,10 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
                         continue
                     if not isinstance(note_type, str):
                         continue
-                    notes_copy.append({'type': note_type, 'at': at_int})
+                    note_entry: Dict[str, object] = {'type': note_type, 'at': at_int}
+                    if note.get('synthetic'):
+                        note_entry['synthetic'] = True
+                    notes_copy.append(note_entry)
             measure_copy['notes'] = notes_copy
             longs_source = measure.get('longs')
             longs_copy: List[Dict[str, object]] = []
@@ -720,7 +768,7 @@ def _parse_tja_strict(
         def _close_active_long(at_value: int) -> None:
             if state.active_long and isinstance(state.active_long.get('entry'), dict):
                 entry_ref = state.active_long['entry']
-                entry_ref['end_at'] = at_value
+                _resolve_long_end(entry_ref, at_value)
                 state.active_long = None
             else:
                 LOGGER.warning(
@@ -754,6 +802,9 @@ def _parse_tja_strict(
                         path,
                         token,
                     )
+                    entry_ref = state.active_long['entry']
+                    _resolve_long_end(entry_ref, at_value)
+                    state.active_long = None
                 long_entry = {
                     'kind': long_spec['kind'],
                     'big': long_spec['big'],
@@ -875,20 +926,65 @@ def _parse_tja_strict(
             _flush_pending_notes(current_notes_course)
             if state.active_long and isinstance(state.active_long.get('entry'), dict):
                 entry_ref = state.active_long['entry']
-                entry_ref.setdefault('end_at', int(round(state.measure_start_time_ms)))
-                LOGGER.warning(
-                    'strict-long-without-end: course=%s file=%s',
-                    current_notes_course.canonical,
-                    path,
-                )
+                last_tick = int(round(state.measure_start_time_ms))
+                _resolve_long_end(entry_ref, last_tick)
                 state.active_long = None
-            current_notes_course.measures = len(state.chart_measures)
+            measures = state.chart_measures
+            needs_synthetic = _course_requires_synthetic_notes(current_notes_course)
+            has_real_hits = False
+            for measure in measures:
+                if not isinstance(measure, dict):
+                    continue
+                notes_list = measure.get('notes')
+                if isinstance(notes_list, list):
+                    for note in notes_list:
+                        if isinstance(note, dict) and not note.get('synthetic'):
+                            has_real_hits = True
+                            break
+                if has_real_hits:
+                    break
+            if needs_synthetic and not has_real_hits:
+                for measure in measures:
+                    if not isinstance(measure, dict):
+                        continue
+                    longs_list = measure.get('longs')
+                    if not isinstance(longs_list, list) or not longs_list:
+                        continue
+                    notes_list = measure.get('notes')
+                    if not isinstance(notes_list, list):
+                        notes_list = []
+                        measure['notes'] = notes_list
+                    if notes_list:
+                        continue
+                    synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
+                    if synthetic_notes:
+                        notes_list.extend(synthetic_notes)
+
+            total_notes_count = 0
+            hit_notes_count = 0
+            total_longs = 0
+            for measure in measures:
+                if not isinstance(measure, dict):
+                    continue
+                notes_list = measure.get('notes')
+                if isinstance(notes_list, list):
+                    total_notes_count += len(notes_list)
+                    for note in notes_list:
+                        if isinstance(note, dict) and not note.get('synthetic'):
+                            hit_notes_count += 1
+                longs_list = measure.get('longs')
+                if isinstance(longs_list, list):
+                    total_longs += sum(1 for long_note in longs_list if isinstance(long_note, dict))
+            current_notes_course.total_notes = total_notes_count
+            current_notes_course.hit_notes = hit_notes_count
+            current_notes_course.measures = len(measures)
             LOGGER.info(
-                "end-notes(strict): course=%s file=%s measures=%d notes=%d",
+                "end-notes(strict): course=%s file=%s measures=%d notes=%d longs=%d",
                 current_notes_course.canonical,
                 path,
                 current_notes_course.measures,
                 current_notes_course.total_notes,
+                total_longs,
             )
             state.block_line_count = 0
             state.block_note_count = 0
@@ -1296,7 +1392,10 @@ def _parse_tja_strict(
                             except (TypeError, ValueError):
                                 continue
                             if isinstance(note_type, str):
-                                notes_payload.append({'type': note_type, 'at': at_int})
+                                note_entry: Dict[str, object] = {'type': note_type, 'at': at_int}
+                                if note.get('synthetic'):
+                                    note_entry['synthetic'] = True
+                                notes_payload.append(note_entry)
                     entry['notes'] = notes_payload
                     longs_source = measure.get('longs')
                     longs_payload: List[Dict[str, object]] = []
@@ -1377,6 +1476,16 @@ def _parse_tja_lenient(
     best_total_notes = -1
     best_course_token = course_token
     best_course_raw = course_raw
+    inject_synthetic = False
+
+    def _refresh_inject_flag() -> None:
+        nonlocal inject_synthetic
+        reference = course_raw if course_raw is not None else course_token
+        normalised_value = _normalise_course_token(reference) if reference else None
+        mode_value = "dojo" if course_token.casefold() == "dojo" else None
+        inject_synthetic = _normalised_requires_synthetic_notes(normalised_value, mode=mode_value)
+
+    _refresh_inject_flag()
 
     def _parse_float(value: str) -> Optional[float]:
         try:
@@ -1413,7 +1522,10 @@ def _parse_tja_lenient(
                     except (TypeError, ValueError):
                         continue
                     if isinstance(note_type, str):
-                        notes_copy.append({'type': note_type, 'at': at_int})
+                        note_entry: Dict[str, object] = {'type': note_type, 'at': at_int}
+                        if note.get('synthetic'):
+                            note_entry['synthetic'] = True
+                        notes_copy.append(note_entry)
             entry['notes'] = notes_copy
             longs_source = measure.get('longs')
             longs_copy: List[Dict[str, object]] = []
@@ -1465,7 +1577,7 @@ def _parse_tja_lenient(
             nonlocal active_long
             if active_long and isinstance(active_long.get('entry'), dict):
                 entry_ref = active_long['entry']
-                entry_ref['end_at'] = at_value
+                _resolve_long_end(entry_ref, at_value)
                 active_long = None
             else:
                 LOGGER.warning('lenient-long-end-without-start: file=%s', path)
@@ -1493,6 +1605,9 @@ def _parse_tja_lenient(
                             path,
                             token,
                         )
+                        entry_ref = active_long['entry']
+                        _resolve_long_end(entry_ref, at_value)
+                        active_long = None
                     long_entry = {
                         'kind': long_spec['kind'],
                         'big': long_spec['big'],
@@ -1540,6 +1655,7 @@ def _parse_tja_lenient(
                 course_raw = raw_value or course_raw
                 mapped = {"TOWER": "oni", "DAN": "oni"}.get(raw_value.upper())
                 course_token = mapped or (raw_value.casefold() or course_token)
+                _refresh_inject_flag()
                 continue
             if ":" in stripped and not stripped.startswith("#"):
                 key, value = stripped.split(":", 1)
@@ -1575,6 +1691,7 @@ def _parse_tja_lenient(
                 path,
                 line_number,
             )
+            _refresh_inject_flag()
             in_notes = True
             measure_tokens.clear()
             chart_measures.clear()
@@ -1592,15 +1709,57 @@ def _parse_tja_lenient(
             _flush_measure()
             if active_long and isinstance(active_long.get('entry'), dict):
                 entry_ref = active_long['entry']
-                entry_ref.setdefault('end_at', int(round(measure_start_time_ms)))
-                LOGGER.warning('lenient-long-without-end: file=%s', path)
+                last_tick = int(round(measure_start_time_ms))
+                _resolve_long_end(entry_ref, last_tick)
                 active_long = None
+            has_real_hits = False
+            if inject_synthetic:
+                for measure in chart_measures:
+                    if not isinstance(measure, dict):
+                        continue
+                    notes_list = measure.get('notes')
+                    if isinstance(notes_list, list):
+                        for note in notes_list:
+                            if isinstance(note, dict) and not note.get('synthetic'):
+                                has_real_hits = True
+                                break
+                    if has_real_hits:
+                        break
+                if not has_real_hits:
+                    for measure in chart_measures:
+                        if not isinstance(measure, dict):
+                            continue
+                        longs_list = measure.get('longs')
+                        if not isinstance(longs_list, list) or not longs_list:
+                            continue
+                        notes_list = measure.get('notes')
+                        if not isinstance(notes_list, list):
+                            notes_list = []
+                            measure['notes'] = notes_list
+                        if notes_list:
+                            continue
+                        synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
+                        if synthetic_notes:
+                            notes_list.extend(synthetic_notes)
+            notes_count = 0
+            longs_count = 0
+            for measure in chart_measures:
+                if not isinstance(measure, dict):
+                    continue
+                notes_list = measure.get('notes')
+                if isinstance(notes_list, list):
+                    notes_count += len(notes_list)
+                longs_list = measure.get('longs')
+                if isinstance(longs_list, list):
+                    longs_count += sum(1 for long_note in longs_list if isinstance(long_note, dict))
+            total_notes = notes_count
             LOGGER.info(
-                "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
+                "end-notes(lenient): course=%s file=%s measures=%d notes=%d longs=%d",
                 course_token,
                 path,
                 len(chart_measures),
                 total_notes,
+                longs_count,
             )
             if total_notes > best_total_notes:
                 best_total_notes = total_notes
@@ -1670,15 +1829,57 @@ def _parse_tja_lenient(
         _flush_measure()
         if active_long and isinstance(active_long.get('entry'), dict):
             entry_ref = active_long['entry']
-            entry_ref.setdefault('end_at', int(round(measure_start_time_ms)))
-            LOGGER.warning('lenient-long-without-end: file=%s', path)
+            last_tick = int(round(measure_start_time_ms))
+            _resolve_long_end(entry_ref, last_tick)
             active_long = None
+        has_real_hits = False
+        if inject_synthetic:
+            for measure in chart_measures:
+                if not isinstance(measure, dict):
+                    continue
+                notes_list = measure.get('notes')
+                if isinstance(notes_list, list):
+                    for note in notes_list:
+                        if isinstance(note, dict) and not note.get('synthetic'):
+                            has_real_hits = True
+                            break
+                if has_real_hits:
+                    break
+            if not has_real_hits:
+                for measure in chart_measures:
+                    if not isinstance(measure, dict):
+                        continue
+                    longs_list = measure.get('longs')
+                    if not isinstance(longs_list, list) or not longs_list:
+                        continue
+                    notes_list = measure.get('notes')
+                    if not isinstance(notes_list, list):
+                        notes_list = []
+                        measure['notes'] = notes_list
+                    if notes_list:
+                        continue
+                    synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
+                    if synthetic_notes:
+                        notes_list.extend(synthetic_notes)
+        notes_count = 0
+        longs_count = 0
+        for measure in chart_measures:
+            if not isinstance(measure, dict):
+                continue
+            notes_list = measure.get('notes')
+            if isinstance(notes_list, list):
+                notes_count += len(notes_list)
+            longs_list = measure.get('longs')
+            if isinstance(longs_list, list):
+                longs_count += sum(1 for long_note in longs_list if isinstance(long_note, dict))
+        total_notes = notes_count
         LOGGER.info(
-            "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
+            "end-notes(lenient): course=%s file=%s measures=%d notes=%d longs=%d",
             course_token,
             path,
             len(chart_measures),
             total_notes,
+            longs_count,
         )
         if total_notes > best_total_notes:
             best_total_notes = total_notes
@@ -1692,6 +1893,19 @@ def _parse_tja_lenient(
         course_token = best_course_token
         course_raw = best_course_raw
 
+    note_total = 0
+    hit_total = 0
+    for measure in chart_measures:
+        if not isinstance(measure, dict):
+            continue
+        notes_list = measure.get('notes')
+        if isinstance(notes_list, list):
+            note_total += len(notes_list)
+            for note in notes_list:
+                if isinstance(note, dict) and not note.get('synthetic'):
+                    hit_total += 1
+    total_notes = note_total
+
     canonical = course_token.casefold() or "oni"
     canonical = COURSE_LEGACY_MAP.get(canonical, canonical)
     if canonical not in {"easy", "normal", "hard", "oni", "ura"}:
@@ -1703,7 +1917,7 @@ def _parse_tja_lenient(
         normalised=normalised,
     )
     course_info.total_notes = total_notes
-    course_info.hit_notes = total_notes
+    course_info.hit_notes = hit_total
     course_info.measures = len(chart_measures)
     course_info.chart_data = {
         'course': canonical,
@@ -1999,7 +2213,13 @@ class SongScanner:
 
             if course.start_blocks == 0 or course.end_blocks == 0 or course.end_blocks < course.start_blocks:
                 issues.append("missing-chart-content")
-            if course.total_notes == 0 or course.hit_notes == 0:
+            has_notes = course.total_notes > 0
+            has_hits = course.hit_notes > 0
+            needs_synthetic = _course_requires_synthetic_notes(course)
+
+            if not has_notes:
+                issues.append("empty-chart")
+            elif mode == "standard" and not has_hits and not needs_synthetic:
                 issues.append("empty-chart")
             if course.branch:
                 required_sections = {"N", "E", "M"}
@@ -2023,11 +2243,11 @@ class SongScanner:
                     course_name in COURSE_ORDER
                     and "missing-chart-content" not in issues
                     and "unknown-course" not in issues
-                    and course.total_notes > 0
-                    and course.hit_notes > 0
+                    and has_notes
+                    and (has_hits or needs_synthetic)
                 )
             else:
-                valid = course.total_notes > 0 and course.hit_notes > 0
+                valid = has_notes
 
             if course.branch and "invalid-branch-sections" in issues:
                 valid = False
@@ -3516,11 +3736,23 @@ class SongScanner:
                         total_notes_int = int(total_notes_value)
                     except (TypeError, ValueError):
                         total_notes_int = 0
+                    longs_total = 0
+                    measures_payload = chart_entry.get('measures')
+                    if isinstance(measures_payload, list):
+                        for measure in measures_payload:
+                            if not isinstance(measure, dict):
+                                continue
+                            longs_list = measure.get('longs')
+                            if isinstance(longs_list, list):
+                                longs_total += sum(
+                                    1 for long_note in longs_list if isinstance(long_note, dict)
+                                )
                     LOGGER.info(
-                        'upserted-chart: title=%s course=%s notes=%d',
+                        'upserted-chart: title=%s course=%s notes=%d longs=%d',
                         document.get('title'),
                         course_label,
                         total_notes_int,
+                        longs_total,
                     )
                 seen_song_ids.add(song_id)
                 song_id_by_key[key] = song_id

@@ -953,6 +953,207 @@ LEVEL:7
             self.assertIn('end_at', long_note)
             self.assertIsInstance(long_note.get('big'), bool)
 
+    def test_strict_auto_closes_overlapping_longs(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "overlap_longs.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Overlap",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "9000090000,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
+            parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn('strict-long-start-overlap', joined_logs)
+        self.assertNotIn('strict-long-end-without-start', joined_logs)
+        self.assertNotIn('strict-long-without-end', joined_logs)
+
+        course = parsed.charts['oni']
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertEqual(len(longs), 2)
+        for long_note in longs:
+            self.assertIn('end_at', long_note)
+            self.assertGreaterEqual(long_note['end_at'], long_note['at'] + 1)
+        self.assertGreaterEqual(longs[0]['end_at'], longs[1]['at'])
+        notes = [note for measure in measures for note in measure.get('notes', [])]
+        self.assertFalse(any(note.get('synthetic') for note in notes))
+
+    def test_strict_closes_longs_at_end_of_file(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "eof_long.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:EOF Long",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "90000,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+            parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertNotIn('strict-long-without-end', joined_logs)
+
+        course = parsed.charts['oni']
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertEqual(len(longs), 1)
+        long_note = longs[0]
+        self.assertIn('end_at', long_note)
+        self.assertGreaterEqual(long_note['end_at'], long_note['at'] + 1)
+
+    def test_dojo_long_only_chart_has_synthetic_notes(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "dojo_long.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Dojo Long",
+            "COURSE:Dojo",
+            "LEVEL:1",
+            "#START",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+            parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn('end-notes(strict): course=dojo', joined_logs)
+        self.assertIn('notes=1', joined_logs)
+        self.assertIn('longs=1', joined_logs)
+
+        course = parsed.charts['dojo']
+        self.assertGreater(course.total_notes, 0)
+        self.assertEqual(course.hit_notes, 0)
+        self.assertNotIn('empty-chart', course.issues)
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        self.assertTrue(measures)
+        notes = [note for measure in measures for note in measure.get('notes', [])]
+        self.assertTrue(notes)
+        synthetic_notes = [note for note in notes if note.get('synthetic')]
+        self.assertEqual(len(synthetic_notes), len(notes))
+        self.assertTrue(all(note['type'] == 'don' for note in synthetic_notes))
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertEqual(len(synthetic_notes), len(longs))
+
+    def test_tower_long_only_chart_injects_synthetic_notes(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "tower_long.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Long",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+            parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn('end-notes(strict): course=oni', joined_logs)
+        self.assertIn('notes=1', joined_logs)
+        self.assertIn('longs=1', joined_logs)
+
+        course = parsed.charts['oni']
+        self.assertEqual(course.normalised, 'TOWER')
+        self.assertGreater(course.total_notes, 0)
+        self.assertEqual(course.hit_notes, 0)
+        self.assertNotIn('empty-chart', course.issues)
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        self.assertTrue(measures)
+        notes = [note for measure in measures for note in measure.get('notes', [])]
+        self.assertTrue(notes)
+        synthetic_notes = [note for note in notes if note.get('synthetic')]
+        self.assertEqual(len(synthetic_notes), len(notes))
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertEqual(len(longs), len(synthetic_notes))
+
+    def test_standard_chart_with_hits_has_no_synthetic_notes(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "standard_hits.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Standard Hits",
+            "COURSE:Oni",
+            "LEVEL:3",
+            "#START",
+            "1111,",
+            "2222,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        course = parsed.charts['oni']
+        self.assertGreater(course.hit_notes, 0)
+        self.assertEqual(course.total_notes, course.hit_notes)
+        chart_data = course.chart_data or {}
+        notes = [note for measure in chart_data.get('measures', []) for note in measure.get('notes', [])]
+        self.assertTrue(notes)
+        self.assertFalse(any(note.get('synthetic') for note in notes))
+
+    def test_lenient_fallback_injects_synthetic_notes_for_dojo(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "dojo_fallback.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Fallback Dojo",
+            "COURSE:Dojo",
+            "LEVEL:1",
+            "#START",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        original_cleaner = songs_scanner.NOTE_TOKEN_CLEAN_RE
+
+        class _FailingCleaner:
+            def __init__(self, pattern):
+                self._pattern = pattern
+
+            def sub(self, repl, string):
+                if string == "5000":
+                    raise ValueError("forced parse failure")
+                return self._pattern.sub(repl, string)
+
+        with mock.patch.object(songs_scanner, "NOTE_TOKEN_CLEAN_RE", _FailingCleaner(original_cleaner)):
+            with mock.patch.object(songs_scanner, "TJA_LENIENT_FALLBACK", True):
+                with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+                    parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn('fallback-to-lenient: file=', joined_logs)
+        self.assertIn('end-notes(lenient): course=dojo', joined_logs)
+        self.assertIn('notes=1', joined_logs)
+        self.assertIn('longs=1', joined_logs)
+
+        course = parsed.courses[0]
+        self.assertEqual(course.canonical, 'dojo')
+        self.assertGreater(course.total_notes, 0)
+        self.assertEqual(course.hit_notes, 0)
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        notes = [note for measure in measures for note in measure.get('notes', [])]
+        self.assertTrue(notes)
+        self.assertTrue(all(note.get('synthetic') for note in notes))
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertEqual(len(notes), len(longs))
+
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "Unknown" / "unknown.tja"
@@ -2737,6 +2938,44 @@ LEVEL:7
         self.assertEqual(issues[0]['path'], 'empty.tja')
         self.assertEqual(issues[0]['course_raw'], 'Oni')
         self.assertEqual(issues[0].get('first_note_preview'), '0,0')
+
+    def test_scanner_accepts_tower_long_only_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = songs_dir / "tower.ogg"
+        audio_path.write_bytes(b"tower-audio")
+        tja_path = songs_dir / "tower_long.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Long Only",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(len(inserted['charts']), 1)
+        chart = inserted['charts'][0]
+        self.assertEqual(chart['course'], 'oni')
+        self.assertTrue(chart['valid'])
+        self.assertGreater(chart.get('total_notes', 0), 0)
+        self.assertEqual(chart.get('hit_notes', 0), 0)
+        self.assertNotIn('empty-chart', chart.get('issues', []))
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()
