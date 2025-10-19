@@ -455,7 +455,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 4)
+        self.assertEqual(chart.total_notes, 3)
         self.assertEqual(chart.hit_notes, 3)
         self.assertEqual(chart.measures, 1)
         self.assertEqual(chart.first_note_preview, "1110,")
@@ -479,7 +479,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.total_notes, 6)
         self.assertEqual(chart.hit_notes, 6)
         self.assertEqual(chart.measures, 2)
         self.assertEqual(chart.first_note_preview, "1110,")
@@ -500,7 +500,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.total_notes, 1)
         self.assertEqual(chart.hit_notes, 1)
         self.assertEqual(chart.measures, 1)
 
@@ -520,7 +520,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 7)
+        self.assertEqual(chart.total_notes, 3)
         self.assertEqual(chart.hit_notes, 3)
         self.assertEqual(chart.measures, 3)
 
@@ -542,7 +542,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.total_notes, 6)
         self.assertEqual(chart.hit_notes, 6)
         self.assertEqual(chart.measures, 2)
         self.assertEqual(chart.first_note_preview, "1110,")
@@ -617,7 +617,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 8)
+        self.assertEqual(chart.total_notes, 6)
         self.assertEqual(chart.hit_notes, 6)
         self.assertEqual(chart.measures, 2)
         self.assertEqual(chart.unknown_directives, 0)
@@ -650,7 +650,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.mode, "standard")
         self.assertEqual(course.canonical, "oni")
         self.assertIn("mapped-course", course.issues)
-        self.assertEqual(course.total_notes, 8)
+        self.assertEqual(course.total_notes, 6)
         self.assertEqual(course.hit_notes, 6)
         self.assertEqual(course.measures, 2)
         self.assertEqual(course.unknown_directives, 0)
@@ -812,12 +812,14 @@ LEVEL:7
             "COURSE:Normal",
             "LEVEL:4",
             "#START",
-            "77,77,",
+            "5000,",
+            "0008,",
             "#END",
             "COURSE:Easy",
             "LEVEL:2",
             "#START",
-            "88,88,",
+            "6000,",
+            "0008,",
             "#END",
         ]), encoding="utf-8")
 
@@ -834,12 +836,18 @@ LEVEL:7
         course = courses['normal']
         self.assertIn('lenient-fallback', course.issues)
         chart_data = course.chart_data or {}
-        self.assertGreater(chart_data.get('total_notes', 0), 0)
+        self.assertEqual(chart_data.get('total_notes', 0), 0)
         measures = chart_data.get('measures', [])
         self.assertTrue(measures)
-        notes = measures[0].get('notes', [])
-        self.assertTrue(notes)
-        self.assertTrue(all(isinstance(note.get('at'), int) for note in notes))
+        self.assertTrue(all('notes' in measure for measure in measures))
+        self.assertTrue(any(measure.get('longs') for measure in measures))
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertTrue(longs)
+        for long_note in longs:
+            self.assertIn(long_note.get('kind'), {'drumroll', 'balloon'})
+            self.assertIn('at', long_note)
+            self.assertIn('end_at', long_note)
+            self.assertIsInstance(long_note.get('big'), bool)
         self.assertEqual(courses['easy'].hit_notes, 0)
         self.assertNotIn('lenient-fallback', courses['easy'].issues)
 
@@ -914,6 +922,36 @@ LEVEL:7
         self.assertEqual([note['at'] for note in second_notes], [2000, 2667])
         self.assertEqual(measures[0].get('bpm'), 120.0)
         self.assertEqual(measures[1].get('bpm'), 180.0)
+
+    def test_strict_parser_records_long_events(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "long.events.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Longs",
+            "COURSE:Oni",
+            "LEVEL:9",
+            "#START",
+            "11,",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertIn('oni', parsed.charts)
+        course = parsed.charts['oni']
+        self.assertGreater(course.total_notes, 0)
+        chart_data = course.chart_data or {}
+        measures = chart_data.get('measures', [])
+        self.assertGreaterEqual(len(measures), 2)
+        longs = [long for measure in measures for long in measure.get('longs', [])]
+        self.assertTrue(longs)
+        for long_note in longs:
+            self.assertIn(long_note.get('kind'), {'drumroll', 'balloon'})
+            self.assertIn('at', long_note)
+            self.assertIn('end_at', long_note)
+            self.assertIsInstance(long_note.get('big'), bool)
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1608,7 +1646,7 @@ LEVEL:7
         course = parsed.courses[0]
         self.assertEqual(course.start_blocks, 1)
         self.assertEqual(course.end_blocks, 1)
-        self.assertEqual(course.total_notes, 5)
+        self.assertEqual(course.total_notes, 2)
         self.assertEqual(course.hit_notes, 2)
         self.assertEqual(course.first_note_preview, "1,0")
 
@@ -1654,7 +1692,7 @@ LEVEL:7
         course = parsed.courses[0]
         self.assertEqual(course.start_blocks, 1)
         self.assertEqual(course.end_blocks, 1)
-        self.assertGreaterEqual(course.total_notes, 8)
+        self.assertEqual(course.total_notes, 6)
         self.assertEqual(course.hit_notes, 6)
 
     def test_parse_tja_maps_numeric_and_taste_aliases(self):
@@ -2315,7 +2353,7 @@ LEVEL:7
         self.assertIn('duplicate-course', chart.get('issues', []))
         self.assertIn('mapped-course', chart.get('issues', []))
         self.assertGreater(chart['hit_notes'], 0)
-        self.assertGreater(chart['total_notes'], chart['hit_notes'])
+        self.assertEqual(chart['total_notes'], chart['hit_notes'])
         self.assertTrue(chart.get('first_note_preview', '').startswith(('1110', '1011')))
 
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
@@ -2555,7 +2593,7 @@ LEVEL:7
         self.assertFalse(chart['valid'])
         self.assertIn('empty-chart', chart['issues'])
         self.assertIn('empty-chart', inserted['import_issues'])
-        self.assertEqual(chart.get('total_notes'), 2)
+        self.assertEqual(chart.get('total_notes'), 0)
         self.assertEqual(chart.get('hit_notes'), 0)
         issues = db.import_issues._docs
         self.assertEqual(len(issues), 1)

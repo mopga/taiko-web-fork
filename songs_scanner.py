@@ -131,19 +131,23 @@ HEADER_KEYS = {
     "BALLOONEX",
 }
 
-HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
+HIT_NOTE_VALUES = {1, 2, 3, 4}
 
 LENIENT_NOTE_TYPE_MAP = {
     "1": "don",
     "2": "ka",
     "3": "don",
     "4": "ka",
-    "5": "don",
-    "6": "ka",
-    "7": "don",
-    "8": "ka",
-    "9": "don",
 }
+
+LONG_NOTE_START_MAP = {
+    5: {"kind": "drumroll", "big": False},
+    6: {"kind": "drumroll", "big": True},
+    7: {"kind": "balloon", "big": False},
+    9: {"kind": "balloon", "big": True},
+}
+
+LONG_NOTE_END_TOKEN = 8
 
 # NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
 # can be scanned in MVP mode without full exam support.
@@ -383,6 +387,7 @@ class _CourseParseState:
     measure_start_time_ms: float = 0.0
     parse_failed: bool = False
     unknown_tokens_logged: Set[str] = field(default_factory=set)
+    active_long: Optional[Dict[str, object]] = None
 
 
 def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -417,6 +422,33 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
                         continue
                     notes_copy.append({'type': note_type, 'at': at_int})
             measure_copy['notes'] = notes_copy
+            longs_source = measure.get('longs')
+            longs_copy: List[Dict[str, object]] = []
+            if isinstance(longs_source, list):
+                for long_note in longs_source:
+                    if not isinstance(long_note, dict):
+                        continue
+                    kind = long_note.get('kind')
+                    at_value = long_note.get('at')
+                    end_value = long_note.get('end_at')
+                    try:
+                        at_int = int(at_value)
+                    except (TypeError, ValueError):
+                        continue
+                    end_int: Optional[int]
+                    try:
+                        end_int = int(end_value) if end_value is not None else None
+                    except (TypeError, ValueError):
+                        end_int = None
+                    if not isinstance(kind, str):
+                        continue
+                    long_entry: Dict[str, object] = {'kind': kind, 'at': at_int}
+                    long_entry['big'] = bool(long_note.get('big', False))
+                    if end_int is not None:
+                        long_entry['end_at'] = end_int
+                    longs_copy.append(long_entry)
+            if longs_copy:
+                measure_copy['longs'] = longs_copy
             if 'bpm' in measure:
                 measure_copy['bpm'] = measure['bpm']
             if 'scroll' in measure:
@@ -661,6 +693,7 @@ def _parse_tja_strict(
         state.measure_bpm = state.current_bpm
         state.measure_scroll = state.current_scroll
         state.measure_ratio_for_measure = state.current_measure_ratio
+        state.active_long = None
 
     def _store_measure_entry(course: CourseInfo) -> None:
         state = _state_for(course)
@@ -681,30 +714,73 @@ def _parse_tja_strict(
         duration_ms = (240000.0 / bpm_basis) * ratio_value
         total_slots = len(tokens)
         notes: List[Dict[str, object]] = []
+        longs: List[Dict[str, object]] = []
+
+        def _close_active_long(at_value: int) -> None:
+            if state.active_long and isinstance(state.active_long.get('entry'), dict):
+                entry_ref = state.active_long['entry']
+                entry_ref['end_at'] = at_value
+                state.active_long = None
+            else:
+                LOGGER.warning(
+                    'strict-long-end-without-start: course=%s file=%s',
+                    course.canonical,
+                    path,
+                )
+
         for index, token in enumerate(tokens):
             if not token:
-                continue
-            note_type = LENIENT_NOTE_TYPE_MAP.get(token)
-            if not note_type:
-                if token not in state.unknown_tokens_logged:
-                    state.unknown_tokens_logged.add(token)
-                    LOGGER.warning(
-                        'strict-unknown-note-token: token=%s course=%s file=%s',
-                        token,
-                        course.canonical,
-                        path,
-                    )
                 continue
             try:
                 note_value = int(token)
             except ValueError:
                 continue
-            if note_value not in HIT_NOTE_VALUES:
-                continue
             position = (index / total_slots) if total_slots else 0.0
             at_value = int(round(state.measure_start_time_ms + position * duration_ms))
-            notes.append({'type': note_type, 'at': at_value})
+
+            if note_value in HIT_NOTE_VALUES:
+                note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+                if note_type:
+                    notes.append({'type': note_type, 'at': at_value})
+                continue
+
+            if note_value in LONG_NOTE_START_MAP:
+                long_spec = LONG_NOTE_START_MAP[note_value]
+                if state.active_long and isinstance(state.active_long.get('entry'), dict):
+                    LOGGER.warning(
+                        'strict-long-start-overlap: course=%s file=%s token=%s',
+                        course.canonical,
+                        path,
+                        token,
+                    )
+                long_entry = {
+                    'kind': long_spec['kind'],
+                    'big': long_spec['big'],
+                    'at': at_value,
+                }
+                longs.append(long_entry)
+                state.active_long = {'entry': long_entry}
+                continue
+
+            if note_value == LONG_NOTE_END_TOKEN:
+                _close_active_long(at_value)
+                continue
+
+            if note_value == 0:
+                continue
+
+            if token not in state.unknown_tokens_logged:
+                state.unknown_tokens_logged.add(token)
+                LOGGER.warning(
+                    'strict-unknown-note-token: token=%s course=%s file=%s',
+                    token,
+                    course.canonical,
+                    path,
+                )
+
         entry: Dict[str, object] = {'notes': notes}
+        if longs:
+            entry['longs'] = longs
         entry['bpm'] = bpm_basis
         if state.measure_scroll is not None:
             entry['scroll'] = state.measure_scroll
@@ -723,6 +799,7 @@ def _parse_tja_strict(
         state.pending_total_notes = 0
         state.pending_hit_notes = 0
         state.pending_has_notes = False
+        state.active_long = None
         course.total_notes = 0
         course.hit_notes = 0
         course.measures = 0
@@ -795,6 +872,15 @@ def _parse_tja_strict(
         if current_notes_course:
             state = _state_for(current_notes_course)
             _flush_pending_notes(current_notes_course)
+            if state.active_long and isinstance(state.active_long.get('entry'), dict):
+                entry_ref = state.active_long['entry']
+                entry_ref.setdefault('end_at', int(round(state.measure_start_time_ms)))
+                LOGGER.warning(
+                    'strict-long-without-end: course=%s file=%s',
+                    current_notes_course.canonical,
+                    path,
+                )
+                state.active_long = None
             current_notes_course.measures = len(state.chart_measures)
             LOGGER.info(
                 "end-notes(strict): course=%s file=%s measures=%d notes=%d",
@@ -1131,9 +1217,10 @@ def _parse_tja_strict(
                         state.measure_tokens.extend(list(cleaned))
                         notes = [int(ch) for ch in cleaned]
                         hit_count = sum(1 for note in notes if note in HIT_NOTE_VALUES)
-                        state.pending_total_notes += len(notes)
+                        state.pending_total_notes += hit_count
                         state.pending_hit_notes += hit_count
-                        state.pending_has_notes = True
+                        if hit_count > 0:
+                            state.pending_has_notes = True
                         state.block_note_count += hit_count
                     if index < len(tokens) - 1:
                         _commit_pending_measure(current_notes_course)
@@ -1210,6 +1297,32 @@ def _parse_tja_strict(
                             if isinstance(note_type, str):
                                 notes_payload.append({'type': note_type, 'at': at_int})
                     entry['notes'] = notes_payload
+                    longs_source = measure.get('longs')
+                    longs_payload: List[Dict[str, object]] = []
+                    if isinstance(longs_source, list):
+                        for long_note in longs_source:
+                            if not isinstance(long_note, dict):
+                                continue
+                            kind = long_note.get('kind')
+                            at_value = long_note.get('at')
+                            end_value = long_note.get('end_at')
+                            try:
+                                at_int = int(at_value)
+                            except (TypeError, ValueError):
+                                continue
+                            try:
+                                end_int = int(end_value) if end_value is not None else None
+                            except (TypeError, ValueError):
+                                end_int = None
+                            if not isinstance(kind, str):
+                                continue
+                            long_entry: Dict[str, object] = {'kind': kind, 'at': at_int}
+                            long_entry['big'] = bool(long_note.get('big', False))
+                            if end_int is not None:
+                                long_entry['end_at'] = end_int
+                            longs_payload.append(long_entry)
+                    if longs_payload:
+                        entry['longs'] = longs_payload
                     if 'bpm' in measure:
                         entry['bpm'] = measure['bpm']
                     if 'scroll' in measure:
@@ -1258,6 +1371,7 @@ def _parse_tja_lenient(
     measure_start_time_ms: float = 0.0
     total_notes = 0
     unknown_tokens_logged: Set[str] = set()
+    active_long: Optional[Dict[str, object]] = None
     best_chart_measures: List[Dict[str, object]] = []
     best_total_notes = -1
     best_course_token = course_token
@@ -1300,6 +1414,33 @@ def _parse_tja_lenient(
                     if isinstance(note_type, str):
                         notes_copy.append({'type': note_type, 'at': at_int})
             entry['notes'] = notes_copy
+            longs_source = measure.get('longs')
+            longs_copy: List[Dict[str, object]] = []
+            if isinstance(longs_source, list):
+                for long_note in longs_source:
+                    if not isinstance(long_note, dict):
+                        continue
+                    kind = long_note.get('kind')
+                    at_value = long_note.get('at')
+                    end_value = long_note.get('end_at')
+                    try:
+                        at_int = int(at_value)
+                    except (TypeError, ValueError):
+                        continue
+                    end_int: Optional[int]
+                    try:
+                        end_int = int(end_value) if end_value is not None else None
+                    except (TypeError, ValueError):
+                        end_int = None
+                    if not isinstance(kind, str):
+                        continue
+                    long_entry: Dict[str, object] = {'kind': kind, 'at': at_int}
+                    long_entry['big'] = bool(long_note.get('big', False))
+                    if end_int is not None:
+                        long_entry['end_at'] = end_int
+                    longs_copy.append(long_entry)
+            if longs_copy:
+                entry['longs'] = longs_copy
             if 'bpm' in measure:
                 entry['bpm'] = measure['bpm']
             if 'scroll' in measure:
@@ -1309,7 +1450,7 @@ def _parse_tja_lenient(
 
     def _flush_measure() -> None:
         nonlocal measure_tokens, measure_bpm, measure_scroll, measure_ratio_for_measure
-        nonlocal measure_start_time_ms, total_notes
+        nonlocal measure_start_time_ms, total_notes, active_long
         if not measure_tokens:
             return
         tokens = list(measure_tokens)
@@ -1317,16 +1458,54 @@ def _parse_tja_lenient(
         duration_ms = _measure_duration_ms(measure_bpm, measure_ratio_for_measure)
         total_slots = len(tokens)
         measure_notes: List[Dict[str, object]] = []
+        measure_longs: List[Dict[str, object]] = []
+
+        def _close_active_long(at_value: int) -> None:
+            nonlocal active_long
+            if active_long and isinstance(active_long.get('entry'), dict):
+                entry_ref = active_long['entry']
+                entry_ref['end_at'] = at_value
+                active_long = None
+            else:
+                LOGGER.warning('lenient-long-end-without-start: file=%s', path)
+
         for index, token in enumerate(tokens):
             if not token:
                 continue
             if token.isdigit():
-                note_type = LENIENT_NOTE_TYPE_MAP.get(token)
-                if note_type:
-                    position = (index / total_slots) if total_slots else 0.0
-                    at_value = int(round(measure_start_time_ms + position * duration_ms))
-                    measure_notes.append({'type': note_type, 'at': at_value})
-                elif token not in unknown_tokens_logged:
+                try:
+                    note_value = int(token)
+                except ValueError:
+                    continue
+                position = (index / total_slots) if total_slots else 0.0
+                at_value = int(round(measure_start_time_ms + position * duration_ms))
+                if note_value in HIT_NOTE_VALUES:
+                    note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+                    if note_type:
+                        measure_notes.append({'type': note_type, 'at': at_value})
+                    continue
+                if note_value in LONG_NOTE_START_MAP:
+                    long_spec = LONG_NOTE_START_MAP[note_value]
+                    if active_long and isinstance(active_long.get('entry'), dict):
+                        LOGGER.warning(
+                            'lenient-long-start-overlap: file=%s token=%s',
+                            path,
+                            token,
+                        )
+                    long_entry = {
+                        'kind': long_spec['kind'],
+                        'big': long_spec['big'],
+                        'at': at_value,
+                    }
+                    measure_longs.append(long_entry)
+                    active_long = {'entry': long_entry}
+                    continue
+                if note_value == LONG_NOTE_END_TOKEN:
+                    _close_active_long(at_value)
+                    continue
+                if note_value == 0:
+                    continue
+                if token not in unknown_tokens_logged:
                     unknown_tokens_logged.add(token)
                     LOGGER.warning(
                         'lenient-unknown-note-token: token=%s file=%s',
@@ -1334,6 +1513,8 @@ def _parse_tja_lenient(
                         path,
                     )
         measure_entry: Dict[str, object] = {'notes': measure_notes}
+        if measure_longs:
+            measure_entry['longs'] = measure_longs
         bpm_to_store = measure_bpm if measure_bpm is not None else current_bpm or default_bpm
         if bpm_to_store is not None:
             measure_entry['bpm'] = bpm_to_store
@@ -1400,6 +1581,7 @@ def _parse_tja_lenient(
             measure_bpm = current_bpm
             measure_scroll = current_scroll
             measure_ratio_for_measure = current_measure_ratio
+            active_long = None
             continue
 
         if not in_notes:
@@ -1407,6 +1589,11 @@ def _parse_tja_lenient(
 
         if upper.startswith("#END"):
             _flush_measure()
+            if active_long and isinstance(active_long.get('entry'), dict):
+                entry_ref = active_long['entry']
+                entry_ref.setdefault('end_at', int(round(measure_start_time_ms)))
+                LOGGER.warning('lenient-long-without-end: file=%s', path)
+                active_long = None
             LOGGER.info(
                 "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
                 course_token,
@@ -1427,6 +1614,7 @@ def _parse_tja_lenient(
             measure_bpm = current_bpm
             measure_scroll = current_scroll
             measure_ratio_for_measure = current_measure_ratio
+            active_long = None
             continue
 
         if upper.startswith("#BPMCHANGE"):
@@ -1479,6 +1667,11 @@ def _parse_tja_lenient(
 
     if in_notes:
         _flush_measure()
+        if active_long and isinstance(active_long.get('entry'), dict):
+            entry_ref = active_long['entry']
+            entry_ref.setdefault('end_at', int(round(measure_start_time_ms)))
+            LOGGER.warning('lenient-long-without-end: file=%s', path)
+            active_long = None
         LOGGER.info(
             "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
             course_token,
