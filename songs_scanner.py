@@ -103,6 +103,30 @@ NOTE_LINE_RE = re.compile(r"^[0-9,\s\|]+$")
 
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
+HEADER_KEYS = {
+    "TITLE",
+    "TITLEJA",
+    "SUBTITLE",
+    "SUBTITLEJA",
+    "BPM",
+    "WAVE",
+    "OFFSET",
+    "DEMOSTART",
+    "PREVIEW",
+    "LIFE",
+    "COURSE",
+    "LEVEL",
+    "SCOREINIT",
+    "SCOREDIFF",
+    "GENRE",
+    "MAKER",
+    "SONGID",
+    "BALLOON",
+    "BALLOONNOR",
+    "BALLOONHARD",
+    "BALLOONEX",
+}
+
 HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
 
 # NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
@@ -229,6 +253,10 @@ class CourseInfo:
         if issue not in self.issues:
             self.issues.append(issue)
 
+    @property
+    def notes_count(self) -> int:
+        return self.total_notes
+
 
 @dataclass
 class ParsedTJA:
@@ -250,6 +278,8 @@ class ParsedTJA:
     mapped_courses: int = 0
     skipped_no_course: int = 0
     skipped_unknown_course: int = 0
+    charts: Dict[str, CourseInfo] = field(default_factory=dict)
+    implicit_end_due_to_header: int = 0
 
 
 @dataclass
@@ -278,6 +308,9 @@ class _CourseParseState:
     segments: List[Dict[str, object]] = field(default_factory=list)
     current_segment: Optional[Dict[str, object]] = None
     gogo_start: Optional[int] = None
+    pending_total_notes: int = 0
+    pending_hit_notes: int = 0
+    pending_has_notes: bool = False
 
 
 @dataclass
@@ -530,6 +563,154 @@ def parse_tja(path: Path) -> ParsedTJA:
             state.current_segment['end_measure'] = state.measure_index
         state.current_segment = None
 
+    def _reset_pending_notes(course: CourseInfo) -> None:
+        state = _state_for(course)
+        state.pending_total_notes = 0
+        state.pending_hit_notes = 0
+        state.pending_has_notes = False
+
+    def _commit_pending_measure(course: CourseInfo) -> None:
+        state = _state_for(course)
+        if not state.pending_has_notes:
+            return
+        course.total_notes += state.pending_total_notes
+        course.hit_notes += state.pending_hit_notes
+        course.measures += 1
+        if course.mode == "dojo":
+            if state.current_segment is None:
+                _start_segment(course, _current_audio())
+            state.measure_index += 1
+        _reset_pending_notes(course)
+
+    def _flush_pending_notes(course: CourseInfo) -> None:
+        _commit_pending_measure(course)
+
+    def _finalise_notes_block() -> None:
+        nonlocal parsing_notes, current_notes_course
+        if current_notes_course:
+            _flush_pending_notes(current_notes_course)
+            LOGGER.info(
+                "end-notes: course=%s file=%s measures=%d notes=%d",
+                current_notes_course.canonical.casefold(),
+                path,
+                current_notes_course.measures,
+                current_notes_course.total_notes,
+            )
+            if current_notes_course.mode == "dojo":
+                _end_segment(current_notes_course)
+        parsing_notes = False
+        current_notes_course = None
+
+    def _process_metadata_line(metadata_line: str) -> None:
+        nonlocal active_course, current_notes_course, parsing_notes, current_wave
+        if ":" not in metadata_line:
+            return
+        key, value = metadata_line.split(":", 1)
+        key_upper = key.strip().upper()
+        value_stripped = value.strip()
+
+        clean_value = _clean_metadata_value(value_stripped)
+
+        if key_upper == "TITLE":
+            parsed.title = clean_value
+        elif key_upper == "TITLEJA":
+            parsed.title_ja = clean_value
+        elif key_upper == "SUBTITLE":
+            parsed.subtitle = clean_value
+        elif key_upper == "SUBTITLEJA":
+            parsed.subtitle_ja = clean_value
+        elif key_upper == "OFFSET":
+            try:
+                parsed.offset = float(value_stripped)
+            except ValueError:
+                LOGGER.debug("Invalid OFFSET value '%s' in %s", value_stripped, path)
+        elif key_upper in {"DEMOSTART", "PREVIEW"}:
+            try:
+                parsed.preview = float(value_stripped)
+            except ValueError:
+                LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
+        elif key_upper == "WAVE":
+            clean_wave = clean_value or None
+            if not parsing_notes:
+                parsed.wave = clean_wave
+            current_wave = clean_wave
+            if parsing_notes and current_notes_course and current_notes_course.mode == "dojo":
+                _end_segment(current_notes_course)
+        elif key_upper == "GENRE":
+            parsed.genre = clean_value or None
+        elif key_upper == "SONGID":
+            parsed.song_id = clean_value or None
+        elif key_upper == "COURSE":
+            raw_course_value = value_stripped.strip()
+            normalised_token = _normalise_course_token(raw_course_value)
+            if normalised_token in DOJO_COURSE_TOKENS:
+                active_course = CourseInfo(
+                    canonical="Dojo",
+                    raw_name=raw_course_value,
+                    normalised=normalised_token,
+                    mode="dojo",
+                )
+                parsed.courses.append(active_course)
+                parsed.has_dojo_course = True
+                parsed.charts[active_course.canonical.casefold()] = active_course
+            else:
+                canonical, token, issue = _resolve_course(raw_course_value, path=path)
+                if canonical == "Unknown":
+                    if issue == "unknown_course_numeric":
+                        LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
+                    else:
+                        LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
+                    parsed.skipped_charts += 1
+                    parsed.skipped_unknown_course += 1
+                    active_course = None
+                    current_notes_course = None
+                    parsing_notes = False
+                else:
+                    if issue == "mapped-course":
+                        LOGGER.info(
+                            "mapped-course(parser): %s→%s",
+                            raw_course_value.upper(),
+                            canonical.upper(),
+                        )
+                        parsed.mapped_courses += 1
+                    existing = known_courses.get(canonical)
+                    if existing:
+                        active_course = existing
+                        active_course.raw_name = raw_course_value
+                        active_course.normalised = token
+                    else:
+                        active_course = CourseInfo(
+                            canonical=canonical,
+                            raw_name=raw_course_value,
+                            normalised=token,
+                        )
+                        known_courses[canonical] = active_course
+                        parsed.courses.append(active_course)
+                    parsed.charts[active_course.canonical.casefold()] = active_course
+                    if issue:
+                        active_course.add_issue(issue)
+        elif key_upper == "LEVEL" and active_course:
+            try:
+                level_value = float(value_stripped)
+            except ValueError:
+                LOGGER.warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
+                active_course.add_issue("invalid-level")
+                return
+            level_int = int(round(level_value))
+            clamped = max(1, min(10, level_int))
+            if level_int != level_value:
+                active_course.add_issue("level-non-integer")
+            if clamped != level_int:
+                LOGGER.warning(
+                    "LEVEL value %s for course '%s' in %s out of range; clamped to %s",
+                    value_stripped,
+                    active_course.raw_name,
+                    path,
+                    clamped,
+                )
+                active_course.add_issue("level-out-of-range")
+            active_course.stars = clamped
+
     line_number = 0
     for raw_line in normalised_text.splitlines():
         line_number += 1
@@ -540,28 +721,37 @@ def parse_tja(path: Path) -> ParsedTJA:
         if stripped_pre.startswith("//") or stripped_pre.startswith(";"):
             continue
 
-        header_line = (
-            _strip_inline_comments(raw_line, allow_without_whitespace=False).strip()
-            if not parsing_notes
-            else ""
-        )
+        base_header_line = _strip_inline_comments(
+            raw_line, allow_without_whitespace=False
+        ).strip()
         stripped_comments = _strip_inline_comments(
             raw_line, allow_without_whitespace=parsing_notes
         )
         line = stripped_comments.strip()
-        if not line and not header_line:
+        if not line and not base_header_line:
             continue
 
-        metadata_line: Optional[str] = None
         if (
-            not parsing_notes
-            and header_line
-            and ":" in header_line
-            and not header_line.startswith("#")
+            parsing_notes
+            and current_notes_course
+            and base_header_line
+            and ":" in base_header_line
+            and not base_header_line.startswith("#")
         ):
-            metadata_line = header_line
-        elif ":" in line and not line.startswith("#"):
-            metadata_line = line
+            key_candidate = base_header_line.split(":", 1)[0].strip().upper()
+            if key_candidate in HEADER_KEYS:
+                if key_candidate == "WAVE":
+                    _process_metadata_line(base_header_line)
+                    continue
+                current_notes_course.end_blocks += 1
+                LOGGER.warning(
+                    'implicit-end: header "%s" inside notes; closing previous chart',
+                    key_candidate,
+                )
+                parsed.implicit_end_due_to_header += 1
+                _finalise_notes_block()
+                _process_metadata_line(base_header_line)
+                continue
 
         if line.startswith("#"):
             upper_line = line.upper()
@@ -570,14 +760,17 @@ def parse_tja(path: Path) -> ParsedTJA:
             handled_directive = False
             if directive == "#START":
                 if active_course:
+                    course_key = active_course.canonical.casefold()
                     LOGGER.info(
-                        "start-notes: course=%s (line %d)",
-                        active_course.canonical,
+                        "start-notes: course=%s file=%s line=%d",
+                        course_key,
+                        path,
                         line_number,
                     )
                     active_course.start_blocks += 1
                     current_notes_course = active_course
                     parsing_notes = True
+                    _reset_pending_notes(current_notes_course)
                     if current_notes_course.mode == "dojo":
                         state = _state_for(current_notes_course)
                         state.measure_index = 0
@@ -596,10 +789,7 @@ def parse_tja(path: Path) -> ParsedTJA:
             elif active_course:
                 if directive == "#END":
                     active_course.end_blocks += 1
-                    if current_notes_course and current_notes_course.mode == "dojo":
-                        _end_segment(current_notes_course)
-                    parsing_notes = False
-                    current_notes_course = None
+                    _finalise_notes_block()
                     handled_directive = True
                 elif directive.startswith("#BRANCH"):
                     active_course.branch = True
@@ -612,6 +802,7 @@ def parse_tja(path: Path) -> ParsedTJA:
             if parsing_notes and current_notes_course:
                 state = _state_for(current_notes_course)
                 if directive == "#NEXTSONG":
+                    _flush_pending_notes(current_notes_course)
                     if current_notes_course.mode == "dojo":
                         _end_segment(current_notes_course)
                     handled_directive = True
@@ -652,138 +843,63 @@ def parse_tja(path: Path) -> ParsedTJA:
             continue
 
         if parsing_notes and current_notes_course and ":" not in line:
-            measure_line = stripped_comments.strip()
-            if not measure_line:
-                continue
-            if not NOTE_LINE_RE.match(measure_line):
-                continue
-            tokens = stripped_comments.split(",")
-            saw_digits = False
-            for token in tokens:
-                cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)
-                if not cleaned:
+            try:
+                measure_line = stripped_comments.strip()
+                if not measure_line:
                     continue
-                saw_digits = True
-                notes = [int(ch) for ch in cleaned]
-                hit_count = sum(1 for note in notes if note in HIT_NOTE_VALUES)
-                if hit_count:
-                    current_notes_course.hit_notes += hit_count
-                current_notes_course.total_notes += len(notes)
-                current_notes_course.measures += 1
-                if current_notes_course.mode == "dojo":
-                    state = _state_for(current_notes_course)
-                    if state.current_segment is None:
-                        _start_segment(current_notes_course, _current_audio())
-                    state.measure_index += 1
-            if saw_digits and current_notes_course.first_note_preview is None:
-                preview = stripped_comments.strip()
-                if preview:
-                    current_notes_course.first_note_preview = preview[:120]
+                if not NOTE_LINE_RE.match(measure_line):
+                    continue
+                tokens = stripped_comments.split(",")
+                saw_digits = False
+                state = _state_for(current_notes_course)
+                for index, token in enumerate(tokens):
+                    cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)
+                    if cleaned:
+                        saw_digits = True
+                        notes = [int(ch) for ch in cleaned]
+                        hit_count = sum(1 for note in notes if note in HIT_NOTE_VALUES)
+                        state.pending_total_notes += len(notes)
+                        state.pending_hit_notes += hit_count
+                        state.pending_has_notes = True
+                    if index < len(tokens) - 1:
+                        _commit_pending_measure(current_notes_course)
+                if measure_line.endswith(","):
+                    _commit_pending_measure(current_notes_course)
+                if (
+                    saw_digits
+                    and current_notes_course.first_note_preview is None
+                ):
+                    preview = stripped_comments.strip()
+                    if preview:
+                        current_notes_course.first_note_preview = preview[:120]
+                continue
+            except Exception:
+                LOGGER.error(
+                    "parse-error: file=%s line=%d course=%s text=%r",
+                    path,
+                    line_number,
+                    current_notes_course.canonical.casefold(),
+                    raw_line.rstrip("\n"),
+                    exc_info=True,
+                )
+                raise
+
+        if (
+            not parsing_notes
+            and base_header_line
+            and ":" in base_header_line
+            and not base_header_line.startswith("#")
+        ):
+            _process_metadata_line(base_header_line)
             continue
 
-        if metadata_line:
-            key, value = metadata_line.split(":", 1)
-            key_upper = key.strip().upper()
-            value_stripped = value.strip()
-
-            clean_value = _clean_metadata_value(value_stripped)
-
-            if key_upper == "TITLE":
-                parsed.title = clean_value
-            elif key_upper == "TITLEJA":
-                parsed.title_ja = clean_value
-            elif key_upper == "SUBTITLE":
-                parsed.subtitle = clean_value
-            elif key_upper == "SUBTITLEJA":
-                parsed.subtitle_ja = clean_value
-            elif key_upper == "OFFSET":
-                try:
-                    parsed.offset = float(value_stripped)
-                except ValueError:
-                    LOGGER.debug("Invalid OFFSET value '%s' in %s", value_stripped, path)
-            elif key_upper in {"DEMOSTART", "PREVIEW"}:
-                try:
-                    parsed.preview = float(value_stripped)
-                except ValueError:
-                    LOGGER.debug("Invalid PREVIEW value '%s' in %s", value_stripped, path)
-            elif key_upper == "WAVE":
-                clean_wave = clean_value or None
-                if not parsing_notes:
-                    parsed.wave = clean_wave
-                current_wave = clean_wave
-                if parsing_notes and current_notes_course and current_notes_course.mode == "dojo":
-                    _end_segment(current_notes_course)
-            elif key_upper == "GENRE":
-                parsed.genre = clean_value or None
-            elif key_upper == "SONGID":
-                parsed.song_id = clean_value or None
-            elif key_upper == "COURSE":
-                raw_course_value = value_stripped.strip()
-                normalised_token = _normalise_course_token(raw_course_value)
-                if normalised_token in DOJO_COURSE_TOKENS:
-                    active_course = CourseInfo(
-                        canonical="Dojo",
-                        raw_name=raw_course_value,
-                        normalised=normalised_token,
-                        mode="dojo",
-                    )
-                    parsed.courses.append(active_course)
-                    parsed.has_dojo_course = True
-                else:
-                    canonical, token, issue = _resolve_course(raw_course_value, path=path)
-                    if canonical == "Unknown":
-                        if issue == "unknown_course_numeric":
-                            LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
-                        else:
-                            LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
-                        parsed.skipped_charts += 1
-                        parsed.skipped_unknown_course += 1
-                        active_course = None
-                        current_notes_course = None
-                        parsing_notes = False
-                    else:
-                        if issue == "mapped-course":
-                            LOGGER.info("mapped-course(parser): %s→%s", raw_course_value, canonical)
-                            parsed.mapped_courses += 1
-                        existing = known_courses.get(canonical)
-                        if existing:
-                            active_course = existing
-                            active_course.raw_name = raw_course_value
-                            active_course.normalised = token
-                        else:
-                            active_course = CourseInfo(
-                                canonical=canonical,
-                                raw_name=raw_course_value,
-                                normalised=token,
-                            )
-                            known_courses[canonical] = active_course
-                            parsed.courses.append(active_course)
-                        if issue:
-                            active_course.add_issue(issue)
-            elif key_upper == "LEVEL" and active_course:
-                try:
-                    level_value = float(value_stripped)
-                except ValueError:
-                    LOGGER.warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
-                    active_course.add_issue("invalid-level")
-                    continue
-                level_int = int(round(level_value))
-                clamped = max(1, min(10, level_int))
-                if level_int != level_value:
-                    active_course.add_issue("level-non-integer")
-                if clamped != level_int:
-                    LOGGER.warning(
-                        "LEVEL value %s for course '%s' in %s out of range; clamped to %s",
-                        value_stripped,
-                        active_course.raw_name,
-                        path,
-                        clamped,
-                    )
-                    active_course.add_issue("level-out-of-range")
-                active_course.stars = clamped
-            continue
-
-        if metadata_line is None and parsing_notes and current_notes_course:
+        if (
+            parsing_notes
+            and current_notes_course
+            and base_header_line
+            and ":" in base_header_line
+            and not base_header_line.startswith("#")
+        ):
             current_notes_course.add_issue("unknown-metadata")
             parsed.unknown_directives += 1
 
@@ -2040,7 +2156,7 @@ class SongScanner:
                         self._metrics.increment('tja_dojo_parsed_total')
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
                 except Exception:  # pragma: no cover - defensive
-                    LOGGER.exception("Failed to parse %s", tja_path)
+                    LOGGER.error('scan-job-crash: file=%s', tja_path, exc_info=True)
                     summary['errors'] += 1
                     continue
 

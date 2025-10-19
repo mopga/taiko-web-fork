@@ -518,7 +518,53 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(chart.hit_notes, 6)
         self.assertEqual(chart.measures, 2)
         self.assertEqual(chart.first_note_preview, "1110,")
-        self.assertEqual(chart.unknown_directives, 1)
+
+    def test_implicit_header_closes_previous_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "implicit_header.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Implicit End",
+            "COURSE:Oni",
+            "LEVEL:7",
+            "#START",
+            "11,",
+            "11,",
+            "COURSE:Hard",
+            "LEVEL:5",
+            "#START",
+            "1110,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertIn("oni", parsed.charts)
+        self.assertIn("hard", parsed.charts)
+        self.assertGreater(parsed.charts["oni"].notes_count, 0)
+        self.assertGreater(parsed.charts["hard"].notes_count, 0)
+        self.assertEqual(parsed.implicit_end_due_to_header, 1)
+
+    def test_non_whitelisted_colon_line_inside_notes_does_not_close_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "colon_inside_notes.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Colon Line",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "11,",
+            "COMMENT: this is not a header",
+            "22,",
+            "#END",
+        ]), encoding="utf-8")
+
+        parsed = parse_tja(tja_path)
+
+        self.assertEqual(parsed.implicit_end_due_to_header, 0)
+        self.assertIn("oni", parsed.charts)
+        chart = parsed.charts["oni"]
+        self.assertEqual(chart.total_notes, 4)
+        self.assertIn("unknown-metadata", chart.issues)
         self.assertEqual(parsed.unknown_directives, 1)
 
     def test_branching_directives_do_not_increment_unknown_counters(self):
@@ -580,7 +626,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.hit_notes, 6)
         self.assertEqual(course.measures, 2)
         self.assertEqual(course.unknown_directives, 0)
-        self.assertTrue(any('mapped-course(parser): Dan→Oni' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): DAN→ONI' in message for message in logs.output))
 
     def test_parse_tja_tower_downcasts_to_oni(self):
         tmp_dir = Path(self._tmp_dir())
@@ -603,7 +649,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(course.canonical, "Oni")
         self.assertEqual(course.mode, "standard")
         self.assertIn("mapped-course", course.issues)
-        self.assertTrue(any('mapped-course(parser): Tower→Oni' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): TOWER→ONI' in message for message in logs.output))
 
     def test_parse_tja_skips_comments_before_start_and_counts_notes(self):
         tmp_dir = Path(self._tmp_dir())
@@ -631,7 +677,36 @@ class TestSongsScanner(unittest.TestCase):
         self.assertGreater(course.total_notes, 0)
         self.assertGreater(course.hit_notes, 0)
         self.assertIn("mapped-course", course.issues)
-        self.assertTrue(any('mapped-course(parser): Tower→Oni' in message for message in logs.output))
+        self.assertTrue(any('mapped-course(parser): TOWER→ONI' in message for message in logs.output))
+
+    def test_tower_after_blank_and_comments_is_playable(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "tower.tja"
+        tja_path.write_text(
+            """//TJADB Project
+TITLE:X
+BPM:165
+WAVE:x.ogg
+LIFE:1
+
+COURSE:Tower
+LEVEL:7
+
+#START
+
+11,
+1110,
+#BPMCHANGE 165.16
+1120,
+#END
+""",
+            encoding="utf-8",
+        )
+
+        parsed = parse_tja(tja_path)
+
+        self.assertIn('oni', parsed.charts)
+        self.assertGreater(parsed.charts['oni'].notes_count, 0)
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
