@@ -739,7 +739,7 @@ LEVEL:7
     def test_tower_7_lenient_fallback_counts_notes(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "Taiko Tower 7 Ama-kuchi.tja"
-        filler_lines = ["#SCROLL 1.0" for _ in range(30)]
+        filler_lines = ["0000," for _ in range(30)]
         tja_content = "\n".join([
             "TITLE:Fallback",
             "COURSE:Tower",
@@ -759,6 +759,14 @@ LEVEL:7
         self.assertIn('oni', parsed.charts)
         self.assertGreater(parsed.charts['oni'].total_notes, 0)
         self.assertIn('lenient-fallback', parsed.charts['oni'].issues)
+        chart_data = parsed.charts['oni'].chart_data
+        self.assertIsNotNone(chart_data)
+        if chart_data is not None:
+            self.assertEqual(chart_data.get('course'), 'oni')
+            self.assertEqual(chart_data.get('total_notes'), parsed.charts['oni'].total_notes)
+            self.assertTrue(chart_data.get('measures'))
+            for measure in chart_data.get('measures', []):
+                self.assertIn('notes', measure)
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())

@@ -133,6 +133,15 @@ HEADER_KEYS = {
 
 HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
 
+LENIENT_NOTE_TYPE_MAP = {
+    "1": "don",
+    "2": "ka",
+    "3": "don",
+    "4": "ka",
+    "5": "drumroll",
+    "6": "drumroll",
+}
+
 # NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
 # can be scanned in MVP mode without full exam support.
 DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
@@ -292,6 +301,7 @@ class CourseInfo:
     total_notes: int = 0
     measures: int = 0
     first_note_preview: Optional[str] = None
+    chart_data: Optional[Dict[str, object]] = None
 
     def add_issue(self, issue: str) -> None:
         if issue not in self.issues:
@@ -344,6 +354,7 @@ class ChartRecord:
     total_notes: int = 0
     measures: int = 0
     first_note_preview: Optional[str] = None
+    chart_data: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -357,6 +368,50 @@ class _CourseParseState:
     pending_has_notes: bool = False
     block_line_count: int = 0
     block_note_count: int = 0
+
+
+def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not isinstance(chart, dict):
+        return None
+    course_value = chart.get('course')
+    total_notes_value = chart.get('total_notes', 0)
+    try:
+        total_notes_int = int(total_notes_value)
+    except (TypeError, ValueError):
+        total_notes_int = 0
+    measures_payload: List[Dict[str, object]] = []
+    measures_source = chart.get('measures')
+    if isinstance(measures_source, list):
+        for measure in measures_source:
+            if not isinstance(measure, dict):
+                continue
+            measure_copy: Dict[str, object] = {}
+            notes_source = measure.get('notes')
+            notes_copy: List[Dict[str, object]] = []
+            if isinstance(notes_source, list):
+                for note in notes_source:
+                    if not isinstance(note, dict):
+                        continue
+                    note_type = note.get('type')
+                    at_value = note.get('at')
+                    try:
+                        at_int = int(at_value)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(note_type, str):
+                        continue
+                    notes_copy.append({'type': note_type, 'at': at_int})
+            measure_copy['notes'] = notes_copy
+            if 'bpm' in measure:
+                measure_copy['bpm'] = measure['bpm']
+            if 'scroll' in measure:
+                measure_copy['scroll'] = measure['scroll']
+            measures_payload.append(measure_copy)
+    return {
+        'course': course_value,
+        'total_notes': total_notes_int,
+        'measures': measures_payload,
+    }
 
 
 @dataclass
@@ -637,6 +692,7 @@ def _parse_tja_strict(
 
     def _finalise_notes_block() -> None:
         nonlocal parsing_notes, current_notes_course
+        zero_notes_block = False
         if current_notes_course:
             _flush_pending_notes(current_notes_course)
             LOGGER.info(
@@ -646,6 +702,7 @@ def _parse_tja_strict(
                 current_notes_course.measures,
                 current_notes_course.total_notes,
             )
+            zero_notes_block = current_notes_course.total_notes == 0
             state = _state_for(current_notes_course)
             state.block_line_count = 0
             state.block_note_count = 0
@@ -653,6 +710,8 @@ def _parse_tja_strict(
                 _end_segment(current_notes_course)
         parsing_notes = False
         current_notes_course = None
+        if zero_notes_block and TJA_LENIENT_FALLBACK:
+            raise RuntimeError("fallback-to-lenient")
 
     def _process_metadata_line(metadata_line: str) -> None:
         nonlocal active_course, current_notes_course, parsing_notes, current_wave
@@ -802,11 +861,6 @@ def _parse_tja_strict(
         if not line and not base_header_line:
             continue
 
-        if parsing_notes and current_notes_course:
-            if state_for_current is None:
-                state_for_current = _state_for(current_notes_course)
-            state_for_current.block_line_count += 1
-
         if (
             parsing_notes
             and current_notes_course
@@ -930,6 +984,7 @@ def _parse_tja_strict(
                 tokens = stripped_comments.split(",")
                 saw_digits = False
                 state = _state_for(current_notes_course)
+                state.block_line_count += 1
                 for index, token in enumerate(tokens):
                     cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)
                     if cleaned:
@@ -1004,9 +1059,66 @@ def _parse_tja_lenient(
     course_token = "oni"
     course_raw = "oni"
     in_notes = False
-    measure_has_notes = False
-    measures = 0
-    notes = 0
+    chart_measures: List[Dict[str, object]] = []
+    measure_tokens: List[str] = []
+    current_bpm: Optional[float] = None
+    default_bpm: Optional[float] = None
+    current_scroll: float = 1.0
+    current_measure_ratio: float = 1.0
+    measure_bpm: Optional[float] = None
+    measure_scroll: float = 1.0
+    measure_ratio_for_measure: float = 1.0
+    measure_start_time_ms: float = 0.0
+    total_notes = 0
+
+    def _parse_float(value: str) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _measure_duration_ms(bpm_value: Optional[float], ratio: float) -> float:
+        bpm = bpm_value if bpm_value and bpm_value > 0 else None
+        if bpm is None and default_bpm and default_bpm > 0:
+            bpm = default_bpm
+        if bpm is None:
+            bpm = 120.0
+        if ratio <= 0:
+            ratio = 1.0
+        return (240000.0 / bpm) * ratio
+
+    def _flush_measure() -> None:
+        nonlocal measure_tokens, measure_bpm, measure_scroll, measure_ratio_for_measure
+        nonlocal measure_start_time_ms, total_notes
+        if not measure_tokens:
+            return
+        tokens = list(measure_tokens)
+        measure_tokens.clear()
+        duration_ms = _measure_duration_ms(measure_bpm, measure_ratio_for_measure)
+        total_slots = len(tokens)
+        measure_notes: List[Dict[str, object]] = []
+        for index, token in enumerate(tokens):
+            if not token:
+                continue
+            if token.isdigit():
+                note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+                note_value = int(token)
+                if note_type and note_value in HIT_NOTE_VALUES:
+                    position = (index / total_slots) if total_slots else 0.0
+                    at_value = int(round(measure_start_time_ms + position * duration_ms))
+                    measure_notes.append({'type': note_type, 'at': at_value})
+        measure_entry: Dict[str, object] = {'notes': measure_notes}
+        bpm_to_store = measure_bpm if measure_bpm is not None else current_bpm or default_bpm
+        if bpm_to_store is not None:
+            measure_entry['bpm'] = bpm_to_store
+        if measure_scroll is not None:
+            measure_entry['scroll'] = measure_scroll
+        chart_measures.append(measure_entry)
+        total_notes += len(measure_notes)
+        measure_start_time_ms += duration_ms
+        measure_bpm = current_bpm
+        measure_scroll = current_scroll
+        measure_ratio_for_measure = current_measure_ratio
 
     for line_number, raw in enumerate(normalised_text.splitlines(), 1):
         stripped = raw.strip().lstrip("\ufeff")
@@ -1040,6 +1152,12 @@ def _parse_tja_lenient(
                     parsed.genre = clean_value or None
                 elif key_upper == "SONGID":
                     parsed.song_id = clean_value or None
+                elif key_upper == "BPM":
+                    bpm_value = _parse_float(value_stripped)
+                    if bpm_value is not None:
+                        current_bpm = bpm_value
+                        if default_bpm is None:
+                            default_bpm = bpm_value
                 continue
 
         if upper.startswith("#START"):
@@ -1050,45 +1168,85 @@ def _parse_tja_lenient(
                 line_number,
             )
             in_notes = True
-            measure_has_notes = False
+            measure_tokens.clear()
+            chart_measures.clear()
+            measure_start_time_ms = 0.0
+            measure_bpm = current_bpm
+            measure_scroll = current_scroll
+            measure_ratio_for_measure = current_measure_ratio
             continue
 
         if not in_notes:
             continue
 
         if upper.startswith("#END"):
-            if measure_has_notes:
-                measures += 1
+            _flush_measure()
             LOGGER.info(
-                "end-notes(lenient): course=%s measures=%d notes=%d",
+                "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
                 course_token,
-                measures,
-                notes,
+                path,
+                len(chart_measures),
+                total_notes,
             )
             in_notes = False
             break
 
-        if upper.startswith("#BPMCHANGE") or upper.startswith("#SCROLL"):
+        if upper.startswith("#BPMCHANGE"):
+            if measure_tokens:
+                _flush_measure()
+            payload = stripped.split(None, 1)[-1] if " " in stripped else stripped[len("#BPMCHANGE") :]
+            bpm_value = _parse_float(payload.strip())
+            if bpm_value is not None:
+                current_bpm = bpm_value
+                if default_bpm is None:
+                    default_bpm = bpm_value
+                measure_bpm = current_bpm
+            continue
+
+        if upper.startswith("#SCROLL"):
+            if measure_tokens:
+                _flush_measure()
+            payload = stripped.split(None, 1)[-1] if " " in stripped else stripped[len("#SCROLL") :]
+            scroll_value = _parse_float(payload.strip())
+            if scroll_value is not None:
+                current_scroll = scroll_value
+                measure_scroll = current_scroll
+            continue
+
+        if upper.startswith("#MEASURE"):
+            if measure_tokens:
+                _flush_measure()
+            payload = stripped.split(None, 1)[-1] if " " in stripped else stripped[len("#MEASURE") :]
+            fraction = payload.strip()
+            if "/" in fraction:
+                numerator_str, denominator_str = fraction.split("/", 1)
+                numerator = _parse_float(numerator_str.strip())
+                denominator = _parse_float(denominator_str.strip())
+                if numerator and denominator:
+                    current_measure_ratio = numerator / denominator
+                    measure_ratio_for_measure = current_measure_ratio
             continue
 
         if NOTE_LINE_RE.match(stripped):
             for ch in stripped:
-                if ch.isdigit() and int(ch) in HIT_NOTE_VALUES:
-                    notes += 1
-                    measure_has_notes = True
+                if ch.isdigit():
+                    if not measure_tokens:
+                        measure_bpm = current_bpm
+                        measure_scroll = current_scroll
+                        measure_ratio_for_measure = current_measure_ratio
+                    measure_tokens.append(ch)
                 elif ch == ",":
-                    measures += 1
-                    measure_has_notes = False
+                    _flush_measure()
             continue
 
     if in_notes:
-        if measure_has_notes:
-            measures += 1
+        _flush_measure()
         LOGGER.info(
-            "end-notes(lenient): course=%s measures=%d notes=%d",
+            "end-notes(lenient): course=%s file=%s measures=%d notes=%d",
             course_token,
-            measures,
-            notes,
+            path,
+            len(chart_measures),
+            total_notes,
         )
 
     canonical = course_token.casefold() or "oni"
@@ -1098,9 +1256,14 @@ def _parse_tja_lenient(
         raw_name=course_raw,
         normalised=normalised,
     )
-    course_info.total_notes = notes
-    course_info.hit_notes = notes
-    course_info.measures = measures
+    course_info.total_notes = total_notes
+    course_info.hit_notes = total_notes
+    course_info.measures = len(chart_measures)
+    course_info.chart_data = {
+        'course': canonical,
+        'total_notes': total_notes,
+        'measures': chart_measures,
+    }
     course_info.add_issue("lenient-fallback")
     parsed.courses.append(course_info)
     parsed.charts[canonical] = course_info
@@ -1166,6 +1329,31 @@ class SongScanner:
         self._group_locks: Dict[str, threading.Lock] = {}
         self._group_locks_guard = threading.Lock()
         self._state_collection = getattr(self.db, 'song_scanner_state', None)
+        db_name = getattr(self.db, 'name', None)
+        client = getattr(self.db, 'client', None)
+        host_label: Optional[str] = None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                address = getattr(client, 'address', None)
+                if isinstance(address, tuple) and len(address) == 2:
+                    host_label = f"{address[0]}:{address[1]}"
+        LOGGER.info(
+            'scanner mongo target: db=%s host=%s',
+            db_name or '<unknown>',
+            host_label or '<unknown>',
+        )
+        if hasattr(self.db, 'command'):
+            try:
+                ping_result = self.db.command('ping')  # type: ignore[call-arg]
+            except Exception:
+                LOGGER.error('scanner mongo ping failed', exc_info=True)
+            else:
+                ok_value = ping_result.get('ok') if isinstance(ping_result, dict) else None
+                LOGGER.info(
+                    'scanner mongo ping ok: db=%s ok=%s',
+                    db_name or '<unknown>',
+                    ok_value,
+                )
         if self._state_collection is not None:
             try:
                 self._state_collection.create_index('tja_path', unique=True)
@@ -1237,6 +1425,7 @@ class SongScanner:
                 )
         except Exception:  # pragma: no cover - tolerate best effort counter initialisation
             LOGGER.debug('Failed to ensure songs counter document')
+        LOGGER.info('init songs indexes ok')
         self._import_issues_collection = getattr(self.db, 'import_issues', None)
         if self._import_issues_collection is not None:
             try:
@@ -1357,6 +1546,8 @@ class SongScanner:
                 }
                 segments_copy.append(segment_copy)
 
+            chart_data_copy = _clone_chart_data(course.chart_data)
+
             record = ChartRecord(
                 course=course_name,
                 raw_course=course.raw_name,
@@ -1374,6 +1565,7 @@ class SongScanner:
                 total_notes=course.total_notes,
                 measures=course.measures,
                 first_note_preview=course.first_note_preview,
+                chart_data=chart_data_copy,
             )
             LOGGER.debug(
                 "Chart summary mode=%s course=%s raw=%s notes=%d measures=%d first=\"%s\" issues=%s",
@@ -1552,6 +1744,7 @@ class SongScanner:
                     total_notes=int(item.get('total_notes', 0)) if item.get('total_notes') is not None else 0,
                     measures=int(item.get('measures', 0)) if item.get('measures') is not None else 0,
                     first_note_preview=item.get('first_note_preview'),
+                    chart_data=_clone_chart_data(item.get('chart_data')),
                 )
                 for item in charts_raw
             ]
@@ -2085,6 +2278,7 @@ class SongScanner:
                     'unknown_directives': chart.unknown_directives,
                     'tja_path': record.relative_path,
                     'tja_url': record.tja_url,
+                    'chart_data': _clone_chart_data(chart.chart_data),
                 }
                 key = _dedup_key(chart)
                 existing = chart_by_key.get(key)
@@ -2742,15 +2936,42 @@ class SongScanner:
             records = aggregated_records[key]
             document = self._build_song_document(key, records)
             charts_payload: List[Dict[str, object]] = list(document.get('charts', []))
-            song_id = self._upsert_song_document(
-                key,
-                records,
-                document,
-                charts_payload,
-                dirty_groups,
-                summary,
-            )
+            try:
+                song_id = self._upsert_song_document(
+                    key,
+                    records,
+                    document,
+                    charts_payload,
+                    dirty_groups,
+                    summary,
+                )
+            except Exception:
+                LOGGER.error(
+                    'songs upsert failed: title=%s course=%s',
+                    document.get('title'),
+                    key,
+                    exc_info=True,
+                )
+                summary['errors'] += 1
+                continue
             if song_id is not None:
+                for chart_entry in charts_payload:
+                    course_label = (
+                        chart_entry.get('canonical_course')
+                        or chart_entry.get('course')
+                        or UNKNOWN_VALUE
+                    )
+                    total_notes_value = chart_entry.get('total_notes', 0)
+                    try:
+                        total_notes_int = int(total_notes_value)
+                    except (TypeError, ValueError):
+                        total_notes_int = 0
+                    LOGGER.info(
+                        'upserted-chart: title=%s course=%s notes=%d',
+                        document.get('title'),
+                        course_label,
+                        total_notes_int,
+                    )
                 seen_song_ids.add(song_id)
                 song_id_by_key[key] = song_id
 
