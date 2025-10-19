@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import fnmatch
 import hashlib
 import logging
@@ -42,6 +43,8 @@ except Exception:  # pragma: no cover - watchdog optional dependency
 LOGGER = logging.getLogger(__name__)
 
 
+TJA_LENIENT_FALLBACK = os.getenv("TJA_LENIENT_FALLBACK", "1") == "1"
+
 SUPPORTED_AUDIO_EXTS = [
     ".ogg",
     ".mp3",
@@ -54,31 +57,31 @@ SUPPORTED_AUDIO_EXTS = [
 ]
 
 COURSE_ALIASES = {
-    "EASY": "Easy",
-    "KANTAN": "Easy",
-    "AMAKUCHI": "Easy",
-    "甘口": "Easy",
-    "NORMAL": "Normal",
-    "FUTSUU": "Normal",
-    "FUTSU": "Normal",
-    "KARAKUCHI": "Normal",
-    "辛口": "Normal",
-    "HARD": "Hard",
-    "MUZUKASHII": "Hard",
-    "ONI": "Oni",
-    "EDIT": "Oni",
-    "URAONI": "UraOni",
-    "URA": "UraOni",
+    "EASY": "easy",
+    "KANTAN": "easy",
+    "AMAKUCHI": "easy",
+    "甘口": "easy",
+    "NORMAL": "normal",
+    "FUTSUU": "normal",
+    "FUTSU": "normal",
+    "KARAKUCHI": "normal",
+    "辛口": "normal",
+    "HARD": "hard",
+    "MUZUKASHII": "hard",
+    "ONI": "oni",
+    "EDIT": "oni",
+    "URAONI": "uraoni",
+    "URA": "uraoni",
 }
 
-COURSE_ORDER = ["Easy", "Normal", "Hard", "Oni", "UraOni"]
+COURSE_ORDER = ["easy", "normal", "hard", "oni", "uraoni"]
 
 COURSE_NUMERIC_MAP = {
-    0: "Easy",
-    1: "Normal",
-    2: "Hard",
-    3: "Oni",
-    4: "UraOni",
+    0: "easy",
+    1: "normal",
+    2: "hard",
+    3: "oni",
+    4: "uraoni",
 }
 
 EASY_TASTE_MARKERS = {"ama", "amakuchi", "甘口"}
@@ -86,11 +89,11 @@ NORMAL_TASTE_MARKERS = {"kara", "karakuchi", "辛口"}
 TASTE_MARKER_SPLIT_RE = re.compile(r"[\s._\-()\[\]]+")
 
 COURSE_LEGACY_MAP = {
-    "Easy": "easy",
-    "Normal": "normal",
-    "Hard": "hard",
-    "Oni": "oni",
-    "UraOni": "ura",
+    "easy": "easy",
+    "normal": "normal",
+    "hard": "hard",
+    "oni": "oni",
+    "uraoni": "ura",
 }
 
 DEFAULT_CATEGORY_TITLE = "Unsorted"
@@ -134,8 +137,8 @@ HIT_NOTE_VALUES = {1, 2, 3, 4, 5, 6}
 DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
 
 COURSE_DOWNCAST_MAP = {
-    "TOWER": "Oni",
-    "DAN": "Oni",
+    "TOWER": "oni",
+    "DAN": "oni",
 }
 
 ZERO_WIDTH_CHARACTERS = {
@@ -311,6 +314,8 @@ class _CourseParseState:
     pending_total_notes: int = 0
     pending_hit_notes: int = 0
     pending_has_notes: bool = False
+    block_line_count: int = 0
+    block_note_count: int = 0
 
 
 @dataclass
@@ -454,10 +459,10 @@ def _detect_taste_marker(path: Path) -> Optional[str]:
             tokens.update(token for token in TASTE_MARKER_SPLIT_RE.split(lowered) if token)
     for token in tokens:
         if token in EASY_TASTE_MARKERS:
-            return "Easy"
+            return "easy"
     for token in tokens:
         if token in NORMAL_TASTE_MARKERS:
-            return "Normal"
+            return "normal"
     return None
 
 
@@ -506,8 +511,12 @@ def _derive_genre_from_path(relative_tja: Path, category_title: str) -> str:
     return cleaned_category or DEFAULT_CATEGORY_TITLE
 
 
-def parse_tja(path: Path) -> ParsedTJA:
-    original_text, normalised_text = read_tja(path)
+def _parse_tja_strict(
+    path: Path,
+    *,
+    original_text: str,
+    normalised_text: str,
+) -> ParsedTJA:
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
 
     active_course: Optional[CourseInfo] = None
@@ -590,12 +599,15 @@ def parse_tja(path: Path) -> ParsedTJA:
         if current_notes_course:
             _flush_pending_notes(current_notes_course)
             LOGGER.info(
-                "end-notes: course=%s file=%s measures=%d notes=%d",
-                current_notes_course.canonical.casefold(),
+                "end-notes(strict): course=%s file=%s measures=%d notes=%d",
+                current_notes_course.canonical,
                 path,
                 current_notes_course.measures,
                 current_notes_course.total_notes,
             )
+            state = _state_for(current_notes_course)
+            state.block_line_count = 0
+            state.block_note_count = 0
             if current_notes_course.mode == "dojo":
                 _end_segment(current_notes_course)
         parsing_notes = False
@@ -644,15 +656,16 @@ def parse_tja(path: Path) -> ParsedTJA:
             raw_course_value = value_stripped.strip()
             normalised_token = _normalise_course_token(raw_course_value)
             if normalised_token in DOJO_COURSE_TOKENS:
+                canonical_lower = "dojo"
                 active_course = CourseInfo(
-                    canonical="Dojo",
+                    canonical=canonical_lower,
                     raw_name=raw_course_value,
                     normalised=normalised_token,
                     mode="dojo",
                 )
                 parsed.courses.append(active_course)
                 parsed.has_dojo_course = True
-                parsed.charts[active_course.canonical.casefold()] = active_course
+                parsed.charts[canonical_lower] = active_course
             else:
                 canonical, token, issue = _resolve_course(raw_course_value, path=path)
                 if canonical == "Unknown":
@@ -673,20 +686,21 @@ def parse_tja(path: Path) -> ParsedTJA:
                             canonical.upper(),
                         )
                         parsed.mapped_courses += 1
-                    existing = known_courses.get(canonical)
+                    canonical_lower = canonical.casefold()
+                    existing = known_courses.get(canonical_lower)
                     if existing:
                         active_course = existing
                         active_course.raw_name = raw_course_value
                         active_course.normalised = token
                     else:
                         active_course = CourseInfo(
-                            canonical=canonical,
+                            canonical=canonical_lower,
                             raw_name=raw_course_value,
                             normalised=token,
                         )
-                        known_courses[canonical] = active_course
+                        known_courses[canonical_lower] = active_course
                         parsed.courses.append(active_course)
-                    parsed.charts[active_course.canonical.casefold()] = active_course
+                    parsed.charts[active_course.canonical] = active_course
                     if issue:
                         active_course.add_issue(issue)
         elif key_upper == "LEVEL" and active_course:
@@ -714,6 +728,22 @@ def parse_tja(path: Path) -> ParsedTJA:
     line_number = 0
     for raw_line in normalised_text.splitlines():
         line_number += 1
+
+        state_for_current: Optional[_CourseParseState] = None
+        if parsing_notes and current_notes_course:
+            state_for_current = _state_for(current_notes_course)
+            if (
+                TJA_LENIENT_FALLBACK
+                and state_for_current.block_note_count == 0
+                and state_for_current.block_line_count >= 30
+            ):
+                LOGGER.warning(
+                    "lenient-fallback: no-notes-after-30-lines file=%s course=%s",
+                    path,
+                    current_notes_course.canonical,
+                )
+                raise RuntimeError("fallback-to-lenient")
+
         raw_line = raw_line.lstrip("\ufeff")
         stripped_pre = raw_line.strip()
         if not stripped_pre:
@@ -730,6 +760,11 @@ def parse_tja(path: Path) -> ParsedTJA:
         line = stripped_comments.strip()
         if not line and not base_header_line:
             continue
+
+        if parsing_notes and current_notes_course:
+            if state_for_current is None:
+                state_for_current = _state_for(current_notes_course)
+            state_for_current.block_line_count += 1
 
         if (
             parsing_notes
@@ -760,9 +795,9 @@ def parse_tja(path: Path) -> ParsedTJA:
             handled_directive = False
             if directive == "#START":
                 if active_course:
-                    course_key = active_course.canonical.casefold()
+                    course_key = active_course.canonical
                     LOGGER.info(
-                        "start-notes: course=%s file=%s line=%d",
+                        "start-notes(strict): course=%s file=%s line=%d",
                         course_key,
                         path,
                         line_number,
@@ -771,8 +806,10 @@ def parse_tja(path: Path) -> ParsedTJA:
                     current_notes_course = active_course
                     parsing_notes = True
                     _reset_pending_notes(current_notes_course)
+                    state = _state_for(current_notes_course)
+                    state.block_line_count = 0
+                    state.block_note_count = 0
                     if current_notes_course.mode == "dojo":
-                        state = _state_for(current_notes_course)
                         state.measure_index = 0
                         _end_segment(current_notes_course)
                         _start_segment(current_notes_course, _current_audio())
@@ -861,6 +898,7 @@ def parse_tja(path: Path) -> ParsedTJA:
                         state.pending_total_notes += len(notes)
                         state.pending_hit_notes += hit_count
                         state.pending_has_notes = True
+                        state.block_note_count += hit_count
                     if index < len(tokens) - 1:
                         _commit_pending_measure(current_notes_course)
                 if measure_line.endswith(","):
@@ -875,10 +913,10 @@ def parse_tja(path: Path) -> ParsedTJA:
                 continue
             except Exception:
                 LOGGER.error(
-                    "parse-error: file=%s line=%d course=%s text=%r",
+                    "parse-error(strict): file=%s line=%d course=%s text=%r",
                     path,
                     line_number,
-                    current_notes_course.canonical.casefold(),
+                    current_notes_course.canonical,
                     raw_line.rstrip("\n"),
                     exc_info=True,
                 )
@@ -912,6 +950,145 @@ def parse_tja(path: Path) -> ParsedTJA:
             course.segments = state.segments
 
     return parsed
+
+
+def _parse_tja_lenient(
+    path: Path,
+    *,
+    original_text: str,
+    normalised_text: str,
+) -> ParsedTJA:
+    parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
+
+    course_token = "oni"
+    course_raw = "oni"
+    in_notes = False
+    measure_has_notes = False
+    measures = 0
+    notes = 0
+
+    for line_number, raw in enumerate(normalised_text.splitlines(), 1):
+        stripped = raw.strip().lstrip("\ufeff")
+        if not stripped or stripped.startswith("//") or stripped.startswith(";"):
+            continue
+        upper = stripped.upper()
+
+        if not in_notes:
+            if upper.startswith("COURSE:"):
+                raw_value = stripped.split(":", 1)[1].strip()
+                course_raw = raw_value or course_raw
+                mapped = {"TOWER": "oni", "DAN": "oni"}.get(raw_value.upper())
+                course_token = mapped or (raw_value.casefold() or course_token)
+                continue
+            if ":" in stripped and not stripped.startswith("#"):
+                key, value = stripped.split(":", 1)
+                key_upper = key.strip().upper()
+                value_stripped = value.strip()
+                clean_value = _clean_metadata_value(value_stripped)
+                if key_upper == "TITLE":
+                    parsed.title = clean_value
+                elif key_upper == "TITLEJA":
+                    parsed.title_ja = clean_value
+                elif key_upper == "SUBTITLE":
+                    parsed.subtitle = clean_value
+                elif key_upper == "SUBTITLEJA":
+                    parsed.subtitle_ja = clean_value
+                elif key_upper == "WAVE":
+                    parsed.wave = clean_value or None
+                elif key_upper == "GENRE":
+                    parsed.genre = clean_value or None
+                elif key_upper == "SONGID":
+                    parsed.song_id = clean_value or None
+                continue
+
+        if upper.startswith("#START"):
+            LOGGER.info(
+                "start-notes(lenient): course=%s file=%s line=%d",
+                course_token,
+                path,
+                line_number,
+            )
+            in_notes = True
+            measure_has_notes = False
+            continue
+
+        if not in_notes:
+            continue
+
+        if upper.startswith("#END"):
+            if measure_has_notes:
+                measures += 1
+            LOGGER.info(
+                "end-notes(lenient): course=%s measures=%d notes=%d",
+                course_token,
+                measures,
+                notes,
+            )
+            in_notes = False
+            break
+
+        if upper.startswith("#BPMCHANGE") or upper.startswith("#SCROLL"):
+            continue
+
+        if NOTE_LINE_RE.match(stripped):
+            for ch in stripped:
+                if ch.isdigit() and int(ch) in HIT_NOTE_VALUES:
+                    notes += 1
+                    measure_has_notes = True
+                elif ch == ",":
+                    measures += 1
+                    measure_has_notes = False
+            continue
+
+    if in_notes:
+        if measure_has_notes:
+            measures += 1
+        LOGGER.info(
+            "end-notes(lenient): course=%s measures=%d notes=%d",
+            course_token,
+            measures,
+            notes,
+        )
+
+    canonical = course_token.casefold() or "oni"
+    normalised = _normalise_course_token(course_raw) if course_raw else canonical.upper()
+    course_info = CourseInfo(
+        canonical=canonical,
+        raw_name=course_raw,
+        normalised=normalised,
+    )
+    course_info.total_notes = notes
+    course_info.hit_notes = notes
+    course_info.measures = measures
+    course_info.add_issue("lenient-fallback")
+    parsed.courses.append(course_info)
+    parsed.charts[canonical] = course_info
+
+    raw_upper = (course_raw or "").strip().upper()
+    if raw_upper in {"TOWER", "DAN"}:
+        parsed.mapped_courses += 1
+
+    return parsed
+
+
+def parse_tja(path: Path) -> ParsedTJA:
+    original_text, normalised_text = read_tja(path)
+    try:
+        return _parse_tja_strict(
+            path,
+            original_text=original_text,
+            normalised_text=normalised_text,
+        )
+    except Exception:
+        LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
+        if not TJA_LENIENT_FALLBACK:
+            raise
+        LOGGER.warning("lenient-fallback: file=%s", path)
+        return _parse_tja_lenient(
+            path,
+            original_text=original_text,
+            normalised_text=normalised_text,
+        )
 
 
 def _match_any(path: Path, patterns: Iterable[str]) -> bool:

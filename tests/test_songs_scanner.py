@@ -406,9 +406,9 @@ class TestSongsScanner(unittest.TestCase):
         self.assertAlmostEqual(parsed.offset, 1.5)
         self.assertAlmostEqual(parsed.preview, 12.5)
         courses = {course.canonical: course for course in parsed.courses}
-        self.assertEqual(courses["Oni"].stars, 8)
-        self.assertTrue(courses["Oni"].branch)
-        self.assertEqual(courses["Hard"].stars, 5)
+        self.assertEqual(courses["oni"].stars, 8)
+        self.assertTrue(courses["oni"].branch)
+        self.assertEqual(courses["hard"].stars, 5)
 
     def test_parse_tja_directive_after_start_preserves_chart(self):
         tmp_dir = Path(self._tmp_dir())
@@ -620,7 +620,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
         self.assertEqual(course.mode, "standard")
-        self.assertEqual(course.canonical, "Oni")
+        self.assertEqual(course.canonical, "oni")
         self.assertIn("mapped-course", course.issues)
         self.assertEqual(course.total_notes, 8)
         self.assertEqual(course.hit_notes, 6)
@@ -646,7 +646,7 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
-        self.assertEqual(course.canonical, "Oni")
+        self.assertEqual(course.canonical, "oni")
         self.assertEqual(course.mode, "standard")
         self.assertIn("mapped-course", course.issues)
         self.assertTrue(any('mapped-course(parser): TOWER→ONI' in message for message in logs.output))
@@ -672,7 +672,7 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(parsed.skipped_no_course, 0)
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
-        self.assertEqual(course.canonical, "Oni")
+        self.assertEqual(course.canonical, "oni")
         self.assertEqual(course.mode, "standard")
         self.assertGreater(course.total_notes, 0)
         self.assertGreater(course.hit_notes, 0)
@@ -707,6 +707,30 @@ LEVEL:7
 
         self.assertIn('oni', parsed.charts)
         self.assertGreater(parsed.charts['oni'].notes_count, 0)
+
+    def test_tower_7_lenient_fallback_counts_notes(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "Taiko Tower 7 Ama-kuchi.tja"
+        filler_lines = ["#SCROLL 1.0" for _ in range(30)]
+        tja_content = "\n".join([
+            "TITLE:Fallback",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            *filler_lines,
+            "1111,",
+            "#END",
+        ])
+        tja_path.write_text(tja_content, encoding="utf-8")
+
+        with mock.patch.object(songs_scanner, "TJA_LENIENT_FALLBACK", True):
+            with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+                parsed = parse_tja(tja_path)
+
+        self.assertTrue(any("lenient-fallback" in message for message in logs.output))
+        self.assertIn('oni', parsed.charts)
+        self.assertGreater(parsed.charts['oni'].total_notes, 0)
+        self.assertIn('lenient-fallback', parsed.charts['oni'].issues)
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())
@@ -895,7 +919,7 @@ LEVEL:7
         self.assertEqual(len(db.songs.inserted), 1)
         chart = db.songs.inserted[0]['charts'][0]
         self.assertEqual(chart.get('course'), 'oni')
-        self.assertEqual(chart.get('canonical_course'), 'Oni')
+        self.assertEqual(chart.get('canonical_course'), 'oni')
         self.assertEqual(chart.get('mode'), 'standard')
         self.assertTrue(chart.get('valid'))
         self.assertIn('mapped-course', chart.get('issues', []))
@@ -909,7 +933,7 @@ LEVEL:7
             ignore_globs=None,
         )
         chart = ChartRecord(
-            course="Oni",
+            course="oni",
             raw_course="Oni",
             normalised="oni",
             level=9,
@@ -1028,7 +1052,7 @@ LEVEL:7
 
         for index in range(total_records):
             chart = ChartRecord(
-                course="Oni",
+                course="oni",
                 raw_course="Oni",
                 normalised="oni",
                 level=7,
@@ -1157,7 +1181,7 @@ LEVEL:7
         self.assertEqual(len(db.songs._docs), 1)
         charts = db.songs._docs[0]['charts']
         courses = {chart['canonical_course'] for chart in charts}
-        self.assertEqual(courses, {'Easy', 'Oni'})
+        self.assertEqual(courses, {'easy', 'oni'})
 
     def test_upsert_retries_on_duplicate_key(self):
         db = _DummyDB()
@@ -1168,7 +1192,7 @@ LEVEL:7
             ignore_globs=None,
         )
         chart = ChartRecord(
-            course="Easy",
+            course="easy",
             raw_course="Easy",
             normalised="easy",
             level=3,
@@ -1265,8 +1289,8 @@ LEVEL:7
         parsed = parse_tja(tja_path)
         courses = {course.canonical: course for course in parsed.courses}
 
-        self.assertIn("Normal", courses)
-        self.assertEqual(courses["Normal"].stars, 4)
+        self.assertIn("normal", courses)
+        self.assertEqual(courses["normal"].stars, 4)
 
     def test_parse_tja_handles_comments_and_placeholders(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1370,9 +1394,9 @@ LEVEL:7
 
         parsed = parse_tja(tja_path)
         courses = {course.canonical: course for course in parsed.courses}
-        self.assertIn("Easy", courses)
-        self.assertIn("Normal", courses)
-        self.assertIn("UraOni", courses)
+        self.assertIn("easy", courses)
+        self.assertIn("normal", courses)
+        self.assertIn("uraoni", courses)
         self.assertEqual(parsed.skipped_charts, 1)
 
     def test_resolve_course_downcasts_tower_to_oni(self):
@@ -1418,9 +1442,9 @@ LEVEL:7
         easy_course = parse_tja(easy_path).courses[0]
         normal_course = parse_tja(normal_path).courses[0]
 
-        self.assertEqual(oni_course.canonical, "Oni")
-        self.assertEqual(easy_course.canonical, "Oni")
-        self.assertEqual(normal_course.canonical, "Oni")
+        self.assertEqual(oni_course.canonical, "oni")
+        self.assertEqual(easy_course.canonical, "oni")
+        self.assertEqual(normal_course.canonical, "oni")
         self.assertIn("mapped-course", oni_course.issues)
         self.assertIn("mapped-course", easy_course.issues)
         self.assertIn("mapped-course", normal_course.issues)
@@ -1470,8 +1494,8 @@ LEVEL:7
         self.assertEqual(inserted['title'], 'Merge Easy')
         self.assertIn('charts', inserted)
         courses = {chart['canonical_course']: chart for chart in inserted['charts']}
-        self.assertIn('Easy', courses)
-        self.assertIn('Oni', courses)
+        self.assertIn('easy', courses)
+        self.assertIn('oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
         self.assertEqual(inserted.get('genre'), 'Unsorted')
         self.assertTrue(all(chart.get('total_notes', 0) > 0 for chart in inserted['charts']))
@@ -1527,7 +1551,7 @@ LEVEL:7
         self.assertEqual(len(inserted['charts']), 1)
         self.assertIn('duplicate_course', inserted.get('import_issues', []))
         self.assertEqual(inserted['charts'][0]['course'], 'oni')
-        self.assertEqual(inserted['charts'][0]['canonical_course'], 'Oni')
+        self.assertEqual(inserted['charts'][0]['canonical_course'], 'oni')
         self.assertIn('duplicate-course', inserted['charts'][0]['issues'])
 
     def test_scanner_groups_tower_flavour_files_into_single_song(self):
@@ -1573,7 +1597,7 @@ LEVEL:7
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
         courses = {chart['canonical_course'] for chart in inserted['charts']}
-        self.assertEqual(courses, {'Oni'})
+        self.assertEqual(courses, {'oni'})
         self.assertIn('duplicate_course', inserted.get('import_issues', []))
         chart = inserted['charts'][0]
         self.assertIn('mapped-course', chart.get('issues', []))
@@ -1672,7 +1696,7 @@ LEVEL:7
         charts = docs[0].get('charts', [])
         self.assertEqual(len(charts), 1)
         self.assertEqual(charts[0]['course'], 'oni')
-        self.assertEqual(charts[0]['canonical_course'], 'Oni')
+        self.assertEqual(charts[0]['canonical_course'], 'oni')
 
     def test_scanner_atomic_upsert_merges_distinct_courses(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1726,7 +1750,7 @@ LEVEL:7
         docs = list(db.songs.find())
         self.assertEqual(len(docs), 1)
         courses = sorted(chart['canonical_course'] for chart in docs[0].get('charts', []))
-        self.assertEqual(courses, ['Easy', 'Oni'])
+        self.assertEqual(courses, ['easy', 'oni'])
 
     def test_scanner_repeated_scan_is_idempotent(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1993,7 +2017,7 @@ LEVEL:7
         self.assertEqual(len(inserted['charts']), 1)
         chart = inserted['charts'][0]
         self.assertEqual(chart['course'], 'oni')
-        self.assertEqual(chart['canonical_course'], 'Oni')
+        self.assertEqual(chart['canonical_course'], 'oni')
         self.assertTrue(chart['valid'])
         self.assertIn('duplicate-course', chart.get('issues', []))
         self.assertIn('mapped-course', chart.get('issues', []))
@@ -2196,12 +2220,12 @@ LEVEL:7
         self.assertEqual(summary['inserted'], 1)
         inserted = db.songs.inserted[0]
         courses = {chart['canonical_course']: chart for chart in inserted['charts']}
-        self.assertIn('Oni', courses)
-        self.assertIn('Easy', courses)
-        self.assertIn('Normal', courses)
-        self.assertTrue(courses['Oni']['valid'])
-        self.assertTrue(courses['Easy']['valid'])
-        self.assertTrue(courses['Normal']['valid'])
+        self.assertIn('oni', courses)
+        self.assertIn('easy', courses)
+        self.assertIn('normal', courses)
+        self.assertTrue(courses['oni']['valid'])
+        self.assertTrue(courses['easy']['valid'])
+        self.assertTrue(courses['normal']['valid'])
         self.assertNotIn('unknown-course', inserted.get('import_issues', []))
         self.assertEqual(inserted.get('genre'), 'Taiko Tower 01')
         self.assertEqual(inserted.get('category_id'), 0)
