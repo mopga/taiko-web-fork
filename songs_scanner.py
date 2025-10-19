@@ -219,75 +219,22 @@ def _resolve_long_end(entry: Dict[str, object], candidate_end: int) -> int:
     return candidate_end
 
 
-def _build_synthetic_notes_from_longs(
-    long_entries: Sequence[Dict[str, object]]
-) -> List[Dict[str, object]]:
-    synthetic: List[Dict[str, object]] = []
-    for long_entry in long_entries:
-        if not isinstance(long_entry, dict):
-            continue
-        at_value = long_entry.get('at')
-        try:
-            at_int = int(at_value)
-        except (TypeError, ValueError):
-            continue
-        synthetic.append({'type': 'don', 'at': at_int, 'synthetic': True})
-    return synthetic
-
-
 def _finalise_chart_metrics(
-    measures: Sequence[Dict[str, object]]
-) -> Tuple[int, int]:
-    total_hits = 0
+    measures: Sequence[Dict[str, object]],
+    *,
+    course_label: str,
+    mode: str,
+    log_result: bool = True,
+) -> ChartMetrics:
+    total_notes = 0
+    hit_notes = 0
     total_longs = 0
-
-    for measure in measures:
-        if not isinstance(measure, dict):
-            continue
-        notes_list = measure.get('notes')
-        if not isinstance(notes_list, list):
-            notes_list = []
-            measure['notes'] = notes_list
-        total_hits += sum(1 for note in notes_list if isinstance(note, dict))
-
-        longs_list = measure.get('longs')
-        if isinstance(longs_list, list):
-            for long_note in longs_list:
-                if not isinstance(long_note, dict):
-                    continue
-                try:
-                    int(long_note.get('at'))
-                except (TypeError, ValueError):
-                    continue
-                total_longs += 1
-
-    if total_hits == 0 and total_longs > 0:
-        for measure in measures:
-            if not isinstance(measure, dict):
-                continue
-            notes_list = measure.get('notes')
-            if not isinstance(notes_list, list):
-                notes_list = []
-                measure['notes'] = notes_list
-            longs_list = measure.get('longs')
-            if not isinstance(longs_list, list):
-                continue
-            for long_note in longs_list:
-                if not isinstance(long_note, dict):
-                    continue
-                at_value = long_note.get('at')
-                try:
-                    at_int = int(at_value)
-                except (TypeError, ValueError):
-                    continue
-                notes_list.append({'type': 'don', 'at': at_int, 'synthetic': True})
-        total_hits = total_longs
-
+    existing_synthetic = 0
     latest_note_at = 0
     latest_long_at = 0
-    for measure in measures:
-        if not isinstance(measure, dict):
-            continue
+    measures_list = [measure for measure in measures if isinstance(measure, dict)]
+
+    for measure in measures_list:
         notes_list = measure.get('notes')
         if isinstance(notes_list, list):
             for note in notes_list:
@@ -298,14 +245,24 @@ def _finalise_chart_metrics(
                     at_int = int(at_value)
                 except (TypeError, ValueError):
                     continue
-                if at_int > latest_note_at:
-                    latest_note_at = at_int
+                latest_note_at = max(latest_note_at, at_int)
+                total_notes += 1
+                if note.get('synthetic'):
+                    existing_synthetic += 1
+                else:
+                    hit_notes += 1
         longs_list = measure.get('longs')
         if isinstance(longs_list, list):
             for long_note in longs_list:
                 if not isinstance(long_note, dict):
                     continue
-                end_value = long_note.get('end_at', long_note.get('at'))
+                at_value = long_note.get('at')
+                try:
+                    at_int = int(at_value)
+                except (TypeError, ValueError):
+                    continue
+                total_longs += 1
+                end_value = long_note.get('end_at')
                 candidate = None
                 try:
                     if end_value is not None:
@@ -313,17 +270,60 @@ def _finalise_chart_metrics(
                 except (TypeError, ValueError):
                     candidate = None
                 if candidate is None:
-                    at_value = long_note.get('at')
-                    try:
-                        candidate = int(at_value)
-                    except (TypeError, ValueError):
-                        continue
-                if candidate > latest_long_at:
-                    latest_long_at = candidate
+                    candidate = at_int
+                latest_long_at = max(latest_long_at, candidate)
+
+    synthetic_injected = 0
+    if hit_notes == 0 and total_longs > 0 and existing_synthetic == 0:
+        for measure in measures_list:
+            longs_list = measure.get('longs')
+            if not isinstance(longs_list, list) or not longs_list:
+                continue
+            notes_list = measure.get('notes')
+            if not isinstance(notes_list, list):
+                notes_list = []
+                measure['notes'] = notes_list
+            for long_note in longs_list:
+                if not isinstance(long_note, dict):
+                    continue
+                at_value = long_note.get('at')
+                try:
+                    at_int = int(at_value)
+                except (TypeError, ValueError):
+                    continue
+                notes_list.append({'type': 'don', 'at': at_int, 'synthetic': True})
+                synthetic_injected += 1
+                latest_note_at = max(latest_note_at, at_int)
+        total_notes += synthetic_injected
 
     duration_ms = max(latest_note_at, latest_long_at)
-    LOGGER.info("synth-notes: injected=%d", total_hits)
-    return total_hits, duration_ms
+    metrics = ChartMetrics(
+        total_notes=total_notes,
+        hit_notes=hit_notes,
+        total_longs=total_longs,
+        duration_ms=duration_ms,
+        measures=len(measures_list),
+        synthetic_injected=synthetic_injected,
+    )
+
+    if log_result:
+        LOGGER.info(
+            "end-notes(%s): course=%s measures=%d notes=%d longs=%d duration_ms=%d",
+            mode,
+            course_label,
+            metrics.measures,
+            metrics.total_notes,
+            metrics.total_longs,
+            metrics.duration_ms,
+        )
+        if metrics.synthetic_injected:
+            LOGGER.info(
+                "synth-notes: course=%s injected=%d",
+                course_label,
+                metrics.synthetic_injected,
+            )
+
+    return metrics
 
 
 def _normalised_requires_synthetic_notes(
@@ -504,6 +504,12 @@ class CourseInfo:
         return self.total_notes
 
 
+def _course_log_label(course: CourseInfo) -> str:
+    if isinstance(course.display_course, str) and course.display_course:
+        return course.display_course
+    return course.canonical
+
+
 def _course_requires_synthetic_notes(course: CourseInfo) -> bool:
     return _normalised_requires_synthetic_notes(course.normalised, mode=course.mode)
 
@@ -554,6 +560,16 @@ class ChartRecord:
 
 
 @dataclass
+class ChartMetrics:
+    total_notes: int
+    hit_notes: int
+    total_longs: int
+    duration_ms: int
+    measures: int
+    synthetic_injected: int = 0
+
+
+@dataclass
 class _CourseParseState:
     measure_index: int = 0
     segments: List[Dict[str, object]] = field(default_factory=list)
@@ -577,6 +593,7 @@ class _CourseParseState:
     parse_failed: bool = False
     unknown_tokens_logged: Set[str] = field(default_factory=set)
     active_long: Optional[Dict[str, object]] = None
+    final_metrics: Optional[ChartMetrics] = None
 
 
 def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -1079,62 +1096,16 @@ def _parse_tja_strict(
                 _resolve_long_end(entry_ref, last_tick)
                 state.active_long = None
             measures = state.chart_measures
-            needs_synthetic = _course_requires_synthetic_notes(current_notes_course)
-            has_real_hits = False
-            for measure in measures:
-                if not isinstance(measure, dict):
-                    continue
-                notes_list = measure.get('notes')
-                if isinstance(notes_list, list):
-                    for note in notes_list:
-                        if isinstance(note, dict) and not note.get('synthetic'):
-                            has_real_hits = True
-                            break
-                if has_real_hits:
-                    break
-            if needs_synthetic and not has_real_hits:
-                for measure in measures:
-                    if not isinstance(measure, dict):
-                        continue
-                    longs_list = measure.get('longs')
-                    if not isinstance(longs_list, list) or not longs_list:
-                        continue
-                    notes_list = measure.get('notes')
-                    if not isinstance(notes_list, list):
-                        notes_list = []
-                        measure['notes'] = notes_list
-                    if notes_list:
-                        continue
-                    synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
-                    if synthetic_notes:
-                        notes_list.extend(synthetic_notes)
 
-            total_notes_count = 0
-            hit_notes_count = 0
-            total_longs = 0
-            for measure in measures:
-                if not isinstance(measure, dict):
-                    continue
-                notes_list = measure.get('notes')
-                if isinstance(notes_list, list):
-                    total_notes_count += len(notes_list)
-                    for note in notes_list:
-                        if isinstance(note, dict) and not note.get('synthetic'):
-                            hit_notes_count += 1
-                longs_list = measure.get('longs')
-                if isinstance(longs_list, list):
-                    total_longs += sum(1 for long_note in longs_list if isinstance(long_note, dict))
-            current_notes_course.total_notes = total_notes_count
-            current_notes_course.hit_notes = hit_notes_count
-            current_notes_course.measures = len(measures)
-            LOGGER.info(
-                "end-notes(strict): course=%s file=%s measures=%d notes=%d longs=%d",
-                current_notes_course.canonical,
-                path,
-                current_notes_course.measures,
-                current_notes_course.total_notes,
-                total_longs,
+            metrics = _finalise_chart_metrics(
+                measures,
+                course_label=_course_log_label(current_notes_course),
+                mode='strict',
             )
+            current_notes_course.total_notes = metrics.total_notes
+            current_notes_course.hit_notes = metrics.hit_notes
+            current_notes_course.measures = metrics.measures
+            state.final_metrics = metrics
             state.block_line_count = 0
             state.block_note_count = 0
             if current_notes_course.mode == "dojo":
@@ -1227,8 +1198,6 @@ def _parse_tja_strict(
                 canonical, token, issue = _resolve_course(raw_course_value, path=path)
                 if canonical_override:
                     canonical = canonical_override
-                    if issue == "mapped-course":
-                        issue = None
                 if canonical == "Unknown":
                     if issue == "unknown_course_numeric":
                         LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
@@ -1616,16 +1585,27 @@ def _parse_tja_strict(
         else:
             measures_payload = []
 
-        total_hits, duration_ms = _finalise_chart_metrics(measures_payload)
-        course.total_notes = total_hits
+        metrics = None
+        if state and state.final_metrics:
+            metrics = state.final_metrics
+        else:
+            metrics = _finalise_chart_metrics(
+                measures_payload,
+                course_label=_course_log_label(course),
+                mode='strict',
+                log_result=False,
+            )
+        course.total_notes = metrics.total_notes
+        course.hit_notes = metrics.hit_notes
+        course.measures = metrics.measures
         course.chart_data = {
             'course': course.canonical,
-            'total_notes': total_hits,
+            'total_notes': metrics.total_notes,
             'measures': measures_payload,
-            'duration_ms': duration_ms,
+            'duration_ms': metrics.duration_ms,
         }
 
-    parsed.charts = {course.canonical: course for course in parsed.courses}
+        parsed.charts = {course.canonical: course for course in parsed.courses}
 
     return parsed
 
@@ -1656,19 +1636,9 @@ def _parse_tja_lenient(
     active_long: Optional[Dict[str, object]] = None
     best_chart_measures: List[Dict[str, object]] = []
     best_total_notes = -1
+    best_metrics: Optional[ChartMetrics] = None
     best_course_token = course_token
     best_course_raw = course_raw
-    inject_synthetic = False
-
-    def _refresh_inject_flag() -> None:
-        nonlocal inject_synthetic
-        reference = course_raw if course_raw is not None else course_token
-        normalised_value = _normalise_course_token(reference) if reference else None
-        mode_value = "dojo" if course_token.casefold() == "dojo" else None
-        inject_synthetic = _normalised_requires_synthetic_notes(normalised_value, mode=mode_value)
-
-    _refresh_inject_flag()
-
     def _parse_float(value: str) -> Optional[float]:
         try:
             return float(value)
@@ -1837,7 +1807,6 @@ def _parse_tja_lenient(
                 course_raw = raw_value or course_raw
                 mapped = {"TOWER": "oni", "DAN": "oni"}.get(raw_value.upper())
                 course_token = mapped or (raw_value.casefold() or course_token)
-                _refresh_inject_flag()
                 continue
             if ":" in stripped and not stripped.startswith("#"):
                 key, value = stripped.split(":", 1)
@@ -1873,7 +1842,6 @@ def _parse_tja_lenient(
                 path,
                 line_number,
             )
-            _refresh_inject_flag()
             in_notes = True
             measure_tokens.clear()
             chart_measures.clear()
@@ -1894,60 +1862,17 @@ def _parse_tja_lenient(
                 last_tick = int(round(measure_start_time_ms))
                 _resolve_long_end(entry_ref, last_tick)
                 active_long = None
-            has_real_hits = False
-            if inject_synthetic:
-                for measure in chart_measures:
-                    if not isinstance(measure, dict):
-                        continue
-                    notes_list = measure.get('notes')
-                    if isinstance(notes_list, list):
-                        for note in notes_list:
-                            if isinstance(note, dict) and not note.get('synthetic'):
-                                has_real_hits = True
-                                break
-                    if has_real_hits:
-                        break
-                if not has_real_hits:
-                    for measure in chart_measures:
-                        if not isinstance(measure, dict):
-                            continue
-                        longs_list = measure.get('longs')
-                        if not isinstance(longs_list, list) or not longs_list:
-                            continue
-                        notes_list = measure.get('notes')
-                        if not isinstance(notes_list, list):
-                            notes_list = []
-                            measure['notes'] = notes_list
-                        if notes_list:
-                            continue
-                        synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
-                        if synthetic_notes:
-                            notes_list.extend(synthetic_notes)
-            notes_count = 0
-            longs_count = 0
-            for measure in chart_measures:
-                if not isinstance(measure, dict):
-                    continue
-                notes_list = measure.get('notes')
-                if isinstance(notes_list, list):
-                    notes_count += len(notes_list)
-                longs_list = measure.get('longs')
-                if isinstance(longs_list, list):
-                    longs_count += sum(1 for long_note in longs_list if isinstance(long_note, dict))
-            total_notes = notes_count
-            LOGGER.info(
-                "end-notes(lenient): course=%s file=%s measures=%d notes=%d longs=%d",
-                course_token,
-                path,
-                len(chart_measures),
-                total_notes,
-                longs_count,
+            metrics = _finalise_chart_metrics(
+                chart_measures,
+                course_label=course_token,
+                mode='lenient',
             )
-            if total_notes > best_total_notes:
-                best_total_notes = total_notes
+            if metrics.total_notes > best_total_notes:
+                best_total_notes = metrics.total_notes
                 best_chart_measures = _snapshot_measures(chart_measures)
                 best_course_token = course_token
                 best_course_raw = course_raw
+                best_metrics = metrics
             in_notes = False
             measure_tokens = []
             chart_measures = []
@@ -2014,79 +1939,37 @@ def _parse_tja_lenient(
             last_tick = int(round(measure_start_time_ms))
             _resolve_long_end(entry_ref, last_tick)
             active_long = None
-        has_real_hits = False
-        if inject_synthetic:
-            for measure in chart_measures:
-                if not isinstance(measure, dict):
-                    continue
-                notes_list = measure.get('notes')
-                if isinstance(notes_list, list):
-                    for note in notes_list:
-                        if isinstance(note, dict) and not note.get('synthetic'):
-                            has_real_hits = True
-                            break
-                if has_real_hits:
-                    break
-            if not has_real_hits:
-                for measure in chart_measures:
-                    if not isinstance(measure, dict):
-                        continue
-                    longs_list = measure.get('longs')
-                    if not isinstance(longs_list, list) or not longs_list:
-                        continue
-                    notes_list = measure.get('notes')
-                    if not isinstance(notes_list, list):
-                        notes_list = []
-                        measure['notes'] = notes_list
-                    if notes_list:
-                        continue
-                    synthetic_notes = _build_synthetic_notes_from_longs(longs_list)
-                    if synthetic_notes:
-                        notes_list.extend(synthetic_notes)
-        notes_count = 0
-        longs_count = 0
-        for measure in chart_measures:
-            if not isinstance(measure, dict):
-                continue
-            notes_list = measure.get('notes')
-            if isinstance(notes_list, list):
-                notes_count += len(notes_list)
-            longs_list = measure.get('longs')
-            if isinstance(longs_list, list):
-                longs_count += sum(1 for long_note in longs_list if isinstance(long_note, dict))
-        total_notes = notes_count
-        LOGGER.info(
-            "end-notes(lenient): course=%s file=%s measures=%d notes=%d longs=%d",
-            course_token,
-            path,
-            len(chart_measures),
-            total_notes,
-            longs_count,
+        metrics = _finalise_chart_metrics(
+            chart_measures,
+            course_label=course_token,
+            mode='lenient',
         )
-        if total_notes > best_total_notes:
-            best_total_notes = total_notes
+        if metrics.total_notes > best_total_notes:
+            best_total_notes = metrics.total_notes
             best_chart_measures = _snapshot_measures(chart_measures)
             best_course_token = course_token
             best_course_raw = course_raw
+            best_metrics = metrics
 
     if best_total_notes >= 0:
         chart_measures = best_chart_measures
         total_notes = best_total_notes
         course_token = best_course_token
         course_raw = best_course_raw
+        metrics = best_metrics
+    else:
+        metrics = None
 
-    total_hits, duration_ms = _finalise_chart_metrics(chart_measures)
+    if metrics is None:
+        metrics = _finalise_chart_metrics(
+            chart_measures,
+            course_label=course_token,
+            mode='lenient',
+            log_result=False,
+        )
 
-    hit_total = 0
-    for measure in chart_measures:
-        if not isinstance(measure, dict):
-            continue
-        notes_list = measure.get('notes')
-        if isinstance(notes_list, list):
-            for note in notes_list:
-                if isinstance(note, dict) and not note.get('synthetic'):
-                    hit_total += 1
-    total_notes = total_hits
+    total_notes = metrics.total_notes
+    hit_total = metrics.hit_notes
 
     canonical = course_token.casefold() or "oni"
     canonical = COURSE_LEGACY_MAP.get(canonical, canonical)
@@ -2100,12 +1983,12 @@ def _parse_tja_lenient(
     )
     course_info.total_notes = total_notes
     course_info.hit_notes = hit_total
-    course_info.measures = len(chart_measures)
+    course_info.measures = metrics.measures
     course_info.chart_data = {
         'course': canonical,
         'total_notes': total_notes,
         'measures': chart_measures,
-        'duration_ms': duration_ms,
+        'duration_ms': metrics.duration_ms,
     }
     course_info.add_issue("lenient-fallback")
     parsed.courses.append(course_info)
@@ -2211,6 +2094,16 @@ def parse_tja(path: Path) -> ParsedTJA:
     chart_data_copy['total_notes'] = target_course.total_notes
     chart_data_copy['course'] = target_course.canonical
     target_course.chart_data = chart_data_copy
+    fallback_metrics = _finalise_chart_metrics(
+        chart_data_copy.get('measures', []),
+        course_label=_course_log_label(target_course),
+        mode='lenient-fallback',
+    )
+    target_course.total_notes = fallback_metrics.total_notes
+    target_course.hit_notes = fallback_metrics.hit_notes
+    target_course.measures = fallback_metrics.measures
+    target_course.chart_data['total_notes'] = fallback_metrics.total_notes
+    target_course.chart_data['duration_ms'] = fallback_metrics.duration_ms
     target_course.add_issue("lenient-fallback")
     parsed.charts[target_course.canonical] = target_course
 
