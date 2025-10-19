@@ -160,7 +160,15 @@ try:
 except Exception:
     app.logger.debug('Could not ensure compound group/stable index')
 try:
-    db.songs.create_index('scanner_stable_id', unique=True, name='songs_scanner_stable_unique')
+    db.songs.drop_index('songs_scanner_stable_unique')
+except Exception:
+    pass
+try:
+    db.songs.create_index(
+        'scanner_stable_id',
+        unique=True,
+        name='songs_scanner_stable_id_unique',
+    )
 except Exception:
     app.logger.debug('Could not ensure scanner stable id index')
 try:

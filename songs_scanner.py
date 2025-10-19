@@ -1206,9 +1206,13 @@ class SongScanner:
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure compound unique index for songs group key')
         try:
+            self.db.songs.drop_index('songs_scanner_stable_unique')
+        except Exception:  # pragma: no cover - tolerate legacy index absence
+            pass
+        try:
             self.db.songs.create_index(
                 'scanner_stable_id',
-                name='songs_scanner_stable_unique',
+                name='songs_scanner_stable_id_unique',
                 unique=True,
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
