@@ -1335,30 +1335,38 @@ LEVEL:7
         document = scanner._build_song_document(key, [record])
         charts_payload = list(document['charts'])
 
-        original = db.songs.find_one_and_update
-        call_count = {'value': 0}
+        original_update = db.songs.update_one
+        original_find_and_update = db.songs.find_one_and_update
+        call_state = {'update_duplicates': 0, 'retry_invocations': 0}
 
         class FakeDuplicate(Exception):
             pass
 
-        def flaky(*args, **kwargs):
-            if call_count['value'] == 0:
-                call_count['value'] += 1
+        def flaky_update(filter_, update, upsert=False, **kwargs):
+            if upsert and call_state['update_duplicates'] == 0:
+                call_state['update_duplicates'] += 1
                 raise FakeDuplicate()
-            return original(*args, **kwargs)
+            return original_update(filter_, update, upsert=upsert, **kwargs)
+
+        def tracking_find_one_and_update(*args, **kwargs):
+            call_state['retry_invocations'] += 1
+            return original_find_and_update(*args, **kwargs)
 
         summary = {'inserted': 0, 'updated': 0, 'errors': 0}
 
         with mock.patch('songs_scanner.DuplicateKeyError', FakeDuplicate):
-            db.songs.find_one_and_update = flaky
+            db.songs.update_one = flaky_update
+            db.songs.find_one_and_update = tracking_find_one_and_update
             try:
                 song_id = scanner._upsert_song_document(key, [record], document, charts_payload, set(), summary)
             finally:
-                db.songs.find_one_and_update = original
+                db.songs.update_one = original_update
+                db.songs.find_one_and_update = original_find_and_update
 
         self.assertIsNotNone(song_id)
         self.assertEqual(summary['errors'], 0)
         self.assertEqual(len(db.songs._docs), 1)
+        self.assertGreaterEqual(call_state['retry_invocations'], 1)
 
     def test_repeat_scan_keeps_song_count(self):
         tmp_dir = Path(self._tmp_dir())

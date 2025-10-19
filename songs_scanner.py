@@ -1177,14 +1177,14 @@ class SongScanner:
             pass
         try:
             self.db.songs.drop_index('songs_id_unique')
-        except Exception:
+        except Exception:  # pragma: no cover - tolerate missing index
             pass
         try:
             self.db.songs.create_index(
                 'id',
                 name='songs_id_unique',
                 unique=True,
-                partialFilterExpression={'id': {'$exists': True, '$ne': None}},
+                partialFilterExpression={'id': {'$type': 'string'}},
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure partial unique index for songs.id')
@@ -1666,6 +1666,22 @@ class SongScanner:
         final_mode = 'unknown'
         mode_detail: Optional[str] = None
         final_result = None
+        result_doc_override: Optional[Dict[str, object]] = None
+
+        class _SyntheticUpdateResult:
+            __slots__ = ('matched_count', 'modified_count', 'upserted_id', 'acknowledged')
+
+            def __init__(
+                self,
+                *,
+                matched_count: int = 0,
+                modified_count: int = 0,
+                upserted_id: Optional[int] = None,
+            ) -> None:
+                self.matched_count = matched_count
+                self.modified_count = modified_count
+                self.upserted_id = upserted_id
+                self.acknowledged = True
 
         def _log_duplicate(exc: Exception, attempt: int, phase: str) -> None:
             details: Dict[str, object] = {}
@@ -1685,7 +1701,16 @@ class SongScanner:
             }
             LOGGER.error('Duplicate key during song %s update: %s', phase, payload)
 
-        def _execute_update(filter_doc: Dict[str, object], update_doc: Dict[str, object], *, upsert: bool, phase: str):
+        def _execute_update(
+            filter_doc: Dict[str, object],
+            update_doc: Dict[str, object],
+            *,
+            upsert: bool,
+            phase: str,
+            duplicate_retry_filter: Optional[Dict[str, object]] = None,
+            duplicate_retry_update: Optional[Dict[str, object]] = None,
+        ):
+            nonlocal result_doc_override
             for attempt in range(3):
                 try:
                     return self.db.songs.update_one(filter_doc, update_doc, upsert=upsert)
@@ -1693,6 +1718,20 @@ class SongScanner:
                     if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
                         self._metrics.increment('duplicate_key_retries_total')
                         _log_duplicate(exc, attempt, phase)
+                        if duplicate_retry_filter is not None:
+                            try:
+                                retry_doc = self.db.songs.find_one_and_update(
+                                    duplicate_retry_filter,
+                                    duplicate_retry_update or update_doc,
+                                    upsert=False,
+                                    return_document=getattr(ReturnDocument, 'AFTER', 1),
+                                )
+                            except Exception:  # pragma: no cover - tolerate retry lookup issues
+                                retry_doc = None
+                            else:
+                                if isinstance(retry_doc, dict):
+                                    result_doc_override = retry_doc
+                                    return _SyntheticUpdateResult(matched_count=1, modified_count=1)
                         jitter = random.random() * 0.025
                         time.sleep(0.05 * (attempt + 1) + jitter)
                         continue
@@ -1718,7 +1757,14 @@ class SongScanner:
                         final_mode = 'legacy'
                         mode_detail = 'legacy-group'
                     else:
-                        final_result = _execute_update(stable_group_filter, update_insert, upsert=True, phase='insert')
+                        final_result = _execute_update(
+                            stable_group_filter,
+                            update_insert,
+                            upsert=True,
+                            phase='insert',
+                            duplicate_retry_filter=stable_group_filter,
+                            duplicate_retry_update=update_existing,
+                        )
                         if final_result is None:
                             LOGGER.warning("Failed to upsert aggregated song for %s", key)
                             summary['errors'] += 1
@@ -1732,11 +1778,13 @@ class SongScanner:
                         else:
                             final_mode = 'insert'
                             mode_detail = 'stable-group'
-
-            try:
-                result_doc = self.db.songs.find_one({'scanner_stable_id': stable_song_id})
-            except Exception:  # pragma: no cover - tolerate lookup issues
-                result_doc = None
+            if result_doc_override is not None:
+                result_doc = result_doc_override
+            else:
+                try:
+                    result_doc = self.db.songs.find_one({'scanner_stable_id': stable_song_id})
+                except Exception:  # pragma: no cover - tolerate lookup issues
+                    result_doc = None
 
         if not isinstance(result_doc, dict):
             LOGGER.warning("Failed to load song document for %s after upsert", key)
@@ -1751,7 +1799,7 @@ class SongScanner:
         elif final_mode == 'insert':
             self._metrics.increment('songs_inserted_total')
 
-        LOGGER.debug(
+        LOGGER.info(
             'songs upsert result',
             {
                 'mode': final_mode,

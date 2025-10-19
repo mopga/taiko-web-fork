@@ -140,7 +140,7 @@ db.songs.create_index(
     'id',
     unique=True,
     name='songs_id_unique',
-    partialFilterExpression={'id': {'$exists': True, '$ne': None}},
+    partialFilterExpression={'id': {'$type': 'string'}},
 )
 try:
     db.songs.drop_index('group_key_1')
