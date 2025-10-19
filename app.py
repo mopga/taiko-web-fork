@@ -132,7 +132,40 @@ try:
     db.songs.drop_index('id_1')
 except Exception:
     pass
-db.songs.create_index('id', unique=True, name='songs_id_unique', partialFilterExpression={'id': {'$type': 'number'}})
+try:
+    db.songs.drop_index('songs_id_unique')
+except Exception:
+    pass
+db.songs.create_index(
+    'id',
+    unique=True,
+    name='songs_id_unique',
+    partialFilterExpression={'id': {'$exists': True, '$ne': None}},
+)
+try:
+    db.songs.drop_index('group_key_1')
+except Exception:
+    pass
+try:
+    db.songs.drop_index('songs_group_key_unique')
+except Exception:
+    pass
+try:
+    db.songs.create_index(
+        [('group_key', 1), ('scanner_stable_id', 1)],
+        unique=True,
+        name='songs_group_key_scanner_unique',
+    )
+except Exception:
+    app.logger.debug('Could not ensure compound group/stable index')
+try:
+    db.songs.create_index('scanner_stable_id', unique=True, name='songs_scanner_stable_unique')
+except Exception:
+    app.logger.debug('Could not ensure scanner stable id index')
+try:
+    db.songs.create_index('group_key', name='songs_group_key_lookup')
+except Exception:
+    app.logger.debug('Could not ensure group_key lookup index')
 try:
     db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
 except Exception:
