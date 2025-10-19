@@ -151,11 +151,13 @@ try:
     db.songs.drop_index('songs_group_key_unique')
 except Exception:
     pass
+scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
 try:
     db.songs.create_index(
         [('group_key', 1), ('scanner_stable_id', 1)],
         unique=True,
         name='songs_group_key_scanner_unique',
+        partialFilterExpression=scanner_stable_string_partial_filter,
     )
 except Exception:
     app.logger.debug('Could not ensure compound group/stable index')
@@ -168,6 +170,7 @@ try:
         'scanner_stable_id',
         unique=True,
         name='songs_scanner_stable_id_unique',
+        partialFilterExpression=scanner_stable_string_partial_filter,
     )
 except Exception:
     app.logger.debug('Could not ensure scanner stable id index')

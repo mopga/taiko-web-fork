@@ -1197,11 +1197,13 @@ class SongScanner:
             self.db.songs.drop_index('songs_group_key_unique')
         except Exception:
             pass
+        scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
         try:
             self.db.songs.create_index(
                 [('group_key', 1), ('scanner_stable_id', 1)],
                 name='songs_group_key_scanner_unique',
                 unique=True,
+                partialFilterExpression=scanner_stable_string_partial_filter,
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure compound unique index for songs group key')
@@ -1214,6 +1216,7 @@ class SongScanner:
                 'scanner_stable_id',
                 name='songs_scanner_stable_id_unique',
                 unique=True,
+                partialFilterExpression=scanner_stable_string_partial_filter,
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure unique index for scanner stable id')
