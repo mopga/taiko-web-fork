@@ -128,7 +128,11 @@ sess.init_app(app)
 db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
 db = client[db_name]
 db.users.create_index('username', unique=True)
-db.songs.create_index('id', unique=True)
+try:
+    db.songs.drop_index('id_1')
+except Exception:
+    pass
+db.songs.create_index('id', unique=True, name='songs_id_unique', partialFilterExpression={'id': {'$type': 'number'}})
 try:
     db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
 except Exception:

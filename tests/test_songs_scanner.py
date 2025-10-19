@@ -22,6 +22,9 @@ class _MemoryCollection:
     def create_index(self, *args, **kwargs):
         return None
 
+    def drop_index(self, *args, **kwargs):
+        return None
+
     def _matches(self, doc, filter_):
         if not filter_:
             return True
@@ -36,6 +39,15 @@ class _MemoryCollection:
                     value = self._resolve_key(doc, key)
                 else:
                     value = self._resolve_key(doc, key)
+                if '$type' in expected:
+                    expected_type = expected['$type']
+                    if expected_type == 'string':
+                        if not isinstance(value, str):
+                            return False
+                    elif expected_type == 'number':
+                        if not isinstance(value, (int, float)):
+                            return False
+                    continue
                 if '$ne' in expected and value == expected['$ne']:
                     return False
                 if '$in' in expected and value not in expected['$in']:
@@ -960,6 +972,35 @@ LEVEL:7
         charts = db.songs._docs[0].get('charts', [])
         self.assertEqual(len(charts), 1)
         self.assertEqual(db.songs._docs[0]['group_key'], key)
+        self.assertIn('scanner_stable_id', db.songs._docs[0])
+        self.assertTrue(db.songs._docs[0]['scanner_stable_id'])
+
+    def test_build_song_document_has_stable_id(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=9,
+            branch=False,
+            valid=True,
+            issues=[],
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+
+        doc_a = scanner._build_song_document(key, [record])
+        doc_b = scanner._build_song_document(key, [record])
+
+        self.assertIn('scanner_stable_id', doc_a)
+        self.assertTrue(doc_a['scanner_stable_id'])
+        self.assertEqual(doc_a['scanner_stable_id'], doc_b['scanner_stable_id'])
 
     def test_get_next_song_id_monotonic(self):
         tmp_dir = Path(self._tmp_dir())

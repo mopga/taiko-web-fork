@@ -13,7 +13,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Callable
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Callable
 from urllib.parse import unquote, urlparse
 import unicodedata
 
@@ -213,6 +213,46 @@ def _stable_path_hash(record: "TjaImportRecord") -> str:
     if not combined:
         combined = record.relative_path or record.relative_dir or record.tja_hash or record.fingerprint or "missing"
     return md5_text(combined)
+
+
+def _normalise_song_fs_path(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    normalised = path.replace("\\", "/").strip()
+    normalised = re.sub(r"/+", "/", normalised)
+    return normalised.casefold()
+
+
+def _normalise_song_id(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "null":
+        return None
+    return text
+
+
+def _make_deterministic_song_id(parts: Sequence[str]) -> str:
+    payload = "|".join(parts)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _select_primary_chart_entry(charts: Sequence[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not charts:
+        return None
+    preference = ["oni", "ura", "hard", "normal", "easy"]
+
+    def _rank(chart: Dict[str, object]) -> Tuple[int, str, str]:
+        course = str(chart.get('canonical_course') or chart.get('course') or "")
+        lowered = course.casefold()
+        try:
+            index = preference.index(lowered)
+        except ValueError:
+            index = len(preference)
+        path = str(chart.get('tja_path') or "")
+        return (index, lowered, path)
+
+    return min(charts, key=_rank)
 
 
 def compute_group_key(record: "TjaImportRecord") -> str:
@@ -1131,6 +1171,19 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
         try:
+            self.db.songs.drop_index('id_1')
+        except Exception:  # pragma: no cover - tolerate legacy index absence
+            pass
+        try:
+            self.db.songs.create_index(
+                'id',
+                name='songs_id_unique',
+                unique=True,
+                partialFilterExpression={'id': {'$type': 'number'}},
+            )
+        except Exception:  # pragma: no cover - tolerate missing create_index
+            LOGGER.debug('Failed to ensure partial unique index for songs.id')
+        try:
             self.db.songs.create_index(
                 'group_key',
                 unique=True,
@@ -1562,19 +1615,63 @@ class SongScanner:
 
         result_doc: Optional[Dict[str, object]] = None
 
+        stable_song_id = None
+        if isinstance(document.get('scanner_stable_id'), str):
+            stable_song_id = document['scanner_stable_id'] or None
+        primary_course = None
+        if isinstance(document.get('scanner_primary_course'), str):
+            primary_course = document['scanner_primary_course'] or None
+
+        if stable_song_id:
+            song_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
+            if key:
+                song_filter['group_key'] = key
+        else:
+            song_filter = {'group_key': key}
+            title = document.get('title')
+            if isinstance(title, str) and title:
+                song_filter['title'] = title
+            if primary_course:
+                song_filter['scanner_primary_course'] = primary_course
+
         with self._group_key_lock(key):
             for attempt in range(3):
                 try:
                     result_doc = self.db.songs.find_one_and_update(
-                        {'group_key': key},
+                        song_filter,
                         {'$setOnInsert': insert_document},
                         upsert=True,
                         return_document=ReturnDocument.AFTER,
                     )
+                    if not isinstance(result_doc, dict):
+                        LOGGER.error(
+                            'songs upsert returned invalid result',
+                            {'filter': song_filter, 'result': result_doc, 'title': document.get('title')},
+                        )
+                        result_doc = None
+                    else:
+                        LOGGER.debug(
+                            'songs upsert result',
+                            {
+                                'filter': song_filter,
+                                'song_id': result_doc.get('id'),
+                                'stable_id': result_doc.get('scanner_stable_id'),
+                                'group_key': key,
+                            },
+                        )
                     break
                 except Exception as exc:  # pragma: no cover - defensive around DB driver
                     if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
                         self._metrics.increment('duplicate_key_retries_total')
+                        LOGGER.error(
+                            'Duplicate key during song upsert',
+                            {
+                                'group_key': key,
+                                'stable_id': stable_song_id,
+                                'title': document.get('title'),
+                                'attempt': attempt + 1,
+                            },
+                        )
                         jitter = random.random() * 0.025
                         time.sleep(0.05 * (attempt + 1) + jitter)
                         continue
@@ -1587,7 +1684,12 @@ class SongScanner:
 
         self._metrics.increment('songs_upserted_total')
 
-        song_filter: Dict[str, object] = {'group_key': key}
+        if stable_song_id:
+            song_filter = {'scanner_stable_id': stable_song_id}
+            if key:
+                song_filter['group_key'] = key
+        else:
+            song_filter = {'group_key': key}
         if isinstance(result_doc, dict):
             if result_doc.get('_id') is not None:
                 song_filter = {'_id': result_doc['_id']}
@@ -1809,6 +1911,9 @@ class SongScanner:
 
         sorted_records = sorted(records, key=lambda rec: rec.relative_path)
 
+        representative_paths = [record.relative_path for record in sorted_records if record.relative_path]
+        primary_path = representative_paths[0] if representative_paths else sorted_records[0].relative_path
+
         chart_by_key: Dict[Tuple[str, Optional[str]], Dict[str, object]] = {}
         duplicate_courses: Set[str] = set()
 
@@ -1942,6 +2047,30 @@ class SongScanner:
 
         enabled = bool(audio_url)
 
+        primary_chart = _select_primary_chart_entry(charts_payload)
+        primary_course = ""
+        primary_difficulty = ""
+        if primary_chart:
+            course_value = primary_chart.get('canonical_course') or primary_chart.get('course') or ""
+            primary_course = str(course_value).casefold()
+            level_value = primary_chart.get('level')
+            if level_value is None:
+                level_value = primary_chart.get('stars')
+            if level_value is None:
+                level_value = ""
+            primary_difficulty = str(level_value)
+
+        source_song_id = _normalise_song_id(base.song_id)
+        fs_path_token = _normalise_song_fs_path(primary_path)
+        stable_song_id = source_song_id or _make_deterministic_song_id(
+            [
+                fs_path_token,
+                base.title or "",
+                primary_course,
+                primary_difficulty,
+            ]
+        )
+
         document = {
             'title': base.title,
             'titleJa': base.title_ja,
@@ -1976,9 +2105,14 @@ class SongScanner:
             'titleNormalized': base.normalized_title,
             'group_key': key,
             'genre': base.genre,
+            'scanner_stable_id': stable_song_id,
+            'scanner_primary_course': primary_course,
+            'scanner_primary_difficulty': primary_difficulty,
         }
         if audio_hash is not None:
             document['audioHash'] = audio_hash
+        if source_song_id is not None:
+            document['scanner_source_song_id'] = source_song_id
         return document
 
     def _current_song_id_ceiling(self, *, include_counter: bool = True) -> int:
