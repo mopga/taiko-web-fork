@@ -647,7 +647,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertFalse(parsed.has_dojo_course)
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
-        self.assertEqual(course.mode, "standard")
+        self.assertEqual(course.mode, "dan")
+        self.assertEqual(course.display_course, "dan")
         self.assertEqual(course.canonical, "oni")
         self.assertIn("mapped-course", course.issues)
         self.assertEqual(course.total_notes, 6)
@@ -675,7 +676,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
         self.assertEqual(course.canonical, "oni")
-        self.assertEqual(course.mode, "standard")
+        self.assertEqual(course.mode, "tower")
+        self.assertEqual(course.display_course, "tower")
         self.assertIn("mapped-course", course.issues)
         self.assertTrue(any('mapped-course(parser): TOWER→ONI' in message for message in logs.output))
 
@@ -701,7 +703,8 @@ class TestSongsScanner(unittest.TestCase):
         self.assertEqual(len(parsed.courses), 1)
         course = parsed.courses[0]
         self.assertEqual(course.canonical, "oni")
-        self.assertEqual(course.mode, "standard")
+        self.assertEqual(course.mode, "tower")
+        self.assertEqual(course.display_course, "tower")
         self.assertGreater(course.total_notes, 0)
         self.assertGreater(course.hit_notes, 0)
         self.assertIn("mapped-course", course.issues)
@@ -1083,7 +1086,7 @@ LEVEL:7
             parsed = parse_tja(tja_path)
 
         joined_logs = "\n".join(logs.output)
-        self.assertIn('end-notes(strict): course=oni', joined_logs)
+        self.assertIn('end-notes(strict): course=tower', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
         self.assertIn('synth-notes: injected=', joined_logs)
@@ -1331,7 +1334,7 @@ LEVEL:7
         charts = inserted['charts']
         self.assertEqual(len(charts), 1)
         chart = charts[0]
-        self.assertEqual(chart.get('mode'), 'standard')
+        self.assertEqual(chart.get('mode'), 'dan')
         self.assertIn('mapped-course', chart.get('issues', []))
         self.assertTrue(chart['valid'])
         paths = inserted.get('paths', {})
@@ -1372,7 +1375,7 @@ LEVEL:7
         chart = db.songs.inserted[0]['charts'][0]
         self.assertEqual(chart.get('course'), 'oni')
         self.assertEqual(chart.get('canonical_course'), 'oni')
-        self.assertEqual(chart.get('mode'), 'standard')
+        self.assertEqual(chart.get('mode'), 'dan')
         self.assertTrue(chart.get('valid'))
         self.assertIn('mapped-course', chart.get('issues', []))
 

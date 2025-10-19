@@ -862,6 +862,93 @@ def route_api_songs():
 
     return cache_wrap(flask.jsonify(songs), 60)
 
+
+def _normalise_course_tokens(chart):
+    tokens = set()
+    for key in ('course', 'canonical_course', 'display_course', 'raw_course'):
+        value = chart.get(key)
+        if isinstance(value, str) and value:
+            tokens.add(value.strip().casefold())
+    mode_value = chart.get('mode')
+    if isinstance(mode_value, str) and mode_value:
+        tokens.add(mode_value.strip().casefold())
+    return {token for token in tokens if token}
+
+
+@app.route(basedir + 'api/tower/chart')
+def route_api_tower_chart():
+    title = request.args.get('title', '').strip()
+    if not title:
+        return jsonify({'status': 'error', 'message': 'missing_title'}), 400
+    course_param = request.args.get('course', '').strip().casefold() or 'oni'
+
+    projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
+    song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
+    if song is None:
+        normalised_title = title.casefold()
+        song = db.songs.find_one({'titleNormalized': normalised_title}, projection)
+    if song is None:
+        return jsonify({'status': 'error', 'message': 'not_found'}), 404
+
+    charts = song.get('charts') if isinstance(song.get('charts'), list) else []
+    best_chart = None
+    best_priority = (float('inf'), float('inf'))
+
+    for index, chart in enumerate(charts):
+        if not isinstance(chart, dict):
+            continue
+        tokens = _normalise_course_tokens(chart)
+        if course_param not in tokens:
+            continue
+        mode_value = str(chart.get('mode') or '').strip().casefold()
+        priority = (0 if mode_value in {'tower', 'dan'} else 1, index)
+        if priority < best_priority:
+            best_priority = priority
+            best_chart = chart
+
+    if best_chart is None:
+        for chart in charts:
+            if not isinstance(chart, dict):
+                continue
+            mode_value = str(chart.get('mode') or '').strip().casefold()
+            if mode_value in {'tower', 'dan'}:
+                best_chart = chart
+                break
+
+    if best_chart is None:
+        return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
+
+    chart_data_source = best_chart.get('chart_data')
+    if isinstance(chart_data_source, dict):
+        chart_data = dict(chart_data_source)
+    else:
+        chart_data = {
+            'course': best_chart.get('canonical_course') or best_chart.get('course'),
+            'total_notes': best_chart.get('total_notes', 0),
+            'measures': best_chart.get('measures', []),
+        }
+    measures = chart_data.get('measures')
+    if not isinstance(measures, list):
+        measures = []
+        chart_data['measures'] = measures
+    duration_value = chart_data.get('duration_ms')
+    try:
+        duration_ms = int(duration_value)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    if duration_ms < 0:
+        duration_ms = 0
+    chart_data['duration_ms'] = duration_ms
+
+    response = {
+        'status': 'ok',
+        'title': song.get('title'),
+        'mode': best_chart.get('mode'),
+        'display_course': best_chart.get('display_course'),
+        'chart_data': chart_data,
+    }
+    return jsonify(response)
+
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)
 def route_api_categories():
