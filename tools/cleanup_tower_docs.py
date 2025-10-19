@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import importlib.util
 import logging
@@ -108,20 +109,33 @@ def _collect_dirty_groups(db: Database) -> Set[str]:
     return dirty_keys
 
 
-def _purge_documents(db: Database, group_keys: Set[str]) -> Set[str]:
+def _purge_documents(db: Database, group_keys: Set[str], *, apply: bool) -> Set[str]:
     if not group_keys:
         return set()
     state_collection = getattr(db, "song_scanner_state", None)
     removed_paths: Set[str] = set()
-    LOGGER.info("Deleting %d dirty song documents", len(group_keys))
-    db.songs.delete_many({"group_key": {"$in": list(group_keys)}})
+    if not apply:
+        LOGGER.info(
+            "Dry run: skipping deletion of %d dirty song documents", len(group_keys)
+        )
+    else:
+        LOGGER.info("Deleting %d dirty song documents", len(group_keys))
+        db.songs.delete_many({"group_key": {"$in": list(group_keys)}})
     if state_collection is not None:
-        cursor = state_collection.find({"group_key": {"$in": list(group_keys)}})
-        for doc in cursor:
+        state_docs = list(
+            state_collection.find({"group_key": {"$in": list(group_keys)}})
+        )
+        for doc in state_docs:
             path_value = doc.get("tja_path")
             if isinstance(path_value, str) and path_value:
                 removed_paths.add(path_value)
-        state_collection.delete_many({"group_key": {"$in": list(group_keys)}})
+        if apply:
+            state_collection.delete_many({"group_key": {"$in": list(group_keys)}})
+        else:
+            LOGGER.info(
+                "Dry run: skipping prune of %d scanner state entries",
+                len(state_docs),
+            )
     return removed_paths
 
 
@@ -144,19 +158,49 @@ def _build_scanner(db: Database) -> SongScanner:
     )
 
 
-def main() -> int:
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Cleanup tower/dan documents and optionally trigger a rescan",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform deletions and rescan instead of a dry run",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    args = _parse_args(argv)
     db = _mongo_database()
     dirty_groups = _collect_dirty_groups(db)
     if not dirty_groups:
         LOGGER.info("No dirty tower/dan documents detected")
         return 0
 
-    removed_paths = _purge_documents(db, dirty_groups)
+    if not args.apply:
+        LOGGER.info(
+            "Dry run: %d dirty groups would be deleted", len(dirty_groups)
+        )
+        for group_key in sorted(dirty_groups):
+            LOGGER.info("Dry run: would delete group %s", group_key)
+
+    removed_paths = _purge_documents(db, dirty_groups, apply=args.apply)
     if removed_paths:
-        LOGGER.info("Pruned scanner state for %d charts", len(removed_paths))
+        if args.apply:
+            LOGGER.info("Pruned scanner state for %d charts", len(removed_paths))
+        else:
+            LOGGER.info(
+                "Dry run: would prune scanner state for %d charts",
+                len(removed_paths),
+            )
     else:
-        LOGGER.info("No scanner state entries required pruning")
+        LOGGER.info("No scanner state entries require pruning")
+
+    if not args.apply:
+        LOGGER.info("Dry run: skipping targeted rescan; rerun with --apply to execute")
+        return 0
 
     scanner = _build_scanner(db)
     LOGGER.info("Starting targeted rescan for %d groups", len(dirty_groups))

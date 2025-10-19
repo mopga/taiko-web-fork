@@ -36,6 +36,7 @@ from pymongo import MongoClient, ReturnDocument
 from redis import Redis
 
 from songs_scanner import SongScanner
+from tower_chart_selection import select_best_chart
 
 
 LOGGER = logging.getLogger(__name__)
@@ -862,20 +863,8 @@ def route_api_songs():
 
     return cache_wrap(flask.jsonify(songs), 60)
 
-
-def _normalise_course_tokens(chart):
-    tokens = set()
-    for key in ('course', 'canonical_course', 'display_course', 'raw_course'):
-        value = chart.get(key)
-        if isinstance(value, str) and value:
-            tokens.add(value.strip().casefold())
-    mode_value = chart.get('mode')
-    if isinstance(mode_value, str) and mode_value:
-        tokens.add(mode_value.strip().casefold())
-    return {token for token in tokens if token}
-
-
 @app.route(basedir + 'api/tower/chart')
+@app.cache.cached(timeout=15, query_string=True)
 def route_api_tower_chart():
     title = request.args.get('title', '').strip()
     if not title:
@@ -891,29 +880,7 @@ def route_api_tower_chart():
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
     charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    best_chart = None
-    best_priority = (float('inf'), float('inf'))
-
-    for index, chart in enumerate(charts):
-        if not isinstance(chart, dict):
-            continue
-        tokens = _normalise_course_tokens(chart)
-        if course_param not in tokens:
-            continue
-        mode_value = str(chart.get('mode') or '').strip().casefold()
-        priority = (0 if mode_value in {'tower', 'dan'} else 1, index)
-        if priority < best_priority:
-            best_priority = priority
-            best_chart = chart
-
-    if best_chart is None:
-        for chart in charts:
-            if not isinstance(chart, dict):
-                continue
-            mode_value = str(chart.get('mode') or '').strip().casefold()
-            if mode_value in {'tower', 'dan'}:
-                best_chart = chart
-                break
+    best_chart = select_best_chart(charts, course_param)
 
     if best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404

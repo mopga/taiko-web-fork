@@ -832,7 +832,7 @@ LEVEL:7
 
         joined_logs = "\n".join(logs.output)
         self.assertNotIn("lenient-trigger: file=", joined_logs)
-        self.assertIn("synth-notes: injected=", joined_logs)
+        self.assertIn("synth-notes: course=", joined_logs)
         courses = {course.canonical: course for course in parsed.courses}
         self.assertIn('normal', courses)
         self.assertIn('easy', courses)
@@ -1049,7 +1049,7 @@ LEVEL:7
         self.assertIn('end-notes(strict): course=dojo', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
-        self.assertIn('synth-notes: injected=', joined_logs)
+        self.assertIn('synth-notes: course=', joined_logs)
 
         course = parsed.charts['dojo']
         self.assertGreater(course.total_notes, 0)
@@ -1089,7 +1089,7 @@ LEVEL:7
         self.assertIn('end-notes(strict): course=tower', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
-        self.assertIn('synth-notes: injected=', joined_logs)
+        self.assertIn('synth-notes: course=', joined_logs)
 
         course = parsed.charts['oni']
         self.assertEqual(course.normalised, 'TOWER')
@@ -1168,7 +1168,7 @@ LEVEL:7
         self.assertIn('end-notes(lenient): course=dojo', joined_logs)
         self.assertIn('notes=1', joined_logs)
         self.assertIn('longs=1', joined_logs)
-        self.assertIn('synth-notes: injected=', joined_logs)
+        self.assertIn('synth-notes: course=', joined_logs)
 
         course = parsed.courses[0]
         self.assertEqual(course.canonical, 'dojo')

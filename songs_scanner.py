@@ -318,9 +318,9 @@ def _finalise_chart_metrics(
         )
         if metrics.synthetic_injected:
             LOGGER.info(
-                "synth-notes: injected=%d course=%s",
-                metrics.synthetic_injected,
+                "synth-notes: course=%s injected=%d",
                 course_label,
+                metrics.synthetic_injected,
             )
 
     return metrics
