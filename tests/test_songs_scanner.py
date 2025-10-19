@@ -1036,6 +1036,7 @@ LEVEL:7
         course = parsed.charts['dojo']
         self.assertGreater(course.total_notes, 0)
         self.assertEqual(course.hit_notes, 0)
+        self.assertNotIn('empty-chart', course.issues)
         chart_data = course.chart_data or {}
         measures = chart_data.get('measures', [])
         self.assertTrue(measures)
@@ -1072,6 +1073,7 @@ LEVEL:7
         self.assertEqual(course.normalised, 'TOWER')
         self.assertGreater(course.total_notes, 0)
         self.assertEqual(course.hit_notes, 0)
+        self.assertNotIn('empty-chart', course.issues)
         chart_data = course.chart_data or {}
         measures = chart_data.get('measures', [])
         self.assertTrue(measures)
@@ -2936,6 +2938,44 @@ LEVEL:7
         self.assertEqual(issues[0]['path'], 'empty.tja')
         self.assertEqual(issues[0]['course_raw'], 'Oni')
         self.assertEqual(issues[0].get('first_note_preview'), '0,0')
+
+    def test_scanner_accepts_tower_long_only_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = songs_dir / "tower.ogg"
+        audio_path.write_bytes(b"tower-audio")
+        tja_path = songs_dir / "tower_long.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Tower Long Only",
+            "WAVE:tower.ogg",
+            "COURSE:Tower",
+            "LEVEL:7",
+            "#START",
+            "5000,",
+            "0008,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(len(inserted['charts']), 1)
+        chart = inserted['charts'][0]
+        self.assertEqual(chart['course'], 'oni')
+        self.assertTrue(chart['valid'])
+        self.assertGreater(chart.get('total_notes', 0), 0)
+        self.assertEqual(chart.get('hit_notes', 0), 0)
+        self.assertNotIn('empty-chart', chart.get('issues', []))
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

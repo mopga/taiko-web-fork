@@ -2213,7 +2213,13 @@ class SongScanner:
 
             if course.start_blocks == 0 or course.end_blocks == 0 or course.end_blocks < course.start_blocks:
                 issues.append("missing-chart-content")
-            if course.total_notes == 0 or course.hit_notes == 0:
+            has_notes = course.total_notes > 0
+            has_hits = course.hit_notes > 0
+            needs_synthetic = _course_requires_synthetic_notes(course)
+
+            if not has_notes:
+                issues.append("empty-chart")
+            elif mode == "standard" and not has_hits and not needs_synthetic:
                 issues.append("empty-chart")
             if course.branch:
                 required_sections = {"N", "E", "M"}
@@ -2237,11 +2243,11 @@ class SongScanner:
                     course_name in COURSE_ORDER
                     and "missing-chart-content" not in issues
                     and "unknown-course" not in issues
-                    and course.total_notes > 0
-                    and course.hit_notes > 0
+                    and has_notes
+                    and (has_hits or needs_synthetic)
                 )
             else:
-                valid = course.total_notes > 0 and course.hit_notes > 0
+                valid = has_notes
 
             if course.branch and "invalid-branch-sections" in issues:
                 valid = False
