@@ -10,10 +10,11 @@ import random
 import re
 import threading
 import time
+from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Callable
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Callable
 from urllib.parse import unquote, urlparse
 import unicodedata
 
@@ -213,6 +214,46 @@ def _stable_path_hash(record: "TjaImportRecord") -> str:
     if not combined:
         combined = record.relative_path or record.relative_dir or record.tja_hash or record.fingerprint or "missing"
     return md5_text(combined)
+
+
+def _normalise_song_fs_path(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    normalised = path.replace("\\", "/").strip()
+    normalised = re.sub(r"/+", "/", normalised)
+    return normalised.casefold()
+
+
+def _normalise_song_id(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "null":
+        return None
+    return text
+
+
+def _make_deterministic_song_id(parts: Sequence[str]) -> str:
+    payload = "|".join(parts)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _select_primary_chart_entry(charts: Sequence[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    if not charts:
+        return None
+    preference = ["oni", "ura", "hard", "normal", "easy"]
+
+    def _rank(chart: Dict[str, object]) -> Tuple[int, str, str]:
+        course = str(chart.get('canonical_course') or chart.get('course') or "")
+        lowered = course.casefold()
+        try:
+            index = preference.index(lowered)
+        except ValueError:
+            index = len(preference)
+        path = str(chart.get('tja_path') or "")
+        return (index, lowered, path)
+
+    return min(charts, key=_rank)
 
 
 def compute_group_key(record: "TjaImportRecord") -> str:
@@ -1131,13 +1172,61 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
         try:
+            self.db.songs.drop_index('id_1')
+        except Exception:  # pragma: no cover - tolerate legacy index absence
+            pass
+        try:
+            self.db.songs.drop_index('songs_id_unique')
+        except Exception:  # pragma: no cover - tolerate missing index
+            pass
+        try:
+            id_string_partial_filter = {'id': {'$type': 'string'}}
             self.db.songs.create_index(
-                'group_key',
+                'id',
+                name='songs_id_unique',
                 unique=True,
-                partialFilterExpression={'group_key': {'$type': 'string'}},
+                partialFilterExpression=id_string_partial_filter,
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
-            LOGGER.debug('Failed to ensure unique index for songs collection')
+            LOGGER.debug('Failed to ensure partial unique index for songs.id')
+        try:
+            self.db.songs.drop_index('group_key_1')
+        except Exception:  # pragma: no cover - tolerate legacy index absence
+            pass
+        try:
+            self.db.songs.drop_index('songs_group_key_unique')
+        except Exception:
+            pass
+        scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
+        try:
+            self.db.songs.create_index(
+                [('group_key', 1), ('scanner_stable_id', 1)],
+                name='songs_group_key_scanner_unique',
+                unique=True,
+                partialFilterExpression=scanner_stable_string_partial_filter,
+            )
+        except Exception:  # pragma: no cover - tolerate missing create_index
+            LOGGER.debug('Failed to ensure compound unique index for songs group key')
+        try:
+            self.db.songs.drop_index('songs_scanner_stable_unique')
+        except Exception:  # pragma: no cover - tolerate legacy index absence
+            pass
+        try:
+            self.db.songs.create_index(
+                'scanner_stable_id',
+                name='songs_scanner_stable_id_unique',
+                unique=True,
+                partialFilterExpression=scanner_stable_string_partial_filter,
+            )
+        except Exception:  # pragma: no cover - tolerate missing create_index
+            LOGGER.debug('Failed to ensure unique index for scanner stable id')
+        try:
+            self.db.songs.create_index(
+                'group_key',
+                name='songs_group_key_lookup',
+            )
+        except Exception:  # pragma: no cover - tolerate missing create_index
+            LOGGER.debug('Failed to ensure non-unique index for songs group key')
         try:
             counters = getattr(self.db, 'counters', None)
             if counters is not None:
@@ -1159,6 +1248,7 @@ class SongScanner:
                 LOGGER.debug('Failed to ensure unique index for import issues collection')
         self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
         self._metrics = _ScanMetrics()
+        self._seed_legacy_scanner_ids()
 
     def _build_chart_records(self, parsed: ParsedTJA, tja_path: Path) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
@@ -1560,39 +1650,180 @@ class SongScanner:
         insert_document = dict(base_document)
         insert_document['charts'] = []
 
-        result_doc: Optional[Dict[str, object]] = None
+        now_utc = datetime.now(UTC)
+        base_document['updated_at'] = now_utc
+        insert_document['updated_at'] = now_utc
+        insert_document['created_at'] = now_utc
 
-        with self._group_key_lock(key):
+        stable_song_id = None
+        if isinstance(document.get('scanner_stable_id'), str):
+            stable_song_id = document['scanner_stable_id'] or None
+        if not stable_song_id:
+            LOGGER.warning('Song document for %s missing stable id; skipping', key)
+            summary['errors'] += 1
+            return None
+
+        stable_group_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id, 'group_key': key}
+        stable_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
+        legacy_filter: Dict[str, object] = {'group_key': key, 'scanner_stable_id': {'$exists': False}}
+
+        update_existing = {'$set': base_document}
+        update_insert = {'$setOnInsert': insert_document, '$set': base_document}
+
+        result_doc: Optional[Dict[str, object]] = None
+        final_mode = 'unknown'
+        mode_detail: Optional[str] = None
+        final_result = None
+        result_doc_override: Optional[Dict[str, object]] = None
+
+        class _SyntheticUpdateResult:
+            __slots__ = ('matched_count', 'modified_count', 'upserted_id', 'acknowledged')
+
+            def __init__(
+                self,
+                *,
+                matched_count: int = 0,
+                modified_count: int = 0,
+                upserted_id: Optional[int] = None,
+            ) -> None:
+                self.matched_count = matched_count
+                self.modified_count = modified_count
+                self.upserted_id = upserted_id
+                self.acknowledged = True
+
+        def _log_duplicate(exc: Exception, attempt: int, phase: str) -> None:
+            details: Dict[str, object] = {}
+            exc_details = getattr(exc, 'details', None)
+            if isinstance(exc_details, dict):
+                details = {
+                    'index': exc_details.get('indexName'),
+                    'keyPattern': exc_details.get('keyPattern'),
+                    'keyValue': exc_details.get('keyValue'),
+                }
+            payload = {
+                'group_key': key,
+                'stable_id': stable_song_id,
+                'title': document.get('title'),
+                'attempt': attempt + 1,
+                'details': details,
+            }
+            LOGGER.error('Duplicate key during song %s update: %s', phase, payload)
+
+        def _execute_update(
+            filter_doc: Dict[str, object],
+            update_doc: Dict[str, object],
+            *,
+            upsert: bool,
+            phase: str,
+            duplicate_retry_filter: Optional[Dict[str, object]] = None,
+            duplicate_retry_update: Optional[Dict[str, object]] = None,
+        ):
+            nonlocal result_doc_override
             for attempt in range(3):
                 try:
-                    result_doc = self.db.songs.find_one_and_update(
-                        {'group_key': key},
-                        {'$setOnInsert': insert_document},
-                        upsert=True,
-                        return_document=ReturnDocument.AFTER,
-                    )
-                    break
+                    return self.db.songs.update_one(filter_doc, update_doc, upsert=upsert)
                 except Exception as exc:  # pragma: no cover - defensive around DB driver
                     if DuplicateKeyError and isinstance(exc, DuplicateKeyError):
                         self._metrics.increment('duplicate_key_retries_total')
+                        _log_duplicate(exc, attempt, phase)
+                        if duplicate_retry_filter is not None:
+                            try:
+                                retry_doc = self.db.songs.find_one_and_update(
+                                    duplicate_retry_filter,
+                                    duplicate_retry_update or update_doc,
+                                    upsert=False,
+                                    return_document=getattr(ReturnDocument, 'AFTER', 1),
+                                )
+                            except Exception:  # pragma: no cover - tolerate retry lookup issues
+                                retry_doc = None
+                            else:
+                                if isinstance(retry_doc, dict):
+                                    result_doc_override = retry_doc
+                                    return _SyntheticUpdateResult(matched_count=1, modified_count=1)
                         jitter = random.random() * 0.025
                         time.sleep(0.05 * (attempt + 1) + jitter)
                         continue
                     raise
+            return None
 
-        if result_doc is None:
-            LOGGER.warning("Failed to upsert aggregated song for %s", key)
+        with self._group_key_lock(key):
+            primary_result = _execute_update(stable_group_filter, update_existing, upsert=False, phase='new')
+            if primary_result and getattr(primary_result, 'matched_count', 0):
+                final_result = primary_result
+                final_mode = 'new'
+                mode_detail = 'stable-group'
+            else:
+                stable_result = _execute_update(stable_filter, update_existing, upsert=False, phase='stable')
+                if stable_result and getattr(stable_result, 'matched_count', 0):
+                    final_result = stable_result
+                    final_mode = 'new'
+                    mode_detail = 'stable-only'
+                else:
+                    legacy_result = _execute_update(legacy_filter, update_existing, upsert=False, phase='legacy')
+                    if legacy_result and getattr(legacy_result, 'matched_count', 0):
+                        final_result = legacy_result
+                        final_mode = 'legacy'
+                        mode_detail = 'legacy-group'
+                    else:
+                        final_result = _execute_update(
+                            stable_group_filter,
+                            update_insert,
+                            upsert=True,
+                            phase='insert',
+                            duplicate_retry_filter=stable_group_filter,
+                            duplicate_retry_update=update_existing,
+                        )
+                        if final_result is None:
+                            LOGGER.warning("Failed to upsert aggregated song for %s", key)
+                            summary['errors'] += 1
+                            return None
+                        if getattr(final_result, 'upserted_id', None) is not None:
+                            final_mode = 'insert'
+                            mode_detail = 'stable-group'
+                        elif getattr(final_result, 'matched_count', 0):
+                            final_mode = 'new'
+                            mode_detail = 'stable-group-race'
+                        else:
+                            final_mode = 'insert'
+                            mode_detail = 'stable-group'
+            if result_doc_override is not None:
+                result_doc = result_doc_override
+            else:
+                try:
+                    result_doc = self.db.songs.find_one({'scanner_stable_id': stable_song_id})
+                except Exception:  # pragma: no cover - tolerate lookup issues
+                    result_doc = None
+
+        if not isinstance(result_doc, dict):
+            LOGGER.warning("Failed to load song document for %s after upsert", key)
             summary['errors'] += 1
             return None
 
         self._metrics.increment('songs_upserted_total')
+        if final_mode == 'new':
+            self._metrics.increment('songs_upserted_new_total')
+        elif final_mode == 'legacy':
+            self._metrics.increment('songs_updated_legacy_total')
+        elif final_mode == 'insert':
+            self._metrics.increment('songs_inserted_total')
 
-        song_filter: Dict[str, object] = {'group_key': key}
-        if isinstance(result_doc, dict):
-            if result_doc.get('_id') is not None:
-                song_filter = {'_id': result_doc['_id']}
-            elif result_doc.get('id') is not None:
-                song_filter = {'id': result_doc['id']}
+        LOGGER.info(
+            'songs upsert result',
+            {
+                'mode': final_mode,
+                'mode_detail': mode_detail,
+                'group_key': key,
+                'stable_id': stable_song_id,
+                'matched_count': getattr(final_result, 'matched_count', None),
+                'upserted_id': getattr(final_result, 'upserted_id', None),
+            },
+        )
+
+        song_filter = {'scanner_stable_id': stable_song_id}
+        if result_doc.get('_id') is not None:
+            song_filter = {'_id': result_doc['_id']}
+        elif result_doc.get('id') is not None:
+            song_filter = {'id': result_doc['id']}
 
         existing_id = None
         if isinstance(result_doc, dict) and isinstance(result_doc.get('id'), int):
@@ -1809,6 +2040,9 @@ class SongScanner:
 
         sorted_records = sorted(records, key=lambda rec: rec.relative_path)
 
+        representative_paths = [record.relative_path for record in sorted_records if record.relative_path]
+        primary_path = representative_paths[0] if representative_paths else sorted_records[0].relative_path
+
         chart_by_key: Dict[Tuple[str, Optional[str]], Dict[str, object]] = {}
         duplicate_courses: Set[str] = set()
 
@@ -1942,6 +2176,30 @@ class SongScanner:
 
         enabled = bool(audio_url)
 
+        primary_chart = _select_primary_chart_entry(charts_payload)
+        primary_course = ""
+        primary_difficulty = ""
+        if primary_chart:
+            course_value = primary_chart.get('canonical_course') or primary_chart.get('course') or ""
+            primary_course = str(course_value).casefold()
+            level_value = primary_chart.get('level')
+            if level_value is None:
+                level_value = primary_chart.get('stars')
+            if level_value is None:
+                level_value = ""
+            primary_difficulty = str(level_value)
+
+        source_song_id = _normalise_song_id(base.song_id)
+        fs_path_token = _normalise_song_fs_path(primary_path)
+        stable_song_id = source_song_id or _make_deterministic_song_id(
+            [
+                fs_path_token,
+                base.title or "",
+                primary_course,
+                primary_difficulty,
+            ]
+        )
+
         document = {
             'title': base.title,
             'titleJa': base.title_ja,
@@ -1976,10 +2234,81 @@ class SongScanner:
             'titleNormalized': base.normalized_title,
             'group_key': key,
             'genre': base.genre,
+            'scanner_stable_id': stable_song_id,
+            'scanner_primary_course': primary_course,
+            'scanner_primary_difficulty': primary_difficulty,
         }
         if audio_hash is not None:
             document['audioHash'] = audio_hash
+        if source_song_id is not None:
+            document['scanner_source_song_id'] = source_song_id
         return document
+
+    def _seed_legacy_scanner_ids(self) -> None:
+        songs_collection = getattr(self.db, 'songs', None)
+        if songs_collection is None:
+            return
+        try:
+            cursor = songs_collection.find({'scanner_stable_id': {'$exists': False}})
+        except Exception:  # pragma: no cover - tolerate driver absence
+            LOGGER.debug('Failed to enumerate legacy songs without stable id')
+            return
+        seeded = 0
+        for document in cursor:
+            if not isinstance(document, dict):
+                continue
+            stable_id = self._stable_id_for_legacy_document(document)
+            if not stable_id:
+                continue
+            update_filter: Dict[str, object]
+            if document.get('_id') is not None:
+                update_filter = {'_id': document['_id']}
+            elif document.get('group_key'):
+                update_filter = {'group_key': document['group_key']}
+            else:
+                continue
+            try:
+                result = songs_collection.update_one(update_filter, {'$set': {'scanner_stable_id': stable_id}})
+            except Exception:  # pragma: no cover - tolerate update issues
+                LOGGER.debug('Failed to seed stable id for legacy song %r', document.get('group_key'))
+                continue
+            matched = getattr(result, 'matched_count', 0)
+            if matched:
+                seeded += 1
+        if seeded:
+            LOGGER.info('Seeded scanner stable ids for %d legacy songs', seeded)
+            self._metrics.increment('songs_seeded_legacy_total', seeded)
+
+    def _stable_id_for_legacy_document(self, document: Dict[str, object]) -> str:
+        paths = document.get('paths') if isinstance(document.get('paths'), dict) else {}
+        fs_path = ''
+        if isinstance(paths, dict):
+            for candidate in ('tja_url', 'dir_url', 'audio_url'):
+                value = paths.get(candidate)
+                if isinstance(value, str) and value:
+                    fs_path = value
+                    break
+        if not fs_path and isinstance(document.get('path'), str):
+            fs_path = str(document['path'])
+        if not fs_path and isinstance(document.get('group_key'), str):
+            fs_path = str(document['group_key'])
+        normalised_path = _normalise_song_fs_path(fs_path)
+        title = str(document.get('title') or '')
+        course_value = document.get('scanner_primary_course') or document.get('primary_course') or ''
+        difficulty_value = (
+            document.get('scanner_primary_difficulty')
+            or document.get('primary_difficulty')
+            or document.get('difficulty')
+            or ''
+        )
+        course = str(course_value).casefold()
+        difficulty = str(difficulty_value)
+        return _make_deterministic_song_id([
+            normalised_path,
+            title,
+            course,
+            difficulty,
+        ])
 
     def _current_song_id_ceiling(self, *, include_counter: bool = True) -> int:
         current = 0
@@ -2549,6 +2878,10 @@ class _ScanMetrics:
         self._lock = threading.Lock()
         self._counters = {
             'songs_upserted_total': 0,
+            'songs_upserted_new_total': 0,
+            'songs_updated_legacy_total': 0,
+            'songs_inserted_total': 0,
+            'songs_seeded_legacy_total': 0,
             'invalid_group_key_total': 0,
             'duplicate_key_retries_total': 0,
             'charts_synced_total': 0,

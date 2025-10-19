@@ -5,7 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from typing import List
+from typing import List, Optional
 from unittest import mock
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -14,12 +14,23 @@ import songs_scanner
 from songs_scanner import ChartRecord, SongScanner, TjaImportRecord, compute_group_key, parse_tja
 
 
+class _DummyUpdateResult:
+    def __init__(self, matched: int, modified: int, upserted: Optional[int]):
+        self.matched_count = matched
+        self.modified_count = modified
+        self.upserted_id = upserted
+        self.acknowledged = True
+
+
 class _MemoryCollection:
     def __init__(self):
         self._docs = []
         self._lock = threading.Lock()
 
     def create_index(self, *args, **kwargs):
+        return None
+
+    def drop_index(self, *args, **kwargs):
         return None
 
     def _matches(self, doc, filter_):
@@ -36,6 +47,15 @@ class _MemoryCollection:
                     value = self._resolve_key(doc, key)
                 else:
                     value = self._resolve_key(doc, key)
+                if '$type' in expected:
+                    expected_type = expected['$type']
+                    if expected_type == 'string':
+                        if not isinstance(value, str):
+                            return False
+                    elif expected_type == 'number':
+                        if not isinstance(value, (int, float)):
+                            return False
+                    continue
                 if '$ne' in expected and value == expected['$ne']:
                     return False
                 if '$in' in expected and value not in expected['$in']:
@@ -272,9 +292,11 @@ class _MemoryCollection:
         with self._lock:
             for doc in self._docs:
                 if self._matches(doc, filter_ or {}):
+                    before = self._clone(doc)
                     if update:
                         self._apply_update(doc, update, array_filters=array_filters)
-                    return
+                    modified = 1 if doc != before else 0
+                    return _DummyUpdateResult(1, modified, None)
         if upsert and ('$set' in update or '$setOnInsert' in update):
             new_doc = {}
             if '$setOnInsert' in update:
@@ -286,7 +308,13 @@ class _MemoryCollection:
                     if isinstance(value, dict):
                         continue
                     new_doc.setdefault(key, value)
+            if '_id' not in new_doc:
+                new_doc['_id'] = len(self._docs) + 1
             self._docs.append(new_doc)
+            if hasattr(self, 'inserted'):
+                self.inserted.append(new_doc)
+            return _DummyUpdateResult(0, 0, new_doc.get('_id'))
+        return _DummyUpdateResult(0, 0, None)
 
     def delete_many(self, filter_):
         with self._lock:
@@ -839,8 +867,9 @@ LEVEL:7
 
         audio_path.write_bytes(b"changed")
         third_summary = scanner.scan()
-        self.assertEqual(third_summary['inserted'], 1)
-        self.assertEqual(third_summary['disabled'], 1)
+        self.assertEqual(third_summary['inserted'], 0)
+        self.assertEqual(third_summary['updated'], 1)
+        self.assertEqual(third_summary['disabled'], 0)
         self.assertEqual(third_summary['skipped'], 0)
 
     def test_scan_imports_dojo_chart_with_segments(self):
@@ -960,6 +989,107 @@ LEVEL:7
         charts = db.songs._docs[0].get('charts', [])
         self.assertEqual(len(charts), 1)
         self.assertEqual(db.songs._docs[0]['group_key'], key)
+        self.assertIn('scanner_stable_id', db.songs._docs[0])
+        self.assertTrue(db.songs._docs[0]['scanner_stable_id'])
+
+    def test_upsert_updates_legacy_document_without_duplication(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=5,
+            branch=False,
+            valid=True,
+            issues=[],
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+        legacy_doc = {
+            '_id': 101,
+            'group_key': key,
+            'title': 'Legacy Song',
+            'charts': [],
+        }
+        db.songs.insert_one(dict(legacy_doc))
+        document = scanner._build_song_document(key, [record])
+        charts_payload = list(document['charts'])
+        summary = {'inserted': 0, 'updated': 0, 'errors': 0}
+
+        song_id = scanner._upsert_song_document(key, [record], document, charts_payload, {key}, summary)
+
+        self.assertIsNotNone(song_id)
+        self.assertEqual(len(db.songs._docs), 1)
+        stored = db.songs._docs[0]
+        self.assertEqual(stored['group_key'], key)
+        self.assertEqual(stored['scanner_stable_id'], document['scanner_stable_id'])
+        self.assertEqual(len(db.songs.inserted), 1)
+        self.assertEqual(summary['errors'], 0)
+
+    def test_scanner_seeds_legacy_stable_ids_on_startup(self):
+        db = _DummyDB()
+        tmp_dir = Path(self._tmp_dir())
+        legacy_doc = {
+            '_id': 33,
+            'group_key': 'legacy-group',
+            'title': 'Legacy Tune',
+            'charts': [],
+            'paths': {'tja_url': '/songs/legacy-group/main.tja'},
+        }
+        db.songs.insert_one(dict(legacy_doc))
+        db.songs._docs[0].pop('scanner_stable_id', None)
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=tmp_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        stored = db.songs._docs[0]
+        self.assertIn('scanner_stable_id', stored)
+        self.assertTrue(stored['scanner_stable_id'])
+        expected = songs_scanner._make_deterministic_song_id([
+            songs_scanner._normalise_song_fs_path('/songs/legacy-group/main.tja'),
+            'Legacy Tune',
+            '',
+            '',
+        ])
+        self.assertEqual(stored['scanner_stable_id'], expected)
+        self.assertGreater(scanner._metrics._counters['songs_seeded_legacy_total'], 0)
+
+    def test_build_song_document_has_stable_id(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=9,
+            branch=False,
+            valid=True,
+            issues=[],
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+
+        doc_a = scanner._build_song_document(key, [record])
+        doc_b = scanner._build_song_document(key, [record])
+
+        self.assertIn('scanner_stable_id', doc_a)
+        self.assertTrue(doc_a['scanner_stable_id'])
+        self.assertEqual(doc_a['scanner_stable_id'], doc_b['scanner_stable_id'])
 
     def test_get_next_song_id_monotonic(self):
         tmp_dir = Path(self._tmp_dir())
@@ -1205,30 +1335,38 @@ LEVEL:7
         document = scanner._build_song_document(key, [record])
         charts_payload = list(document['charts'])
 
-        original = db.songs.find_one_and_update
-        call_count = {'value': 0}
+        original_update = db.songs.update_one
+        original_find_and_update = db.songs.find_one_and_update
+        call_state = {'update_duplicates': 0, 'retry_invocations': 0}
 
         class FakeDuplicate(Exception):
             pass
 
-        def flaky(*args, **kwargs):
-            if call_count['value'] == 0:
-                call_count['value'] += 1
+        def flaky_update(filter_, update, upsert=False, **kwargs):
+            if upsert and call_state['update_duplicates'] == 0:
+                call_state['update_duplicates'] += 1
                 raise FakeDuplicate()
-            return original(*args, **kwargs)
+            return original_update(filter_, update, upsert=upsert, **kwargs)
+
+        def tracking_find_one_and_update(*args, **kwargs):
+            call_state['retry_invocations'] += 1
+            return original_find_and_update(*args, **kwargs)
 
         summary = {'inserted': 0, 'updated': 0, 'errors': 0}
 
         with mock.patch('songs_scanner.DuplicateKeyError', FakeDuplicate):
-            db.songs.find_one_and_update = flaky
+            db.songs.update_one = flaky_update
+            db.songs.find_one_and_update = tracking_find_one_and_update
             try:
                 song_id = scanner._upsert_song_document(key, [record], document, charts_payload, set(), summary)
             finally:
-                db.songs.find_one_and_update = original
+                db.songs.update_one = original_update
+                db.songs.find_one_and_update = original_find_and_update
 
         self.assertIsNotNone(song_id)
         self.assertEqual(summary['errors'], 0)
         self.assertEqual(len(db.songs._docs), 1)
+        self.assertGreaterEqual(call_state['retry_invocations'], 1)
 
     def test_repeat_scan_keeps_song_count(self):
         tmp_dir = Path(self._tmp_dir())
