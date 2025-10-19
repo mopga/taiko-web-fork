@@ -1180,11 +1180,12 @@ class SongScanner:
         except Exception:  # pragma: no cover - tolerate missing index
             pass
         try:
+            id_string_partial_filter = {'id': {'$type': 'string'}}
             self.db.songs.create_index(
                 'id',
                 name='songs_id_unique',
                 unique=True,
-                partialFilterExpression={'id': {'$type': 'string'}},
+                partialFilterExpression=id_string_partial_filter,
             )
         except Exception:  # pragma: no cover - tolerate missing create_index
             LOGGER.debug('Failed to ensure partial unique index for songs.id')

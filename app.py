@@ -136,11 +136,12 @@ try:
     db.songs.drop_index('songs_id_unique')
 except Exception:
     pass
+id_string_partial_filter = {'id': {'$type': 'string'}}
 db.songs.create_index(
     'id',
     unique=True,
     name='songs_id_unique',
-    partialFilterExpression={'id': {'$type': 'string'}},
+    partialFilterExpression=id_string_partial_filter,
 )
 try:
     db.songs.drop_index('group_key_1')
