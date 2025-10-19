@@ -1197,6 +1197,20 @@ def _parse_tja_strict(
                             state.default_bpm = bpm_value
         elif key_upper == "COURSE":
             raw_course_value = value_stripped.strip()
+            raw_course_lower = raw_course_value.casefold()
+            special_mode: Optional[str] = None
+            special_display: Optional[str] = None
+            canonical_override: Optional[str] = None
+
+            if raw_course_lower.startswith("tower"):
+                canonical_override = "oni"
+                special_mode = "tower"
+                special_display = "tower"
+            elif raw_course_lower.startswith("dan"):
+                canonical_override = "oni"
+                special_mode = "dan"
+                special_display = "dan"
+
             normalised_token = _normalise_course_token(raw_course_value)
             if normalised_token in DOJO_COURSE_TOKENS:
                 canonical_lower = "dojo"
@@ -1211,6 +1225,10 @@ def _parse_tja_strict(
                 parsed.charts[canonical_lower] = active_course
             else:
                 canonical, token, issue = _resolve_course(raw_course_value, path=path)
+                if canonical_override:
+                    canonical = canonical_override
+                    if issue == "mapped-course":
+                        issue = None
                 if canonical == "Unknown":
                     if issue == "unknown_course_numeric":
                         LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
@@ -1235,17 +1253,34 @@ def _parse_tja_strict(
                         active_course = existing
                         active_course.raw_name = raw_course_value
                         active_course.normalised = token
+                        if special_mode:
+                            active_course.mode = special_mode
+                            active_course.display_course = special_display
+                        elif active_course.mode not in {"dojo"}:
+                            active_course.mode = "standard"
+                            if active_course.display_course in {"tower", "dan"}:
+                                active_course.display_course = None
                     else:
                         active_course = CourseInfo(
                             canonical=canonical_lower,
                             raw_name=raw_course_value,
                             normalised=token,
+                            mode=special_mode or "standard",
+                            display_course=special_display,
                         )
                         known_courses[canonical_lower] = active_course
                         parsed.courses.append(active_course)
                     parsed.charts[active_course.canonical] = active_course
                     if issue:
                         active_course.add_issue(issue)
+                    if special_mode and active_course.mode != special_mode:
+                        active_course.mode = special_mode
+                    elif not special_mode and active_course.mode in {"tower", "dan"}:
+                        active_course.mode = "standard"
+                    if special_display and active_course.display_course != special_display:
+                        active_course.display_course = special_display
+                    elif not special_display and active_course.display_course in {"tower", "dan"}:
+                        active_course.display_course = None
         elif key_upper == "LEVEL" and active_course:
             try:
                 level_value = float(value_stripped)
@@ -2461,6 +2496,14 @@ class SongScanner:
                 measures=course.measures,
                 first_note_preview=course.first_note_preview,
                 chart_data=chart_data_copy,
+            )
+            LOGGER.info(
+                "course-mapped: title=%s raw=%s mode=%s display=%s total_notes=%d",
+                parsed.title or UNKNOWN_VALUE,
+                course.raw_name,
+                record.mode,
+                record.display_course,
+                record.total_notes,
             )
             LOGGER.debug(
                 "Chart summary mode=%s course=%s raw=%s notes=%d measures=%d first=\"%s\" issues=%s",
