@@ -736,7 +736,7 @@ LEVEL:7
         self.assertIn('oni', parsed.charts)
         self.assertGreater(parsed.charts['oni'].notes_count, 0)
 
-    def test_tower_7_lenient_fallback_counts_notes(self):
+    def test_tower_7_chart_parses_strict_without_fallback(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "Taiko Tower 7 Ama-kuchi.tja"
         filler_lines = ["0000," for _ in range(30)]
@@ -755,10 +755,10 @@ LEVEL:7
             with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
                 parsed = parse_tja(tja_path)
 
-        self.assertTrue(any("lenient-fallback" in message for message in logs.output))
+        self.assertFalse(any("fallback-to-lenient" in message for message in logs.output))
         self.assertIn('oni', parsed.charts)
         self.assertGreater(parsed.charts['oni'].total_notes, 0)
-        self.assertIn('lenient-fallback', parsed.charts['oni'].issues)
+        self.assertNotIn('lenient-fallback', parsed.charts['oni'].issues)
         chart_data = parsed.charts['oni'].chart_data
         self.assertIsNotNone(chart_data)
         if chart_data is not None:
@@ -767,6 +767,153 @@ LEVEL:7
             self.assertTrue(chart_data.get('measures'))
             for measure in chart_data.get('measures', []):
                 self.assertIn('notes', measure)
+
+    def test_strict_parser_logs_empty_and_non_empty_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "placeholder.difficulties.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Test",
+            "COURSE:Oni",
+            "LEVEL:9",
+            "#START",
+            "#END",
+            "COURSE:Hard",
+            "LEVEL:6",
+            "#START",
+            "11,11,11,11,",
+            "11,11,,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with mock.patch.object(songs_scanner, "TJA_LENIENT_FALLBACK", True):
+            with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+                parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("end-notes(strict): course=oni", joined_logs)
+        self.assertIn("end-notes(strict): course=hard", joined_logs)
+        self.assertNotIn("fallback-to-lenient", joined_logs)
+        self.assertIn('oni', parsed.charts)
+        self.assertIn('hard', parsed.charts)
+        self.assertEqual(parsed.charts['oni'].total_notes, 0)
+        self.assertEqual(parsed.charts['oni'].chart_data.get('measures'), [])
+        self.assertGreater(parsed.charts['hard'].total_notes, 0)
+        hard_chart = parsed.charts['hard'].chart_data or {}
+        measures = hard_chart.get('measures', [])
+        self.assertTrue(measures)
+        note_counts = [len(measure.get('notes', [])) for measure in measures]
+        self.assertTrue(any(count > 0 for count in note_counts))
+
+    def test_lenient_fallback_handles_courses_without_hits(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "all.empty.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Empty",
+            "COURSE:Normal",
+            "LEVEL:4",
+            "#START",
+            "77,77,",
+            "#END",
+            "COURSE:Easy",
+            "LEVEL:2",
+            "#START",
+            "88,88,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with mock.patch.object(songs_scanner, "TJA_LENIENT_FALLBACK", True):
+            with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+                parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("fallback-to-lenient: file=", joined_logs)
+        self.assertIn("reason=no-valid-courses", joined_logs)
+        courses = {course.canonical: course for course in parsed.courses}
+        self.assertIn('normal', courses)
+        self.assertIn('easy', courses)
+        course = courses['normal']
+        self.assertIn('lenient-fallback', course.issues)
+        chart_data = course.chart_data or {}
+        self.assertGreater(chart_data.get('total_notes', 0), 0)
+        measures = chart_data.get('measures', [])
+        self.assertTrue(measures)
+        notes = measures[0].get('notes', [])
+        self.assertTrue(notes)
+        self.assertTrue(all(isinstance(note.get('at'), int) for note in notes))
+        self.assertEqual(courses['easy'].hit_notes, 0)
+        self.assertNotIn('lenient-fallback', courses['easy'].issues)
+
+    def test_strict_parse_failure_logs_and_preserves_other_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "broken.one.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Mixed",
+            "COURSE:Oni",
+            "LEVEL:8",
+            "#START",
+            "11,",
+            "#END",
+            "COURSE:Hard",
+            "LEVEL:6",
+            "#START",
+            "22,22,22,",
+            "#END",
+        ]), encoding="utf-8")
+
+        original_cleaner = songs_scanner.NOTE_TOKEN_CLEAN_RE
+
+        class _FailingCleaner:
+            def __init__(self, pattern):
+                self._pattern = pattern
+
+            def sub(self, repl, string):
+                if string == "11":
+                    raise ValueError("forced parse failure")
+                return self._pattern.sub(repl, string)
+
+        with mock.patch.object(songs_scanner, "NOTE_TOKEN_CLEAN_RE", _FailingCleaner(original_cleaner)):
+            with mock.patch.object(songs_scanner, "TJA_LENIENT_FALLBACK", True):
+                with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+                    parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("strict-parse-failed: course=oni", joined_logs)
+        self.assertNotIn("fallback-to-lenient", joined_logs)
+        self.assertIn('oni', parsed.charts)
+        self.assertIn('hard', parsed.charts)
+        self.assertEqual(parsed.charts['oni'].total_notes, 0)
+        self.assertIn('strict-parse-failed', parsed.charts['oni'].issues)
+        self.assertGreater(parsed.charts['hard'].total_notes, 0)
+
+    def test_strict_parser_flushes_final_measure_with_timing(self):
+        tmp_dir = Path(self._tmp_dir())
+        tja_path = tmp_dir / "measure.flush.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Flush",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "11,",
+            "#BPMCHANGE 180",
+            "11,",
+            "#END",
+        ]), encoding="utf-8")
+
+        with self.assertLogs(songs_scanner.LOGGER, level="INFO") as logs:
+            parsed = parse_tja(tja_path)
+
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("end-notes(strict): course=oni", joined_logs)
+        chart = parsed.charts['oni']
+        chart_data = chart.chart_data or {}
+        measures = chart_data.get('measures', [])
+        self.assertEqual(len(measures), 2)
+        first_notes = measures[0].get('notes', [])
+        second_notes = measures[1].get('notes', [])
+        self.assertEqual([note['at'] for note in first_notes], [0, 1000])
+        self.assertEqual([note['at'] for note in second_notes], [2000, 2667])
+        self.assertEqual(measures[0].get('bpm'), 120.0)
+        self.assertEqual(measures[1].get('bpm'), 180.0)
 
     def test_parse_tja_unknown_course_skips_chart(self):
         tmp_dir = Path(self._tmp_dir())

@@ -138,8 +138,11 @@ LENIENT_NOTE_TYPE_MAP = {
     "2": "ka",
     "3": "don",
     "4": "ka",
-    "5": "drumroll",
-    "6": "drumroll",
+    "5": "don",
+    "6": "ka",
+    "7": "don",
+    "8": "ka",
+    "9": "don",
 }
 
 # NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
@@ -368,6 +371,18 @@ class _CourseParseState:
     pending_has_notes: bool = False
     block_line_count: int = 0
     block_note_count: int = 0
+    chart_measures: List[Dict[str, object]] = field(default_factory=list)
+    measure_tokens: List[str] = field(default_factory=list)
+    current_bpm: Optional[float] = None
+    default_bpm: Optional[float] = None
+    current_scroll: float = 1.0
+    current_measure_ratio: float = 1.0
+    measure_bpm: Optional[float] = None
+    measure_scroll: float = 1.0
+    measure_ratio_for_measure: float = 1.0
+    measure_start_time_ms: float = 0.0
+    parse_failed: bool = False
+    unknown_tokens_logged: Set[str] = field(default_factory=set)
 
 
 def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -622,12 +637,96 @@ def _parse_tja_strict(
     current_wave: Optional[str] = None
     course_states: Dict[int, _CourseParseState] = {}
 
+    def _parse_float(value: str) -> Optional[float]:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _state_for(course: CourseInfo) -> _CourseParseState:
         state = course_states.get(id(course))
         if state is None:
             state = _CourseParseState()
             course_states[id(course)] = state
         return state
+
+    def _reset_measure_buffers(course: CourseInfo) -> None:
+        state = _state_for(course)
+        state.measure_tokens.clear()
+        state.pending_total_notes = 0
+        state.pending_hit_notes = 0
+        state.pending_has_notes = False
+        state.block_line_count = 0
+        state.block_note_count = 0
+        state.measure_bpm = state.current_bpm
+        state.measure_scroll = state.current_scroll
+        state.measure_ratio_for_measure = state.current_measure_ratio
+
+    def _store_measure_entry(course: CourseInfo) -> None:
+        state = _state_for(course)
+        if not state.measure_tokens:
+            state.measure_bpm = state.current_bpm
+            state.measure_scroll = state.current_scroll
+            state.measure_ratio_for_measure = state.current_measure_ratio
+            return
+        tokens = list(state.measure_tokens)
+        state.measure_tokens.clear()
+        ratio_value = state.measure_ratio_for_measure if state.measure_ratio_for_measure and state.measure_ratio_for_measure > 0 else 1.0
+        bpm_basis = state.measure_bpm if state.measure_bpm is not None else state.current_bpm
+        if bpm_basis is None or bpm_basis <= 0:
+            if state.default_bpm and state.default_bpm > 0:
+                bpm_basis = state.default_bpm
+            else:
+                bpm_basis = 120.0
+        duration_ms = (240000.0 / bpm_basis) * ratio_value
+        total_slots = len(tokens)
+        notes: List[Dict[str, object]] = []
+        for index, token in enumerate(tokens):
+            if not token:
+                continue
+            note_type = LENIENT_NOTE_TYPE_MAP.get(token)
+            if not note_type:
+                if token not in state.unknown_tokens_logged:
+                    state.unknown_tokens_logged.add(token)
+                    LOGGER.warning(
+                        'strict-unknown-note-token: token=%s course=%s file=%s',
+                        token,
+                        course.canonical,
+                        path,
+                    )
+                continue
+            try:
+                note_value = int(token)
+            except ValueError:
+                continue
+            if note_value not in HIT_NOTE_VALUES:
+                continue
+            position = (index / total_slots) if total_slots else 0.0
+            at_value = int(round(state.measure_start_time_ms + position * duration_ms))
+            notes.append({'type': note_type, 'at': at_value})
+        entry: Dict[str, object] = {'notes': notes}
+        entry['bpm'] = bpm_basis
+        if state.measure_scroll is not None:
+            entry['scroll'] = state.measure_scroll
+        state.chart_measures.append(entry)
+        state.measure_start_time_ms += duration_ms
+        state.measure_bpm = state.current_bpm
+        state.measure_scroll = state.current_scroll
+        state.measure_ratio_for_measure = state.current_measure_ratio
+
+    def _mark_course_failed(course: CourseInfo) -> None:
+        state = _state_for(course)
+        state.parse_failed = True
+        state.chart_measures.clear()
+        state.measure_tokens.clear()
+        state.measure_start_time_ms = 0.0
+        state.pending_total_notes = 0
+        state.pending_hit_notes = 0
+        state.pending_has_notes = False
+        course.total_notes = 0
+        course.hit_notes = 0
+        course.measures = 0
+        course.add_issue("strict-parse-failed")
 
     def _current_audio() -> Optional[str]:
         return current_wave if current_wave is not None else parsed.wave
@@ -676,14 +775,15 @@ def _parse_tja_strict(
 
     def _commit_pending_measure(course: CourseInfo) -> None:
         state = _state_for(course)
-        if not state.pending_has_notes:
-            return
-        course.total_notes += state.pending_total_notes
-        course.hit_notes += state.pending_hit_notes
-        course.measures += 1
+        _store_measure_entry(course)
+        if state.pending_has_notes:
+            course.total_notes += state.pending_total_notes
+            course.hit_notes += state.pending_hit_notes
         if course.mode == "dojo":
             if state.current_segment is None:
                 _start_segment(course, _current_audio())
+            state.measure_index += 1
+        else:
             state.measure_index += 1
         _reset_pending_notes(course)
 
@@ -692,9 +792,10 @@ def _parse_tja_strict(
 
     def _finalise_notes_block() -> None:
         nonlocal parsing_notes, current_notes_course
-        zero_notes_block = False
         if current_notes_course:
+            state = _state_for(current_notes_course)
             _flush_pending_notes(current_notes_course)
+            current_notes_course.measures = len(state.chart_measures)
             LOGGER.info(
                 "end-notes(strict): course=%s file=%s measures=%d notes=%d",
                 current_notes_course.canonical,
@@ -702,16 +803,12 @@ def _parse_tja_strict(
                 current_notes_course.measures,
                 current_notes_course.total_notes,
             )
-            zero_notes_block = current_notes_course.total_notes == 0
-            state = _state_for(current_notes_course)
             state.block_line_count = 0
             state.block_note_count = 0
             if current_notes_course.mode == "dojo":
                 _end_segment(current_notes_course)
         parsing_notes = False
         current_notes_course = None
-        if zero_notes_block and TJA_LENIENT_FALLBACK:
-            raise RuntimeError("fallback-to-lenient")
 
     def _process_metadata_line(metadata_line: str) -> None:
         nonlocal active_course, current_notes_course, parsing_notes, current_wave
@@ -752,6 +849,20 @@ def _parse_tja_strict(
             parsed.genre = clean_value or None
         elif key_upper == "SONGID":
             parsed.song_id = clean_value or None
+        elif key_upper == "BPM":
+            bpm_value = _parse_float(value_stripped)
+            if bpm_value is not None:
+                if active_course:
+                    state = _state_for(active_course)
+                    state.current_bpm = bpm_value
+                    if state.default_bpm is None:
+                        state.default_bpm = bpm_value
+                        state.measure_bpm = bpm_value
+                else:
+                    for existing_course in parsed.courses:
+                        state = _state_for(existing_course)
+                        if state.default_bpm is None:
+                            state.default_bpm = bpm_value
         elif key_upper == "COURSE":
             raw_course_value = value_stripped.strip()
             normalised_token = _normalise_course_token(raw_course_value)
@@ -832,17 +943,6 @@ def _parse_tja_strict(
         state_for_current: Optional[_CourseParseState] = None
         if parsing_notes and current_notes_course:
             state_for_current = _state_for(current_notes_course)
-            if (
-                TJA_LENIENT_FALLBACK
-                and state_for_current.block_note_count == 0
-                and state_for_current.block_line_count >= 30
-            ):
-                LOGGER.warning(
-                    "lenient-fallback: no-notes-after-30-lines file=%s course=%s",
-                    path,
-                    current_notes_course.canonical,
-                )
-                raise RuntimeError("fallback-to-lenient")
 
         raw_line = raw_line.lstrip("\ufeff")
         stripped_pre = raw_line.strip()
@@ -902,6 +1002,16 @@ def _parse_tja_strict(
                     parsing_notes = True
                     _reset_pending_notes(current_notes_course)
                     state = _state_for(current_notes_course)
+                    first_block = active_course.start_blocks == 1
+                    if first_block:
+                        current_notes_course.total_notes = 0
+                        current_notes_course.hit_notes = 0
+                        state.chart_measures.clear()
+                        state.measure_start_time_ms = 0.0
+                    state.parse_failed = False
+                    if state.current_scroll is None:
+                        state.current_scroll = 1.0
+                    _reset_measure_buffers(current_notes_course)
                     state.block_line_count = 0
                     state.block_note_count = 0
                     if current_notes_course.mode == "dojo":
@@ -950,21 +1060,46 @@ def _parse_tja_strict(
                     handled_directive = True
                 elif directive == "#BPMCHANGE":
                     handled_directive = True
+                    if state.measure_tokens:
+                        _commit_pending_measure(current_notes_course)
+                    bpm_value = None
+                    if directive_payload:
+                        try:
+                            bpm_value = float(directive_payload.split()[0])
+                        except ValueError:
+                            bpm_value = None
+                    if bpm_value is not None:
+                        state.current_bpm = bpm_value
+                        if state.default_bpm is None:
+                            state.default_bpm = bpm_value
+                        state.measure_bpm = state.current_bpm
                     if current_notes_course.mode == "dojo":
                         if state.current_segment is None:
                             _start_segment(current_notes_course, _current_audio())
-                        try:
-                            bpm_value = (
-                                float(directive_payload.split()[0])
-                                if directive_payload
-                                else None
-                            )
-                        except ValueError:
-                            bpm_value = None
                         if bpm_value is not None:
                             state.current_segment.setdefault('bpm_map', []).append(
                                 {'measure': state.measure_index, 'value': bpm_value}
                             )
+                elif directive == "#SCROLL":
+                    handled_directive = True
+                    if state.measure_tokens:
+                        _commit_pending_measure(current_notes_course)
+                    scroll_value = _parse_float(directive_payload.split()[0]) if directive_payload else None
+                    if scroll_value is not None:
+                        state.current_scroll = scroll_value
+                        state.measure_scroll = scroll_value
+                elif directive == "#MEASURE":
+                    handled_directive = True
+                    if state.measure_tokens:
+                        _commit_pending_measure(current_notes_course)
+                    fraction = directive_payload or ""
+                    if "/" in fraction:
+                        numerator_str, denominator_str = fraction.split("/", 1)
+                        numerator = _parse_float(numerator_str.strip())
+                        denominator = _parse_float(denominator_str.strip())
+                        if numerator and denominator:
+                            state.current_measure_ratio = numerator / denominator
+                            state.measure_ratio_for_measure = state.current_measure_ratio
                 elif directive in SAFE_NOTE_DIRECTIVES:
                     handled_directive = True
                 elif directive.startswith("#EXAM"):
@@ -989,6 +1124,11 @@ def _parse_tja_strict(
                     cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)
                     if cleaned:
                         saw_digits = True
+                        if not state.measure_tokens:
+                            state.measure_bpm = state.current_bpm
+                            state.measure_scroll = state.current_scroll
+                            state.measure_ratio_for_measure = state.current_measure_ratio
+                        state.measure_tokens.extend(list(cleaned))
                         notes = [int(ch) for ch in cleaned]
                         hit_count = sum(1 for note in notes if note in HIT_NOTE_VALUES)
                         state.pending_total_notes += len(notes)
@@ -1009,14 +1149,14 @@ def _parse_tja_strict(
                 continue
             except Exception:
                 LOGGER.error(
-                    "parse-error(strict): file=%s line=%d course=%s text=%r",
-                    path,
-                    line_number,
+                    "strict-parse-failed: course=%s file=%s",
                     current_notes_course.canonical,
-                    raw_line.rstrip("\n"),
+                    path,
                     exc_info=True,
                 )
-                raise
+                _mark_course_failed(current_notes_course)
+                _finalise_notes_block()
+                continue
 
         if (
             not parsing_notes
@@ -1038,12 +1178,59 @@ def _parse_tja_strict(
             parsed.unknown_directives += 1
 
 
+    if parsing_notes:
+        _finalise_notes_block()
+
     for course in parsed.courses:
         state = course_states.get(id(course))
         if state:
             if state.current_segment is not None:
                 _end_segment(course)
             course.segments = state.segments
+
+            measures_payload: List[Dict[str, object]] = []
+            total_notes_payload = 0
+            if not state.parse_failed:
+                for measure in state.chart_measures:
+                    if not isinstance(measure, dict):
+                        continue
+                    entry: Dict[str, object] = {}
+                    notes_source = measure.get('notes')
+                    notes_payload: List[Dict[str, object]] = []
+                    if isinstance(notes_source, list):
+                        for note in notes_source:
+                            if not isinstance(note, dict):
+                                continue
+                            note_type = note.get('type')
+                            at_value = note.get('at')
+                            try:
+                                at_int = int(at_value)
+                            except (TypeError, ValueError):
+                                continue
+                            if isinstance(note_type, str):
+                                notes_payload.append({'type': note_type, 'at': at_int})
+                    entry['notes'] = notes_payload
+                    if 'bpm' in measure:
+                        entry['bpm'] = measure['bpm']
+                    if 'scroll' in measure:
+                        entry['scroll'] = measure['scroll']
+                    measures_payload.append(entry)
+                    total_notes_payload += len(notes_payload)
+            if state.parse_failed:
+                measures_payload = []
+            course.chart_data = {
+                'course': course.canonical,
+                'total_notes': course.total_notes,
+                'measures': measures_payload,
+            }
+        else:
+            course.chart_data = {
+                'course': course.canonical,
+                'total_notes': course.total_notes,
+                'measures': [],
+            }
+
+    parsed.charts = {course.canonical: course for course in parsed.courses}
 
     return parsed
 
@@ -1070,6 +1257,11 @@ def _parse_tja_lenient(
     measure_ratio_for_measure: float = 1.0
     measure_start_time_ms: float = 0.0
     total_notes = 0
+    unknown_tokens_logged: Set[str] = set()
+    best_chart_measures: List[Dict[str, object]] = []
+    best_total_notes = -1
+    best_course_token = course_token
+    best_course_raw = course_raw
 
     def _parse_float(value: str) -> Optional[float]:
         try:
@@ -1087,6 +1279,34 @@ def _parse_tja_lenient(
             ratio = 1.0
         return (240000.0 / bpm) * ratio
 
+    def _snapshot_measures(source: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        snapshot: List[Dict[str, object]] = []
+        for measure in source:
+            if not isinstance(measure, dict):
+                continue
+            entry: Dict[str, object] = {}
+            notes_source = measure.get('notes')
+            notes_copy: List[Dict[str, object]] = []
+            if isinstance(notes_source, list):
+                for note in notes_source:
+                    if not isinstance(note, dict):
+                        continue
+                    note_type = note.get('type')
+                    at_value = note.get('at')
+                    try:
+                        at_int = int(at_value)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(note_type, str):
+                        notes_copy.append({'type': note_type, 'at': at_int})
+            entry['notes'] = notes_copy
+            if 'bpm' in measure:
+                entry['bpm'] = measure['bpm']
+            if 'scroll' in measure:
+                entry['scroll'] = measure['scroll']
+            snapshot.append(entry)
+        return snapshot
+
     def _flush_measure() -> None:
         nonlocal measure_tokens, measure_bpm, measure_scroll, measure_ratio_for_measure
         nonlocal measure_start_time_ms, total_notes
@@ -1102,11 +1322,17 @@ def _parse_tja_lenient(
                 continue
             if token.isdigit():
                 note_type = LENIENT_NOTE_TYPE_MAP.get(token)
-                note_value = int(token)
-                if note_type and note_value in HIT_NOTE_VALUES:
+                if note_type:
                     position = (index / total_slots) if total_slots else 0.0
                     at_value = int(round(measure_start_time_ms + position * duration_ms))
                     measure_notes.append({'type': note_type, 'at': at_value})
+                elif token not in unknown_tokens_logged:
+                    unknown_tokens_logged.add(token)
+                    LOGGER.warning(
+                        'lenient-unknown-note-token: token=%s file=%s',
+                        token,
+                        path,
+                    )
         measure_entry: Dict[str, object] = {'notes': measure_notes}
         bpm_to_store = measure_bpm if measure_bpm is not None else current_bpm or default_bpm
         if bpm_to_store is not None:
@@ -1188,8 +1414,20 @@ def _parse_tja_lenient(
                 len(chart_measures),
                 total_notes,
             )
+            if total_notes > best_total_notes:
+                best_total_notes = total_notes
+                best_chart_measures = _snapshot_measures(chart_measures)
+                best_course_token = course_token
+                best_course_raw = course_raw
             in_notes = False
-            break
+            measure_tokens = []
+            chart_measures = []
+            total_notes = 0
+            measure_start_time_ms = 0.0
+            measure_bpm = current_bpm
+            measure_scroll = current_scroll
+            measure_ratio_for_measure = current_measure_ratio
+            continue
 
         if upper.startswith("#BPMCHANGE"):
             if measure_tokens:
@@ -1248,8 +1486,22 @@ def _parse_tja_lenient(
             len(chart_measures),
             total_notes,
         )
+        if total_notes > best_total_notes:
+            best_total_notes = total_notes
+            best_chart_measures = _snapshot_measures(chart_measures)
+            best_course_token = course_token
+            best_course_raw = course_raw
+
+    if best_total_notes >= 0:
+        chart_measures = best_chart_measures
+        total_notes = best_total_notes
+        course_token = best_course_token
+        course_raw = best_course_raw
 
     canonical = course_token.casefold() or "oni"
+    canonical = COURSE_LEGACY_MAP.get(canonical, canonical)
+    if canonical not in {"easy", "normal", "hard", "oni", "ura"}:
+        canonical = "oni"
     normalised = _normalise_course_token(course_raw) if course_raw else canonical.upper()
     course_info = CourseInfo(
         canonical=canonical,
@@ -1278,7 +1530,7 @@ def _parse_tja_lenient(
 def parse_tja(path: Path) -> ParsedTJA:
     original_text, normalised_text = read_tja(path)
     try:
-        return _parse_tja_strict(
+        parsed = _parse_tja_strict(
             path,
             original_text=original_text,
             normalised_text=normalised_text,
@@ -1287,12 +1539,68 @@ def parse_tja(path: Path) -> ParsedTJA:
         LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
         if not TJA_LENIENT_FALLBACK:
             raise
-        LOGGER.warning("lenient-fallback: file=%s", path)
+        LOGGER.warning("fallback-to-lenient: file=%s reason=strict-crash", path)
         return _parse_tja_lenient(
             path,
             original_text=original_text,
             normalised_text=normalised_text,
         )
+
+    if not TJA_LENIENT_FALLBACK:
+        return parsed
+
+    has_courses = bool(parsed.courses)
+    has_valid_course = any(course.hit_notes > 0 for course in parsed.courses)
+    if has_valid_course or not has_courses:
+        return parsed
+
+    LOGGER.warning("fallback-to-lenient: file=%s reason=no-valid-courses", path)
+    fallback = _parse_tja_lenient(
+        path,
+        original_text=original_text,
+        normalised_text=normalised_text,
+    )
+
+    if not fallback.courses:
+        return parsed
+
+    fallback_course = fallback.courses[0]
+    target_course: Optional[CourseInfo] = None
+    fallback_preference = ["oni", "hard", "normal", "easy", "ura"]
+    for preferred in fallback_preference:
+        for candidate in parsed.courses:
+            if candidate.canonical == preferred:
+                target_course = candidate
+                break
+        if target_course is not None:
+            break
+    if target_course is None:
+        target_course = parsed.courses[0]
+
+    chart_data_copy = _clone_chart_data(fallback_course.chart_data)
+    if chart_data_copy is None:
+        chart_data_copy = {
+            'course': target_course.canonical,
+            'total_notes': fallback_course.total_notes,
+            'measures': fallback_course.chart_data.get('measures') if isinstance(fallback_course.chart_data, dict) else [],
+        }
+    else:
+        chart_data_copy['course'] = target_course.canonical
+        chart_data_copy['total_notes'] = fallback_course.total_notes
+    if 'measures' not in chart_data_copy or not isinstance(chart_data_copy['measures'], list):
+        chart_data_copy['measures'] = []
+
+    if fallback_course.total_notes > 0:
+        target_course.total_notes = fallback_course.total_notes
+        target_course.hit_notes = fallback_course.hit_notes
+        target_course.measures = fallback_course.measures
+    chart_data_copy['total_notes'] = target_course.total_notes
+    chart_data_copy['course'] = target_course.canonical
+    target_course.chart_data = chart_data_copy
+    target_course.add_issue("lenient-fallback")
+    parsed.charts[target_course.canonical] = target_course
+
+    return parsed
 
 
 def _match_any(path: Path, patterns: Iterable[str]) -> bool:
