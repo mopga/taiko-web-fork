@@ -22,3 +22,26 @@ def test_select_best_chart_chooses_first_tower_when_multiple():
     best_chart = select_best_chart(charts, "oni")
 
     assert best_chart is charts[1]
+
+
+def test_select_best_chart_allows_custom_prefer_modes():
+    charts = [
+        {"course": "Oni", "mode": "standard", "display_course": "oni"},
+        {"course": "Oni", "mode": "tower", "display_course": "tower"},
+        {"course": "Oni", "mode": "dan", "display_course": "dan"},
+    ]
+
+    best_chart = select_best_chart(charts, "oni", prefer_modes=("dan",))
+
+    assert best_chart is charts[2]
+
+
+def test_select_best_chart_handles_empty_prefer_modes():
+    charts = [
+        {"course": "Oni", "mode": "standard", "display_course": "oni"},
+        {"course": "Oni", "mode": "tower", "display_course": "tower"},
+    ]
+
+    best_chart = select_best_chart(charts, "oni", prefer_modes=[])
+
+    assert best_chart is charts[0]

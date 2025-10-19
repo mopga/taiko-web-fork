@@ -39,6 +39,80 @@ from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
 
 
+def _normalize_measures_relative(measures):
+    """Convert absolute note timings to be relative to their measure start."""
+
+    normalized_measures = []
+    if not isinstance(measures, list):
+        return normalized_measures
+
+    for index, measure in enumerate(measures):
+        if isinstance(measure, dict):
+            new_measure = dict(measure)
+        else:
+            try:
+                new_measure = dict(measure)
+            except (TypeError, ValueError):
+                new_measure = {}
+
+        notes_source = new_measure.get('notes') if isinstance(new_measure, dict) else []
+        if not isinstance(notes_source, list):
+            notes_source = []
+
+        bpm_value = new_measure.get('bpm') if isinstance(new_measure, dict) else None
+        try:
+            bpm = float(bpm_value)
+            if bpm <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            bpm = 120.0
+        measure_len = int(round(4 * (60000.0 / bpm)))
+
+        absolute_positions = []
+        for note in notes_source:
+            note_mapping = note if isinstance(note, dict) else None
+            if note_mapping is None:
+                try:
+                    note_mapping = dict(note)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                absolute_positions.append(float(note_mapping.get('at')))
+            except (TypeError, ValueError):
+                continue
+
+        if absolute_positions:
+            start_ms = int(round(min(absolute_positions)))
+        else:
+            start_ms = int(index * measure_len)
+
+        normalized_notes = []
+        for note in notes_source:
+            note_mapping = note if isinstance(note, dict) else None
+            if note_mapping is None:
+                try:
+                    note_mapping = dict(note)
+                except (TypeError, ValueError):
+                    continue
+            note_copy = dict(note_mapping)
+            try:
+                absolute_at = int(round(float(note_copy.get('at'))))
+            except (TypeError, ValueError):
+                absolute_at = start_ms
+            relative_at = absolute_at - start_ms
+            if relative_at < 0:
+                relative_at = 0
+            note_copy['at'] = relative_at
+            normalized_notes.append(note_copy)
+
+        new_measure['start_ms'] = start_ms
+        new_measure['duration_ms'] = measure_len
+        new_measure['notes'] = normalized_notes
+        normalized_measures.append(new_measure)
+
+    return normalized_measures
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -870,6 +944,7 @@ def route_api_tower_chart():
     if not title:
         return jsonify({'status': 'error', 'message': 'missing_title'}), 400
     course_param = request.args.get('course', '').strip().casefold() or 'oni'
+    mode_param = request.args.get('mode', '').strip().casefold()
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
     song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
@@ -880,7 +955,8 @@ def route_api_tower_chart():
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
     charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    best_chart = select_best_chart(charts, course_param)
+    prefer_modes = (mode_param,) if mode_param else ("tower", "dan")
+    best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
 
     if best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
@@ -897,7 +973,6 @@ def route_api_tower_chart():
     measures = chart_data.get('measures')
     if not isinstance(measures, list):
         measures = []
-        chart_data['measures'] = measures
     duration_value = chart_data.get('duration_ms')
     try:
         duration_ms = int(duration_value)
@@ -906,6 +981,7 @@ def route_api_tower_chart():
     if duration_ms < 0:
         duration_ms = 0
     chart_data['duration_ms'] = duration_ms
+    chart_data['measures'] = _normalize_measures_relative(measures)
 
     response = {
         'status': 'ok',
