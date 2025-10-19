@@ -1225,6 +1225,142 @@ LEVEL:7
         self.assertEqual(len(db.songs.inserted), 1)
         self.assertEqual(summary['errors'], 0)
 
+    def test_upsert_update_document_has_no_conflicting_paths(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=6,
+            branch=False,
+            valid=True,
+            issues=[],
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+        document = scanner._build_song_document(key, [record])
+        charts_payload = list(document['charts'])
+        summary = {'inserted': 0, 'updated': 0, 'errors': 0}
+
+        with mock.patch.object(db.songs, 'update_one', wraps=db.songs.update_one) as spy_update:
+            scanner._upsert_song_document(key, [record], document, charts_payload, set(), summary)
+
+        for call in spy_update.call_args_list:
+            if len(call.args) < 2:
+                continue
+            update_doc = call.args[1]
+            if '$set' in update_doc and '$setOnInsert' in update_doc:
+                overlap = set(update_doc['$set']).intersection(update_doc['$setOnInsert'])
+                self.assertFalse(overlap)
+
+    def test_repeated_upsert_preserves_title_and_updates_charts(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=5,
+            branch=False,
+            valid=True,
+            issues=[],
+            total_notes=100,
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+        document = scanner._build_song_document(key, [record])
+        charts_payload = list(document['charts'])
+        summary = {'inserted': 0, 'updated': 0, 'errors': 0}
+
+        song_id = scanner._upsert_song_document(key, [record], document, charts_payload, set(), summary)
+        self.assertIsNotNone(song_id)
+        stored = db.songs._docs[0]
+        original_title = stored['title']
+
+        document2 = scanner._build_song_document(key, [record])
+        document2['title'] = 'Modified Title'
+        charts_payload2 = list(document2['charts'])
+        charts_payload2[0]['total_notes'] = charts_payload2[0].get('total_notes', 0) + 25
+        summary2 = {'inserted': 0, 'updated': 0, 'errors': 0}
+
+        song_id_second = scanner._upsert_song_document(
+            key,
+            [record],
+            document2,
+            charts_payload2,
+            {key},
+            summary2,
+        )
+
+        self.assertEqual(song_id, song_id_second)
+        self.assertEqual(db.songs._docs[0]['title'], original_title)
+        charts_after = db.songs._docs[0]['charts']
+        self.assertTrue(charts_after)
+        self.assertEqual(charts_after[0].get('total_notes'), charts_payload2[0]['total_notes'])
+
+    def test_write_error_code_40_logged_and_handled(self):
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=Path(self._tmp_dir()),
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        chart = ChartRecord(
+            course="oni",
+            raw_course="Oni",
+            normalised="oni",
+            level=4,
+            branch=False,
+            valid=True,
+            issues=[],
+        )
+        record = self._make_record(charts=[chart])
+        key = compute_group_key(record)
+        document = scanner._build_song_document(key, [record])
+        charts_payload = list(document['charts'])
+        summary = {'inserted': 0, 'updated': 0, 'errors': 0}
+
+        class _FakeWriteError(Exception):
+            def __init__(self, code):
+                super().__init__('write-error')
+                self.code = code
+
+        original_update = db.songs.update_one
+        call_counter = {'count': 0}
+
+        def _patched_update(filter_doc, update_doc, upsert=False, array_filters=None):
+            call_counter['count'] += 1
+            if call_counter['count'] == 4:
+                raise songs_scanner.WriteError(40)
+            return original_update(filter_doc, update_doc, upsert=upsert, array_filters=array_filters)
+
+        with mock.patch.object(songs_scanner, 'WriteError', _FakeWriteError):
+            with mock.patch.object(db.songs, 'update_one', side_effect=_patched_update):
+                with self.assertLogs('songs_scanner', level='ERROR') as logs:
+                    result = scanner._upsert_song_document(
+                        key,
+                        [record],
+                        document,
+                        charts_payload,
+                        set(),
+                        summary,
+                    )
+
+        self.assertIsNone(result)
+        self.assertEqual(summary['errors'], 1)
+        self.assertTrue(any('write-error-40: conflict at path' in entry for entry in logs.output))
     def test_scanner_seeds_legacy_stable_ids_on_startup(self):
         db = _DummyDB()
         tmp_dir = Path(self._tmp_dir())
