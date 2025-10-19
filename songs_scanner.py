@@ -8,8 +8,11 @@ import hashlib
 import logging
 import random
 import re
+import signal
+import sys
 import threading
 import time
+import traceback
 from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
@@ -46,6 +49,55 @@ LOGGER = logging.getLogger(__name__)
 
 
 TJA_LENIENT_FALLBACK = os.getenv("TJA_LENIENT_FALLBACK", "1") == "1"
+
+
+_HANG_WATCHDOG_ARMED = False
+
+
+def _dump_stacktrace(signum, frame) -> None:  # pragma: no cover - diagnostic helper
+    LOGGER.error(
+        "scanner hang watchdog triggered: pid=%d signal=%s",
+        os.getpid(),
+        signum,
+    )
+    try:
+        current_frames = sys._current_frames()
+    except Exception:
+        current_frames = {}
+    thread_names = {thread.ident: thread.name for thread in threading.enumerate()}
+    for ident, thread_frame in current_frames.items():
+        thread_name = thread_names.get(ident, "<unknown>")
+        stack = "".join(traceback.format_stack(thread_frame))
+        LOGGER.error(
+            "scanner hang watchdog stack: thread=%s ident=%s\n%s",
+            thread_name,
+            ident,
+            stack,
+        )
+    if hasattr(signal, "SIGALRM"):
+        try:
+            signal.alarm(60)
+        except Exception:
+            LOGGER.debug("failed to re-arm scanner hang watchdog", exc_info=True)
+
+
+def _maybe_enable_hang_watchdog() -> None:
+    global _HANG_WATCHDOG_ARMED
+    if _HANG_WATCHDOG_ARMED:
+        return
+    if not os.getenv("DEBUG_SCANNER_HANG"):
+        return
+    if not hasattr(signal, "SIGALRM"):
+        LOGGER.warning("scanner hang watchdog unavailable: SIGALRM unsupported")
+        return
+    try:
+        signal.signal(signal.SIGALRM, _dump_stacktrace)
+        signal.alarm(60)
+    except Exception:
+        LOGGER.warning("failed to arm scanner hang watchdog", exc_info=True)
+        return
+    _HANG_WATCHDOG_ARMED = True
+    LOGGER.info("scanner hang watchdog armed timeout=60s")
 
 SUPPORTED_AUDIO_EXTS = [
     ".ogg",
@@ -181,6 +233,97 @@ def _build_synthetic_notes_from_longs(
             continue
         synthetic.append({'type': 'don', 'at': at_int, 'synthetic': True})
     return synthetic
+
+
+def _finalise_chart_metrics(
+    measures: Sequence[Dict[str, object]]
+) -> Tuple[int, int]:
+    total_hits = 0
+    total_longs = 0
+
+    for measure in measures:
+        if not isinstance(measure, dict):
+            continue
+        notes_list = measure.get('notes')
+        if not isinstance(notes_list, list):
+            notes_list = []
+            measure['notes'] = notes_list
+        total_hits += sum(1 for note in notes_list if isinstance(note, dict))
+
+        longs_list = measure.get('longs')
+        if isinstance(longs_list, list):
+            for long_note in longs_list:
+                if not isinstance(long_note, dict):
+                    continue
+                try:
+                    int(long_note.get('at'))
+                except (TypeError, ValueError):
+                    continue
+                total_longs += 1
+
+    if total_hits == 0 and total_longs > 0:
+        for measure in measures:
+            if not isinstance(measure, dict):
+                continue
+            notes_list = measure.get('notes')
+            if not isinstance(notes_list, list):
+                notes_list = []
+                measure['notes'] = notes_list
+            longs_list = measure.get('longs')
+            if not isinstance(longs_list, list):
+                continue
+            for long_note in longs_list:
+                if not isinstance(long_note, dict):
+                    continue
+                at_value = long_note.get('at')
+                try:
+                    at_int = int(at_value)
+                except (TypeError, ValueError):
+                    continue
+                notes_list.append({'type': 'don', 'at': at_int, 'synthetic': True})
+        total_hits = total_longs
+
+    latest_note_at = 0
+    latest_long_at = 0
+    for measure in measures:
+        if not isinstance(measure, dict):
+            continue
+        notes_list = measure.get('notes')
+        if isinstance(notes_list, list):
+            for note in notes_list:
+                if not isinstance(note, dict):
+                    continue
+                at_value = note.get('at')
+                try:
+                    at_int = int(at_value)
+                except (TypeError, ValueError):
+                    continue
+                if at_int > latest_note_at:
+                    latest_note_at = at_int
+        longs_list = measure.get('longs')
+        if isinstance(longs_list, list):
+            for long_note in longs_list:
+                if not isinstance(long_note, dict):
+                    continue
+                end_value = long_note.get('end_at', long_note.get('at'))
+                candidate = None
+                try:
+                    if end_value is not None:
+                        candidate = int(end_value)
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is None:
+                    at_value = long_note.get('at')
+                    try:
+                        candidate = int(at_value)
+                    except (TypeError, ValueError):
+                        continue
+                if candidate > latest_long_at:
+                    latest_long_at = candidate
+
+    duration_ms = max(latest_note_at, latest_long_at)
+    LOGGER.info("synth-notes: injected=%d", total_hits)
+    return total_hits, duration_ms
 
 
 def _normalised_requires_synthetic_notes(
@@ -445,6 +588,11 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
         total_notes_int = int(total_notes_value)
     except (TypeError, ValueError):
         total_notes_int = 0
+    duration_value = chart.get('duration_ms', 0)
+    try:
+        duration_int = int(duration_value)
+    except (TypeError, ValueError):
+        duration_int = 0
     measures_payload: List[Dict[str, object]] = []
     measures_source = chart.get('measures')
     if isinstance(measures_source, list):
@@ -507,6 +655,7 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
         'course': course_value,
         'total_notes': total_notes_int,
         'measures': measures_payload,
+        'duration_ms': duration_int,
     }
 
 
@@ -1367,13 +1516,12 @@ def _parse_tja_strict(
 
     for course in parsed.courses:
         state = course_states.get(id(course))
+        measures_payload: List[Dict[str, object]] = []
         if state:
             if state.current_segment is not None:
                 _end_segment(course)
             course.segments = state.segments
 
-            measures_payload: List[Dict[str, object]] = []
-            total_notes_payload = 0
             if not state.parse_failed:
                 for measure in state.chart_measures:
                     if not isinstance(measure, dict):
@@ -1428,20 +1576,19 @@ def _parse_tja_strict(
                     if 'scroll' in measure:
                         entry['scroll'] = measure['scroll']
                     measures_payload.append(entry)
-                    total_notes_payload += len(notes_payload)
             if state.parse_failed:
                 measures_payload = []
-            course.chart_data = {
-                'course': course.canonical,
-                'total_notes': course.total_notes,
-                'measures': measures_payload,
-            }
         else:
-            course.chart_data = {
-                'course': course.canonical,
-                'total_notes': course.total_notes,
-                'measures': [],
-            }
+            measures_payload = []
+
+        total_hits, duration_ms = _finalise_chart_metrics(measures_payload)
+        course.total_notes = total_hits
+        course.chart_data = {
+            'course': course.canonical,
+            'total_notes': total_hits,
+            'measures': measures_payload,
+            'duration_ms': duration_ms,
+        }
 
     parsed.charts = {course.canonical: course for course in parsed.courses}
 
@@ -1893,18 +2040,18 @@ def _parse_tja_lenient(
         course_token = best_course_token
         course_raw = best_course_raw
 
-    note_total = 0
+    total_hits, duration_ms = _finalise_chart_metrics(chart_measures)
+
     hit_total = 0
     for measure in chart_measures:
         if not isinstance(measure, dict):
             continue
         notes_list = measure.get('notes')
         if isinstance(notes_list, list):
-            note_total += len(notes_list)
             for note in notes_list:
                 if isinstance(note, dict) and not note.get('synthetic'):
                     hit_total += 1
-    total_notes = note_total
+    total_notes = total_hits
 
     canonical = course_token.casefold() or "oni"
     canonical = COURSE_LEGACY_MAP.get(canonical, canonical)
@@ -1923,6 +2070,7 @@ def _parse_tja_lenient(
         'course': canonical,
         'total_notes': total_notes,
         'measures': chart_measures,
+        'duration_ms': duration_ms,
     }
     course_info.add_issue("lenient-fallback")
     parsed.courses.append(course_info)
@@ -1945,13 +2093,19 @@ def parse_tja(path: Path) -> ParsedTJA:
         )
     except Exception:
         LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
-        if not TJA_LENIENT_FALLBACK:
-            raise
-        LOGGER.warning("fallback-to-lenient: file=%s reason=strict-crash", path)
-        return _parse_tja_lenient(
-            path,
-            original_text=original_text,
-            normalised_text=normalised_text,
+        if TJA_LENIENT_FALLBACK:
+            LOGGER.warning("lenient-trigger: file=%s reason=strict-crash", path)
+            return _parse_tja_lenient(
+                path,
+                original_text=original_text,
+                normalised_text=normalised_text,
+            )
+        LOGGER.warning(
+            "lenient-trigger: file=%s reason=strict-crash-disabled", path
+        )
+        return ParsedTJA(
+            raw_text=original_text,
+            fingerprint=md5_text(normalised_text),
         )
 
     if not TJA_LENIENT_FALLBACK:
@@ -1962,7 +2116,7 @@ def parse_tja(path: Path) -> ParsedTJA:
     if has_valid_course or not has_courses:
         return parsed
 
-    LOGGER.warning("fallback-to-lenient: file=%s reason=no-valid-courses", path)
+    LOGGER.warning("lenient-trigger: file=%s reason=no-valid-courses", path)
     fallback = _parse_tja_lenient(
         path,
         original_text=original_text,
@@ -1987,16 +2141,33 @@ def parse_tja(path: Path) -> ParsedTJA:
 
     chart_data_copy = _clone_chart_data(fallback_course.chart_data)
     if chart_data_copy is None:
+        measures_source: List[Dict[str, object]] = []
+        fallback_duration = 0
+        if isinstance(fallback_course.chart_data, dict):
+            measures_candidate = fallback_course.chart_data.get('measures')
+            if isinstance(measures_candidate, list):
+                measures_source = [
+                    measure.copy() if isinstance(measure, dict) else {}
+                    for measure in measures_candidate
+                ]
+            duration_candidate = fallback_course.chart_data.get('duration_ms', 0)
+            try:
+                fallback_duration = int(duration_candidate)
+            except (TypeError, ValueError):
+                fallback_duration = 0
         chart_data_copy = {
             'course': target_course.canonical,
             'total_notes': fallback_course.total_notes,
-            'measures': fallback_course.chart_data.get('measures') if isinstance(fallback_course.chart_data, dict) else [],
+            'measures': measures_source,
+            'duration_ms': fallback_duration,
         }
     else:
         chart_data_copy['course'] = target_course.canonical
         chart_data_copy['total_notes'] = fallback_course.total_notes
     if 'measures' not in chart_data_copy or not isinstance(chart_data_copy['measures'], list):
         chart_data_copy['measures'] = []
+    if 'duration_ms' not in chart_data_copy:
+        chart_data_copy['duration_ms'] = 0
 
     if fallback_course.total_notes > 0:
         target_course.total_notes = fallback_course.total_notes
@@ -2027,6 +2198,8 @@ class SongScanner:
         ignore_globs: Optional[Iterable[str]] = None,
         coerce_unknown_course: Optional[str] = None,
     ) -> None:
+        LOGGER.info("scanner worker online pid=%d", os.getpid())
+        _maybe_enable_hang_watchdog()
         self.db = db
         self.songs_dir = songs_dir
         self._songs_root = songs_dir.resolve()
@@ -2542,7 +2715,7 @@ class SongScanner:
         except Exception:  # pragma: no cover - diagnostics must not crash the scanner
             LOGGER.debug('Failed to record invalid group key issue for %s', key)
 
-    def _upsert_song_document(
+    def _unsafe_upsert_song_document(
         self,
         key: str,
         records: List[TjaImportRecord],
@@ -2584,7 +2757,14 @@ class SongScanner:
         insert_document['created_at'] = now_utc
 
         mutable_conflicts = mutable_fields.intersection(insert_document.keys())
-        assert not mutable_conflicts, f"insert-once-mutable-conflict: {mutable_conflicts}"
+        if mutable_conflicts:
+            LOGGER.error(
+                'insert-once-mutable-conflict: fields=%s key=%s',
+                sorted(mutable_conflicts),
+                key,
+            )
+            summary['errors'] += 1
+            return None
 
         base_document = {
             k: v for k, v in base_document.items() if k not in insert_only_fields
@@ -2596,18 +2776,29 @@ class SongScanner:
         stable_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
         legacy_filter: Dict[str, object] = {'group_key': key, 'scanner_stable_id': {'$exists': False}}
 
-        def _validate_update_doc(update: Dict[str, Dict[str, object]]) -> None:
+        def _validate_update_doc(update: Dict[str, Dict[str, object]]) -> bool:
             if '$set' in update and '$setOnInsert' in update:
                 dup = set(update['$set']).intersection(update['$setOnInsert'])
-                assert not dup, f"update-conflict-keys: {dup}"
+                if dup:
+                    LOGGER.error(
+                        'update-conflict-keys: fields=%s key=%s',
+                        sorted(dup),
+                        key,
+                    )
+                    return False
+            return True
 
         update_existing = {'$set': base_document}
         legacy_update_existing = {'$set': dict(base_document)}
         legacy_update_existing['$set']['scanner_stable_id'] = stable_song_id
         update_insert = {'$setOnInsert': insert_document, '$set': base_document}
 
-        _validate_update_doc(update_existing)
-        _validate_update_doc(update_insert)
+        if not _validate_update_doc(update_existing):
+            summary['errors'] += 1
+            return None
+        if not _validate_update_doc(update_insert):
+            summary['errors'] += 1
+            return None
 
         result_doc: Optional[Dict[str, object]] = None
         final_mode = 'unknown'
@@ -2701,7 +2892,14 @@ class SongScanner:
                             jitter = random.random() * 0.025
                             time.sleep(0.05 + jitter)
                             continue
-                    raise
+                    LOGGER.error(
+                        'song update failed: phase=%s attempt=%d filter=%s',
+                        phase,
+                        attempt + 1,
+                        filter_doc,
+                        exc_info=True,
+                    )
+                    return None
             return None
 
         with self._group_key_lock(key):
@@ -2816,7 +3014,15 @@ class SongScanner:
                         LOGGER.exception("Failed to assign song id for %s", key)
                         summary['errors'] += 1
                         return None
-                    raise
+                    LOGGER.error(
+                        'song id assignment failed: key=%s attempt=%d filter=%s',
+                        key,
+                        attempt + 1,
+                        assignment_filter,
+                        exc_info=True,
+                    )
+                    summary['errors'] += 1
+                    return None
                 latest_doc = None
                 try:
                     latest_doc = self.db.songs.find_one(song_filter)
@@ -2850,7 +3056,14 @@ class SongScanner:
                     LOGGER.exception("Failed to update aggregated song for %s", key)
                     summary['errors'] += 1
                 else:
-                    raise
+                    LOGGER.error(
+                        'song aggregate refresh failed: key=%s filter=%s',
+                        key,
+                        song_filter,
+                        exc_info=True,
+                    )
+                    summary['errors'] += 1
+                    return None
 
             try:
                 self._sync_song_charts(song_filter, charts_payload)
@@ -2860,6 +3073,29 @@ class SongScanner:
                 self._metrics.increment('charts_synced_total')
 
         return song_id
+
+    def _upsert_song_document(
+        self,
+        key: str,
+        records: List[TjaImportRecord],
+        document: Dict[str, object],
+        charts_payload: List[Dict[str, object]],
+        dirty_groups: Set[str],
+        summary: Dict[str, int],
+    ) -> Optional[int]:
+        try:
+            return self._unsafe_upsert_song_document(
+                key,
+                records,
+                document,
+                charts_payload,
+                dirty_groups,
+                summary,
+            )
+        except Exception:
+            LOGGER.error('song-document-upsert-crash: key=%s', key, exc_info=True)
+            summary['errors'] += 1
+            return None
 
     def _cleanup_invalid_group_keys(self) -> None:
         songs_collection = getattr(self.db, 'songs', None)
@@ -3607,6 +3843,7 @@ class SongScanner:
                     needs_processing = True
 
             if needs_processing:
+                LOGGER.info('scan-job-start: %s', tja_path)
                 try:
                     parsed = parse_tja(tja_path)
                     total_notes = sum(course.total_notes for course in parsed.courses)
@@ -3625,56 +3862,56 @@ class SongScanner:
                     if parsed.has_dojo_course:
                         self._metrics.increment('tja_dojo_parsed_total')
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
-                except Exception:  # pragma: no cover - defensive
+                    tja_bytes = tja_path.read_bytes()
+                    file_hash = md5_bytes(tja_bytes)
+                    fingerprint = parsed.fingerprint
+
+                    audio_url = None
+                    music_type = None
+                    audio_hash = None
+                    audio_mtime_ns = None
+                    audio_size = None
+                    if audio_path:
+                        try:
+                            relative_audio = audio_path.resolve().relative_to(self._songs_root)
+                        except ValueError:
+                            diagnostics.append('wave-outside-root')
+                            relative_audio = None
+                        else:
+                            audio_url = self._build_url(relative_audio)
+                        if audio_url:
+                            music_type = audio_path.suffix.lower().lstrip('.')
+                            audio_bytes = audio_path.read_bytes()
+                            audio_hash = md5_bytes(audio_bytes)
+                            audio_stat = audio_path.stat()
+                            audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
+                            audio_size = audio_stat.st_size
+
+                    category_id, category_title = self._determine_category(tja_path)
+                    if category_id and category_title:
+                        categories[category_id] = category_title
+
+                    record = self._build_import_record(
+                        tja_path=tja_path,
+                        relative_tja=relative_tja,
+                        parsed=parsed,
+                        fingerprint=fingerprint,
+                        file_hash=file_hash,
+                        audio_path=audio_path,
+                        audio_url=audio_url,
+                        audio_hash=audio_hash,
+                        audio_mtime_ns=audio_mtime_ns,
+                        audio_size=audio_size,
+                        music_type=music_type,
+                        diagnostics=diagnostics,
+                        category_id=category_id,
+                        category_title=category_title,
+                    )
+                except Exception:
                     LOGGER.error('scan-job-crash: file=%s', tja_path, exc_info=True)
                     summary['errors'] += 1
                     continue
-
-                tja_bytes = tja_path.read_bytes()
-                file_hash = md5_bytes(tja_bytes)
-                fingerprint = parsed.fingerprint
-
-                audio_url = None
-                music_type = None
-                audio_hash = None
-                audio_mtime_ns = None
-                audio_size = None
-                if audio_path:
-                    try:
-                        relative_audio = audio_path.resolve().relative_to(self._songs_root)
-                    except ValueError:
-                        diagnostics.append('wave-outside-root')
-                        relative_audio = None
-                    else:
-                        audio_url = self._build_url(relative_audio)
-                    if audio_url:
-                        music_type = audio_path.suffix.lower().lstrip('.')
-                        audio_bytes = audio_path.read_bytes()
-                        audio_hash = md5_bytes(audio_bytes)
-                        audio_stat = audio_path.stat()
-                        audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
-                        audio_size = audio_stat.st_size
-
-                category_id, category_title = self._determine_category(tja_path)
-                if category_id and category_title:
-                    categories[category_id] = category_title
-
-                record = self._build_import_record(
-                    tja_path=tja_path,
-                    relative_tja=relative_tja,
-                    parsed=parsed,
-                    fingerprint=fingerprint,
-                    file_hash=file_hash,
-                    audio_path=audio_path,
-                    audio_url=audio_url,
-                    audio_hash=audio_hash,
-                    audio_mtime_ns=audio_mtime_ns,
-                    audio_size=audio_size,
-                    music_type=music_type,
-                    diagnostics=diagnostics,
-                    category_id=category_id,
-                    category_title=category_title,
-                )
+                LOGGER.info('scan-job-finish: %s', tja_path)
 
             if record is None:
                 summary['errors'] += 1
