@@ -763,106 +763,266 @@ class Loader{
                 return promise
         }
         loadSongsCatalog(){
-                const limit = 200
+                const HARD_PAGE_CAP = 200
+                const LIMIT = 200
                 const collected = []
                 const loaderInstance = this
-                const pageCache = songsCatalogCache.pages || (songsCatalogCache.pages = Object.create(null))
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
+                let pageCache = songsCatalogCache.pages
 
-                function pruneCacheAfter(page){
-                        Object.keys(pageCache).forEach(key => {
-                                const numericKey = parseInt(key, 10)
-                                if(Number.isFinite(numericKey) && numericKey > page){
-                                        delete pageCache[key]
+                function normalisePageCache(existing){
+                        if(existing instanceof Map){
+                                return existing
+                        }
+                        const map = new Map()
+                        if(existing && typeof existing === "object"){
+                                Object.keys(existing).forEach(key => {
+                                        const numericKey = parseInt(key, 10)
+                                        if(Number.isFinite(numericKey) && Array.isArray(existing[key])){
+                                                map.set(numericKey, existing[key].slice())
+                                        }
+                                })
+                        }
+                        return map
+                }
+
+                pageCache = normalisePageCache(pageCache)
+                songsCatalogCache.pages = pageCache
+
+                function cachePage(pageNumber, items){
+                        if(!(pageCache instanceof Map)){
+                                return
+                        }
+                        pageCache.set(pageNumber, Array.isArray(items) ? items.slice() : [])
+                }
+
+                function getCachedPage(pageNumber){
+                        if(!(pageCache instanceof Map)){
+                                return null
+                        }
+                        if(!pageCache.has(pageNumber)){
+                                return null
+                        }
+                        const cached = pageCache.get(pageNumber)
+                        return Array.isArray(cached) ? cached.slice() : null
+                }
+
+                function pruneCacheAfter(pageNumber){
+                        if(!(pageCache instanceof Map)){
+                                return
+                        }
+                        const keysToDelete = []
+                        pageCache.forEach((_, key) => {
+                                if(key > pageNumber){
+                                        keysToDelete.push(key)
+                                }
+                        })
+                        keysToDelete.forEach(key => pageCache.delete(key))
+                }
+
+                function appendItems(items){
+                        if(!Array.isArray(items)){
+                                return
+                        }
+                        items.forEach(detail => {
+                                if(detail && typeof detail === "object"){
+                                        collected.push(detail)
                                 }
                         })
                 }
 
-                function reuseCachedPage(page){
-                        const cachedPage = pageCache && pageCache[page]
-                        if(Array.isArray(cachedPage) && cachedPage.length){
-                                cachedPage.forEach(detail => {
-                                        if(detail && typeof detail === "object"){
-                                                collected.push(detail)
-                                        }
-                                })
-                                if(cachedPage.length === limit){
-                                        return fetchPage(page + 1)
-                                }
+                function loadDetail(entry){
+                        if(!entry || typeof entry.id !== "string" || !entry.id){
+                                return Promise.resolve(null)
                         }
-                        return null
+                        const detailId = entry.id
+                        const cachedDetail = detailCache[detailId]
+                        const url = `api/song/${encodeURIComponent(detailId)}`
+                        return loaderInstance.ajax(url).then(detailResponse => {
+                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
+                                        return cachedDetail || null
+                                }
+                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
+                                        return cachedDetail || null
+                                }
+                                try{
+                                        const parsed = JSON.parse(detailResponse)
+                                        if(parsed && typeof parsed === "object"){
+                                                const stableId = typeof parsed.id === "string" && parsed.id ? parsed.id : detailId
+                                                if(stableId){
+                                                        detailCache[stableId] = parsed
+                                                }
+                                                return parsed
+                                        }
+                                }catch(err){
+                                        return cachedDetail || null
+                                }
+                                return cachedDetail || null
+                        }).catch(() => cachedDetail || null)
                 }
 
-                function fetchPage(page){
-                        const url = `api/songs?page=${page}&limit=${limit}`
-                        return loaderInstance.ajax(url).then(response => {
-                                if(response && typeof response === "object" && response.__notModified){
-                                        const reused = reuseCachedPage(page)
-                                        return reused === null ? [] : reused
-                                }
-                                if(response === "" || response === null || typeof response === "undefined"){
-                                        return reuseCachedPage(page)
-                                }
-                                let entries
-                                try{
-                                        entries = JSON.parse(response)
-                                }catch(e){
-                                        entries = []
-                                }
-                                if(!Array.isArray(entries) || entries.length === 0){
-                                        if(pageCache){
-                                                delete pageCache[page]
-                                                pruneCacheAfter(page)
+                async function fetchPage(pageNumber, limit){
+                        const baseUrl = `api/songs?page=${pageNumber}&limit=${limit}`
+                        const hasCache = pageCache instanceof Map && pageCache.has(pageNumber)
+                        const supportsFetch = typeof fetch === "function"
+
+                        async function performRequest(url, bypassCache){
+                                if(supportsFetch){
+                                        const init = {
+                                                method: "GET",
+                                                credentials: "same-origin",
                                         }
-                                        return null
-                                }
-                                const detailPromises = entries.map(entry => {
-                                        if(!entry || typeof entry.id !== "string" || !entry.id){
-                                                return Promise.resolve(null)
+                                        if(bypassCache){
+                                                init.cache = "no-store"
+                                                init.headers = {
+                                                        "Cache-Control": "no-cache",
+                                                        "Pragma": "no-cache",
+                                                }
                                         }
-                                        const detailUrl = `api/song/${encodeURIComponent(entry.id)}`
-                                        return loaderInstance.ajax(detailUrl).then(detailResponse => {
-                                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
-                                                        return detailCache[entry.id] || null
-                                                }
-                                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
-                                                        return detailCache[entry.id] || null
-                                                }
-                                                try{
-                                                        const parsed = JSON.parse(detailResponse)
-                                                        if(parsed && typeof parsed === "object"){
-                                                                const detailId = typeof parsed.id === "string" && parsed.id ? parsed.id : entry.id
-                                                                if(detailId){
-                                                                        detailCache[detailId] = parsed
-                                                                }
-                                                        }
-                                                        return parsed
-                                                }catch(err){
-                                                        return detailCache[entry.id] || null
-                                                }
-                                        }).catch(() => detailCache[entry.id] || null)
-                                })
-                                return Promise.all(detailPromises).then(details => {
-                                        const pageDetails = []
-                                        details.forEach(detail => {
-                                                if(detail && typeof detail === "object"){
-                                                        collected.push(detail)
-                                                        pageDetails.push(detail)
+                                        const response = await fetch(url, init)
+                                        if(response.status === 304){
+                                                return {notModified: true}
+                                        }
+                                        if(response.status === 200){
+                                                const body = await response.text()
+                                                return {body}
+                                        }
+                                        const error = new Error(`${url} (${response.status})`)
+                                        error.status = response.status
+                                        throw error
+                                }
+                                return loaderInstance
+                                        .ajax(url, request => {
+                                                if(bypassCache){
+                                                        try{
+                                                                request.setRequestHeader("Cache-Control", "no-cache")
+                                                        }catch(e){}
+                                                        try{
+                                                                request.setRequestHeader("Pragma", "no-cache")
+                                                        }catch(e){}
                                                 }
                                         })
-                                        pageCache[page] = pageDetails
-                                        if(pageDetails.length < limit){
-                                                pruneCacheAfter(page)
-                                        }
-                                        if(entries.length === limit){
-                                                return fetchPage(page + 1)
-                                        }
-                                        return null
-                                })
-                        }).catch(() => reuseCachedPage(page))
+                                        .then(result => {
+                                                if(result && typeof result === "object" && result.__notModified){
+                                                        return {notModified: true}
+                                                }
+                                                return {body: result}
+                                        })
+                                        .catch(error => {
+                                                if(error && typeof error === "object" && error.__notModified){
+                                                        return {notModified: true}
+                                                }
+                                                throw error
+                                        })
+                        }
+
+                        const initial = await performRequest(baseUrl, false)
+                        if(initial.notModified){
+                                if(hasCache){
+                                        return {__notModified: true}
+                                }
+                                const bypassUrl = `${baseUrl}${baseUrl.indexOf("?") === -1 ? "?" : "&"}_bypass=${Date.now()}`
+                                const retry = await performRequest(bypassUrl, true)
+                                if(retry.notModified){
+                                        return []
+                                }
+                                return retry.body
+                        }
+                        return initial.body
                 }
 
-                return fetchPage(1).then(() => {
+                async function processPage(pageNumber){
+                        let response
+                        try{
+                                response = await fetchPage(pageNumber, LIMIT)
+                        }catch(err){
+                                const cached = getCachedPage(pageNumber)
+                                if(cached && cached.length){
+                                        appendItems(cached)
+                                        if(cached.length < LIMIT){
+                                                pruneCacheAfter(pageNumber)
+                                                return false
+                                        }
+                                        return true
+                                }
+                                return false
+                        }
+
+                        if(response && typeof response === "object" && response.__notModified){
+                                const cached = getCachedPage(pageNumber)
+                                if(Array.isArray(cached) && cached.length){
+                                        appendItems(cached)
+                                        if(cached.length < LIMIT){
+                                                pruneCacheAfter(pageNumber)
+                                                return false
+                                        }
+                                        return true
+                                }
+                                pruneCacheAfter(pageNumber)
+                                return false
+                        }
+
+                        let entries = []
+                        if(Array.isArray(response)){
+                                entries = response
+                        }else if(typeof response === "string" && response){
+                                try{
+                                        entries = JSON.parse(response)
+                                }catch(parseErr){
+                                        entries = []
+                                }
+                        }else if(response === "" || response === null || typeof response === "undefined"){
+                                const cached = getCachedPage(pageNumber)
+                                if(Array.isArray(cached) && cached.length){
+                                        appendItems(cached)
+                                        if(cached.length < LIMIT){
+                                                pruneCacheAfter(pageNumber)
+                                                return false
+                                        }
+                                        return true
+                                }
+                                entries = []
+                        }
+
+                        if(!Array.isArray(entries) || entries.length === 0){
+                                if(pageCache instanceof Map){
+                                        pageCache.delete(pageNumber)
+                                }
+                                pruneCacheAfter(pageNumber)
+                                return false
+                        }
+
+                        const details = await Promise.all(entries.map(loadDetail))
+                        const pageDetails = details.filter(detail => detail && typeof detail === "object")
+                        if(pageDetails.length === 0){
+                                if(pageCache instanceof Map){
+                                        pageCache.delete(pageNumber)
+                                }
+                                pruneCacheAfter(pageNumber)
+                                return false
+                        }
+
+                        cachePage(pageNumber, pageDetails)
+                        appendItems(pageDetails)
+                        if(entries.length < LIMIT || pageDetails.length < LIMIT){
+                                pruneCacheAfter(pageNumber)
+                                return false
+                        }
+                        return true
+                }
+
+                async function loadAllPages(){
+                        let page = 1
+                        while(page <= HARD_PAGE_CAP){
+                                const shouldContinue = await processPage(page)
+                                if(!shouldContinue){
+                                        break
+                                }
+                                page += 1
+                        }
+                }
+
+                return loadAllPages().then(() => {
                         if(collected.length === 0){
                                 if(Array.isArray(songsCatalogCache.lastResult) && songsCatalogCache.lastResult.length){
                                         return songsCatalogCache.lastResult.slice()

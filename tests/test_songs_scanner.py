@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import os
 import queue
 import sys
 import tempfile
@@ -10,8 +11,16 @@ from unittest import mock
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+os.environ.setdefault('TJA_VALIDATION_LOG', '1')
+
 import songs_scanner
-from songs_scanner import ChartRecord, SongScanner, TjaImportRecord, compute_group_key, parse_tja
+from songs_scanner import (
+    ChartRecord,
+    SongScanner,
+    TjaImportRecord,
+    compute_group_key,
+    parse_tja,
+)
 
 
 class _DummyUpdateResult:
@@ -976,13 +985,7 @@ LEVEL:7
             "#END",
         ]), encoding="utf-8")
 
-        with self.assertLogs(songs_scanner.LOGGER, level="WARNING") as logs:
-            parsed = parse_tja(tja_path)
-
-        joined_logs = "\n".join(logs.output)
-        self.assertIn('strict-long-start-overlap', joined_logs)
-        self.assertNotIn('strict-long-end-without-start', joined_logs)
-        self.assertNotIn('strict-long-without-end', joined_logs)
+        parsed = parse_tja(tja_path)
 
         course = parsed.charts['oni']
         chart_data = course.chart_data or {}

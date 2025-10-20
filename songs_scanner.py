@@ -58,6 +58,15 @@ LOGGER = logging.getLogger(__name__)
 TJA_LENIENT_FALLBACK = os.getenv("TJA_LENIENT_FALLBACK", "1") == "1"
 
 
+VALIDATION_ERROR_ISSUE = "strict-validation-error"
+
+
+from tja_validator import get_tja_validator
+
+
+TJA_VALIDATOR = get_tja_validator()
+
+
 _HANG_WATCHDOG_ARMED = False
 
 
@@ -946,6 +955,12 @@ def _parse_tja_strict(
 ) -> ParsedTJA:
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
 
+    validator = TJA_VALIDATOR
+
+    def _report_validation(code: str, course: CourseInfo, *, token: Optional[str] = None) -> None:
+        if validator.report(code, path=path, course=course.canonical, token=token):
+            course.add_issue(VALIDATION_ERROR_ISSUE)
+
     offset_seconds = parsed.offset if parsed.offset is not None else 0.0
     try:
         offset_ms = float(offset_seconds) * -1000.0
@@ -1014,11 +1029,7 @@ def _parse_tja_strict(
                 _resolve_long_end(entry_ref, at_value)
                 state.active_long = None
             else:
-                LOGGER.warning(
-                    'strict-long-end-without-start: course=%s file=%s',
-                    course.canonical,
-                    path,
-                )
+                _report_validation('end_without_start', course)
 
         for index, token in enumerate(tokens):
             if not token:
@@ -1039,12 +1050,7 @@ def _parse_tja_strict(
             if note_value in LONG_NOTE_START_MAP:
                 long_spec = LONG_NOTE_START_MAP[note_value]
                 if state.active_long and isinstance(state.active_long.get('entry'), dict):
-                    LOGGER.warning(
-                        'strict-long-start-overlap: course=%s file=%s token=%s',
-                        course.canonical,
-                        path,
-                        token,
-                    )
+                    _report_validation('overlap_start', course, token=token)
                     entry_ref = state.active_long['entry']
                     _resolve_long_end(entry_ref, at_value)
                     state.active_long = None
@@ -1066,12 +1072,7 @@ def _parse_tja_strict(
 
             if token not in state.unknown_tokens_logged:
                 state.unknown_tokens_logged.add(token)
-                LOGGER.warning(
-                    'strict-unknown-note-token: token=%s course=%s file=%s',
-                    token,
-                    course.canonical,
-                    path,
-                )
+                _report_validation('unknown_note_token', course, token=token)
 
         entry: Dict[str, object] = {'notes': notes}
         if longs:
@@ -2195,112 +2196,124 @@ def _parse_tja_lenient(
 
 
 def parse_tja(path: Path) -> ParsedTJA:
+    validator = TJA_VALIDATOR
+    validator.register_file(path)
     original_text, normalised_text = read_tja(path)
+    result: ParsedTJA
     try:
-        parsed = _parse_tja_strict(
-            path,
-            original_text=original_text,
-            normalised_text=normalised_text,
-        )
-    except Exception:
-        LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
-        if TJA_LENIENT_FALLBACK:
-            LOGGER.warning("lenient-trigger: file=%s reason=strict-crash", path)
-            return _parse_tja_lenient(
+        try:
+            parsed = _parse_tja_strict(
                 path,
                 original_text=original_text,
                 normalised_text=normalised_text,
             )
-        LOGGER.warning(
-            "lenient-trigger: file=%s reason=strict-crash-disabled", path
-        )
-        return ParsedTJA(
-            raw_text=original_text,
-            fingerprint=md5_text(normalised_text),
-        )
+        except Exception:
+            LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
+            if TJA_LENIENT_FALLBACK:
+                LOGGER.warning("lenient-trigger: file=%s reason=strict-crash", path)
+                result = _parse_tja_lenient(
+                    path,
+                    original_text=original_text,
+                    normalised_text=normalised_text,
+                )
+            else:
+                LOGGER.warning(
+                    "lenient-trigger: file=%s reason=strict-crash-disabled", path
+                )
+                result = ParsedTJA(
+                    raw_text=original_text,
+                    fingerprint=md5_text(normalised_text),
+                )
+        else:
+            if not TJA_LENIENT_FALLBACK:
+                result = parsed
+            else:
+                has_courses = bool(parsed.courses)
+                has_valid_course = any(course.total_notes > 0 for course in parsed.courses)
+                if has_valid_course or not has_courses:
+                    result = parsed
+                else:
+                    LOGGER.warning("lenient-trigger: file=%s reason=no-valid-courses", path)
+                    fallback = _parse_tja_lenient(
+                        path,
+                        original_text=original_text,
+                        normalised_text=normalised_text,
+                    )
 
-    if not TJA_LENIENT_FALLBACK:
-        return parsed
+                    if not fallback.courses:
+                        result = parsed
+                    else:
+                        fallback_course = fallback.courses[0]
+                        target_course: Optional[CourseInfo] = None
+                        fallback_preference = ["oni", "hard", "normal", "easy", "ura"]
+                        for preferred in fallback_preference:
+                            for candidate in parsed.courses:
+                                if candidate.canonical == preferred:
+                                    target_course = candidate
+                                    break
+                            if target_course is not None:
+                                break
+                        if target_course is None:
+                            target_course = parsed.courses[0]
 
-    has_courses = bool(parsed.courses)
-    has_valid_course = any(course.total_notes > 0 for course in parsed.courses)
-    if has_valid_course or not has_courses:
-        return parsed
+                        chart_data_copy = _clone_chart_data(fallback_course.chart_data)
+                        if chart_data_copy is None:
+                            measures_source: List[Dict[str, object]] = []
+                            fallback_duration = 0
+                            if isinstance(fallback_course.chart_data, dict):
+                                measures_candidate = fallback_course.chart_data.get('measures')
+                                if isinstance(measures_candidate, list):
+                                    measures_source = [
+                                        measure.copy() if isinstance(measure, dict) else {}
+                                        for measure in measures_candidate
+                                    ]
+                                duration_candidate = fallback_course.chart_data.get('duration_ms', 0)
+                                try:
+                                    fallback_duration = int(duration_candidate)
+                                except (TypeError, ValueError):
+                                    fallback_duration = 0
+                            chart_data_copy = {
+                                'course': target_course.canonical,
+                                'total_notes': fallback_course.total_notes,
+                                'measures': measures_source,
+                                'duration_ms': fallback_duration,
+                            }
+                        else:
+                            chart_data_copy['course'] = target_course.canonical
+                            chart_data_copy['total_notes'] = fallback_course.total_notes
+                        if 'measures' not in chart_data_copy or not isinstance(chart_data_copy['measures'], list):
+                            chart_data_copy['measures'] = []
+                        if 'duration_ms' not in chart_data_copy:
+                            chart_data_copy['duration_ms'] = (
+                                fallback_course.chart_data.get('duration_ms', 0)
+                                if isinstance(fallback_course.chart_data, dict)
+                                else 0
+                            )
 
-    LOGGER.warning("lenient-trigger: file=%s reason=no-valid-courses", path)
-    fallback = _parse_tja_lenient(
-        path,
-        original_text=original_text,
-        normalised_text=normalised_text,
-    )
+                        if fallback_course.total_notes > 0:
+                            target_course.total_notes = fallback_course.total_notes
+                            target_course.hit_notes = fallback_course.hit_notes
+                            target_course.measures = fallback_course.measures
+                        chart_data_copy['total_notes'] = target_course.total_notes
+                        chart_data_copy['course'] = target_course.canonical
+                        target_course.chart_data = chart_data_copy
+                        fallback_metrics = _finalise_chart_metrics(
+                            chart_data_copy.get('measures', []),
+                            course_label=_course_log_label(target_course),
+                            mode='lenient-fallback',
+                        )
+                        target_course.total_notes = fallback_metrics.total_notes
+                        target_course.hit_notes = fallback_metrics.hit_notes
+                        target_course.measures = fallback_metrics.measures
+                        target_course.chart_data['total_notes'] = fallback_metrics.total_notes
+                        target_course.chart_data['duration_ms'] = fallback_metrics.duration_ms
+                        target_course.add_issue("lenient-fallback")
+                        parsed.charts[target_course.canonical] = target_course
+                        result = parsed
+    finally:
+        validator.finalize_file(path)
 
-    if not fallback.courses:
-        return parsed
-
-    fallback_course = fallback.courses[0]
-    target_course: Optional[CourseInfo] = None
-    fallback_preference = ["oni", "hard", "normal", "easy", "ura"]
-    for preferred in fallback_preference:
-        for candidate in parsed.courses:
-            if candidate.canonical == preferred:
-                target_course = candidate
-                break
-        if target_course is not None:
-            break
-    if target_course is None:
-        target_course = parsed.courses[0]
-
-    chart_data_copy = _clone_chart_data(fallback_course.chart_data)
-    if chart_data_copy is None:
-        measures_source: List[Dict[str, object]] = []
-        fallback_duration = 0
-        if isinstance(fallback_course.chart_data, dict):
-            measures_candidate = fallback_course.chart_data.get('measures')
-            if isinstance(measures_candidate, list):
-                measures_source = [
-                    measure.copy() if isinstance(measure, dict) else {}
-                    for measure in measures_candidate
-                ]
-            duration_candidate = fallback_course.chart_data.get('duration_ms', 0)
-            try:
-                fallback_duration = int(duration_candidate)
-            except (TypeError, ValueError):
-                fallback_duration = 0
-        chart_data_copy = {
-            'course': target_course.canonical,
-            'total_notes': fallback_course.total_notes,
-            'measures': measures_source,
-            'duration_ms': fallback_duration,
-        }
-    else:
-        chart_data_copy['course'] = target_course.canonical
-        chart_data_copy['total_notes'] = fallback_course.total_notes
-    if 'measures' not in chart_data_copy or not isinstance(chart_data_copy['measures'], list):
-        chart_data_copy['measures'] = []
-    if 'duration_ms' not in chart_data_copy:
-        chart_data_copy['duration_ms'] = 0
-
-    if fallback_course.total_notes > 0:
-        target_course.total_notes = fallback_course.total_notes
-        target_course.hit_notes = fallback_course.hit_notes
-        target_course.measures = fallback_course.measures
-    chart_data_copy['total_notes'] = target_course.total_notes
-    chart_data_copy['course'] = target_course.canonical
-    target_course.chart_data = chart_data_copy
-    fallback_metrics = _finalise_chart_metrics(
-        chart_data_copy.get('measures', []),
-        course_label=_course_log_label(target_course),
-        mode='lenient-fallback',
-    )
-    target_course.total_notes = fallback_metrics.total_notes
-    target_course.hit_notes = fallback_metrics.hit_notes
-    target_course.measures = fallback_metrics.measures
-    target_course.chart_data['total_notes'] = fallback_metrics.total_notes
-    target_course.chart_data['duration_ms'] = fallback_metrics.duration_ms
-    target_course.add_issue("lenient-fallback")
-    parsed.charts[target_course.canonical] = target_course
-
-    return parsed
+    return result
 
 
 def _match_any(path: Path, patterns: Iterable[str]) -> bool:
@@ -2659,6 +2672,9 @@ class SongScanner:
             if course.branch and "invalid-branch-sections" in issues:
                 valid = False
 
+            if VALIDATION_ERROR_ISSUE in issues:
+                valid = False
+
             if mode == "dojo":
                 if not course.segments:
                     issues.append("dojo_no_segments")
@@ -2723,7 +2739,7 @@ class SongScanner:
                 rank=rank_value,
                 chart_data=chart_data_copy,
             )
-            LOGGER.info(
+            LOGGER.debug(
                 "course-mapped: title=%s raw=%s mode=%s display=%s total_notes=%d",
                 parsed.title or UNKNOWN_VALUE,
                 course.raw_name,
@@ -4207,10 +4223,22 @@ class SongScanner:
     def scan(self, *, full: bool = False) -> Dict[str, int]:
         """Scan songs directory and sync metadata with MongoDB."""
 
+        TJA_VALIDATOR.reset_run()
         start_time = time.perf_counter()
         with self._scan_lock:
             summary = self._scan_impl(full=full)
         summary['duration_seconds'] = round(time.perf_counter() - start_time, 3)
+        TJA_VALIDATOR.flush_summary()
+        LOGGER.info(
+            "scan-summary: found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs",
+            summary.get('found', 0),
+            summary.get('inserted', 0),
+            summary.get('updated', 0),
+            summary.get('disabled', 0),
+            summary.get('errors', 0),
+            summary.get('skipped', 0),
+            summary.get('duration_seconds', 0.0),
+        )
         return summary
 
     def _scan_impl(self, *, full: bool) -> Dict[str, int]:
@@ -4237,6 +4265,14 @@ class SongScanner:
                         state_docs[path_value] = dict(doc)
             except Exception:  # pragma: no cover - tolerate collection access issues
                 LOGGER.debug('Failed to read song scanner state collection')
+
+        failed_state_updates: Dict[str, Dict[str, object]] = {}
+
+        def _safe_sha1(path: Path) -> Optional[str]:
+            try:
+                return hashlib.sha1(path.read_bytes()).hexdigest()
+            except Exception:
+                return None
 
         try:
             cursor = self.db.songs.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
@@ -4285,6 +4321,31 @@ class SongScanner:
             tja_mtime_ns = getattr(tja_stat, 'st_mtime_ns', int(tja_stat.st_mtime * 1_000_000_000))
             tja_size = tja_stat.st_size
 
+            current_file_sha1: Optional[str] = None
+            parse_failed_at: Optional[datetime] = None
+            failure_state_sha1: Optional[str] = None
+            last_ok_sha1: Optional[str] = None
+            if state_doc is not None:
+                raw_failed_at = state_doc.get('parse_failed_at')
+                if isinstance(raw_failed_at, datetime):
+                    parse_failed_at = raw_failed_at
+                elif isinstance(raw_failed_at, str) and raw_failed_at:
+                    with contextlib.suppress(ValueError):
+                        parsed_dt = datetime.fromisoformat(raw_failed_at)
+                        if parsed_dt.tzinfo is None:
+                            parse_failed_at = parsed_dt.replace(tzinfo=UTC)
+                        else:
+                            parse_failed_at = parsed_dt
+                elif isinstance(raw_failed_at, (int, float)) and raw_failed_at > 0:
+                    with contextlib.suppress(Exception):
+                        parse_failed_at = datetime.fromtimestamp(raw_failed_at, UTC)
+                sha1_candidate = state_doc.get('tja_sha1')
+                if isinstance(sha1_candidate, str) and sha1_candidate:
+                    failure_state_sha1 = sha1_candidate
+                last_ok_candidate = state_doc.get('last_ok_sha1')
+                if isinstance(last_ok_candidate, str) and last_ok_candidate:
+                    last_ok_sha1 = last_ok_candidate
+
             needs_processing = full or state_doc is None
             if state_doc is not None and not needs_processing:
                 if state_doc.get('tja_mtime_ns') != tja_mtime_ns or state_doc.get('tja_size') != tja_size:
@@ -4305,12 +4366,22 @@ class SongScanner:
                 else:
                     needs_processing = True
 
+            skip_due_to_failure = False
+            if parse_failed_at and not full and not needs_processing:
+                if failure_state_sha1:
+                    current_file_sha1 = _safe_sha1(tja_path)
+                    if current_file_sha1 and current_file_sha1 != failure_state_sha1:
+                        needs_processing = True
+                    else:
+                        skip_due_to_failure = True
+                else:
+                    skip_due_to_failure = True
+
             record: Optional[TjaImportRecord] = None
             diagnostics: List[str] = []
             file_hash: Optional[str] = None
             file_sha1: Optional[str] = None
             fingerprint: Optional[str] = None
-            was_dirty = needs_processing
 
             if not needs_processing and state_doc:
                 record_payload = state_doc.get('record') if isinstance(state_doc.get('record'), dict) else None
@@ -4325,10 +4396,15 @@ class SongScanner:
                         group_key_by_path[tja_key] = compute_group_key(record)
                         summary['skipped'] += 1
                 if record is None:
-                    needs_processing = True
+                    if skip_due_to_failure:
+                        summary['skipped'] += 1
+                    else:
+                        needs_processing = True
+
+            was_dirty = needs_processing
 
             if needs_processing:
-                LOGGER.info('scan-job-start: %s', tja_path)
+                LOGGER.debug('scan-job-start: %s', tja_path)
                 try:
                     parsed = parse_tja(tja_path)
                     total_notes = sum(course.total_notes for course in parsed.courses)
@@ -4350,6 +4426,7 @@ class SongScanner:
                     tja_bytes = tja_path.read_bytes()
                     file_hash = md5_bytes(tja_bytes)
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
+                    current_file_sha1 = file_sha1
                     fingerprint = parsed.fingerprint
 
                     audio_url = None
@@ -4396,11 +4473,36 @@ class SongScanner:
                 except Exception:
                     LOGGER.error('scan-job-crash: file=%s', tja_path, exc_info=True)
                     summary['errors'] += 1
+                    failure_sha1 = current_file_sha1 or failure_state_sha1 or _safe_sha1(tja_path)
+                    if failure_sha1 is not None or parse_failed_at is not None:
+                        failure_payload = {
+                            'tja_path': tja_key,
+                            'tja_mtime_ns': tja_mtime_ns,
+                            'tja_size': tja_size,
+                            'tja_sha1': failure_sha1,
+                            'parse_failed_at': datetime.now(UTC),
+                        }
+                        if last_ok_sha1:
+                            failure_payload['last_ok_sha1'] = last_ok_sha1
+                        failed_state_updates[tja_key] = failure_payload
                     continue
-                LOGGER.info('scan-job-finish: %s', tja_path)
+                LOGGER.debug('scan-job-finish: %s', tja_path)
 
             if record is None:
+                if skip_due_to_failure:
+                    continue
                 summary['errors'] += 1
+                failure_sha1 = current_file_sha1 or failure_state_sha1 or _safe_sha1(tja_path)
+                failure_payload = {
+                    'tja_path': tja_key,
+                    'tja_mtime_ns': tja_mtime_ns,
+                    'tja_size': tja_size,
+                    'tja_sha1': failure_sha1,
+                    'parse_failed_at': datetime.now(UTC),
+                }
+                if last_ok_sha1:
+                    failure_payload['last_ok_sha1'] = last_ok_sha1
+                failed_state_updates[tja_key] = failure_payload
                 continue
 
             if file_sha1 is None:
@@ -4410,6 +4512,8 @@ class SongScanner:
                     file_sha1 = None
                 else:
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
+            if file_sha1 is not None:
+                current_file_sha1 = file_sha1
 
             key = group_key_by_path.get(tja_key) or compute_group_key(record)
             group_key_by_path[tja_key] = key
@@ -4428,6 +4532,8 @@ class SongScanner:
                 'audio_mtime_ns': record.audio_mtime_ns,
                 'audio_size': record.audio_size,
                 'fingerprint': fingerprint or record.fingerprint,
+                'parse_failed_at': None if was_dirty else parse_failed_at,
+                'last_ok_sha1': file_sha1 if was_dirty else (last_ok_sha1 or file_sha1),
             }
 
             if record.category_id != 0:
@@ -4486,7 +4592,7 @@ class SongScanner:
                                 longs_total += sum(
                                     1 for long_note in longs_list if isinstance(long_note, dict)
                                 )
-                    LOGGER.info(
+                    LOGGER.debug(
                         'upserted-chart: title=%s course=%s notes=%d longs=%d',
                         document.get('title'),
                         course_label,
@@ -4516,6 +4622,8 @@ class SongScanner:
                     'song_id': song_id,
                     'group_key': key,
                     'fingerprint': meta.get('fingerprint'),
+                    'parse_failed_at': meta.get('parse_failed_at'),
+                    'last_ok_sha1': meta.get('last_ok_sha1'),
                     'record': asdict(record),
                 }
                 if tja_key in state_docs:
@@ -4528,6 +4636,15 @@ class SongScanner:
                         self._state_collection.insert_one(payload)
                     except Exception:
                         LOGGER.debug('Failed to insert song scanner state for %s', tja_key)
+
+        if self._state_collection is not None and failed_state_updates:
+            for tja_key, failure_payload in failed_state_updates.items():
+                payload = dict(failure_payload)
+                payload.setdefault('tja_path', tja_key)
+                try:
+                    self._state_collection.update_one({'tja_path': tja_key}, {'$set': payload}, upsert=True)
+                except Exception:
+                    LOGGER.debug('Failed to persist failure state for %s', tja_key)
 
         if self._state_collection is not None:
             stale_paths = set(state_docs.keys()) - seen_state_paths
