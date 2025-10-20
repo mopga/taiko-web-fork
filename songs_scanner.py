@@ -2311,9 +2311,17 @@ class SongScanner:
                 )
         ensure_indexes_lock_collection = getattr(self.db, 'admin_locks', None)
         ensure_indexes_owner = f"{os.getpid()}-{time.time()}"
-        ensure_indexes_lock_timeout = 300.0
+        ensure_indexes_lock_timeout = 150.0
         ensure_indexes_poll_interval = 0.2
         ensure_indexes_target = 'songs_group_key_scanner_unique'
+
+        def _ensure_state_unique_index() -> None:
+            if self._state_collection is None:
+                return
+            try:
+                self._state_collection.create_index('tja_path', unique=True)
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
 
         def _index_present() -> bool:
             try:
@@ -2326,11 +2334,7 @@ class SongScanner:
                 return False
 
         def _run_index_migration() -> None:
-            if self._state_collection is not None:
-                try:
-                    self._state_collection.create_index('tja_path', unique=True)
-                except Exception:  # pragma: no cover - tolerate missing create_index
-                    LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
+            _ensure_state_unique_index()
             try:
                 self.db.songs.drop_index('id_1')
             except Exception:  # pragma: no cover - tolerate legacy index absence
