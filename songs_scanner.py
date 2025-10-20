@@ -2314,6 +2314,26 @@ class SongScanner:
         ensure_indexes_lock_timeout = 150.0
         ensure_indexes_poll_interval = 0.2
         ensure_indexes_target = 'songs_group_key_scanner_unique'
+        required_song_indexes = {
+            'songs_id_unique',
+            ensure_indexes_target,
+            'songs_scanner_stable_id_unique',
+            'songs_group_key_lookup',
+        }
+
+        def _collection_index_names(collection, label: str) -> Optional[Set[str]]:
+            try:
+                names: Set[str] = set()
+                for index in collection.list_indexes():
+                    if not isinstance(index, dict):
+                        continue
+                    name = index.get('name')
+                    if isinstance(name, str):
+                        names.add(name)
+                return names
+            except Exception:  # pragma: no cover - tolerate transient list indexes errors
+                LOGGER.debug('Failed to list indexes for collection %s', label, exc_info=True)
+                return None
 
         def _ensure_state_unique_index() -> None:
             if self._state_collection is None:
@@ -2324,14 +2344,22 @@ class SongScanner:
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
 
         def _index_present() -> bool:
-            try:
-                return any(
-                    index.get('name') == ensure_indexes_target
-                    for index in self.db.songs.list_indexes()
-                )
-            except Exception:  # pragma: no cover - tolerate transient list indexes errors
-                LOGGER.debug('Failed to list indexes while waiting for ensure lock', exc_info=True)
+            song_index_names = _collection_index_names(self.db.songs, 'songs')
+            if not song_index_names or not required_song_indexes.issubset(song_index_names):
                 return False
+            if self._state_collection is not None:
+                state_index_names = _collection_index_names(self._state_collection, 'song_scanner_state')
+                if state_index_names is None or 'tja_path_1' not in state_index_names:
+                    return False
+            counters = getattr(self.db, 'counters', None)
+            if counters is not None:
+                try:
+                    if counters.count_documents({'_id': 'songs'}, limit=1) == 0:
+                        return False
+                except Exception:  # pragma: no cover - tolerate transient counter checks
+                    LOGGER.debug('Failed to check songs counter readiness', exc_info=True)
+                    return False
+            return True
 
         def _run_index_migration() -> None:
             _ensure_state_unique_index()
