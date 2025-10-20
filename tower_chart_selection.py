@@ -38,13 +38,17 @@ def select_best_chart(
     )
 
     best_chart: Optional[Mapping[str, object]] = None
-    best_priority: Optional[tuple[int, int]] = None
+    best_priority: Optional[tuple[int, int, int]] = None
 
-    def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int]:
-        score = 0
+    prefer_mode_order = {
+        token: idx for idx, token in enumerate(prefer_mode_tokens)
+    }
+
+    def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int, int]:
         mode_value = str(chart.get("mode") or "").strip().casefold()
-        if prefer_mode_tokens and mode_value in prefer_mode_tokens:
-            score -= 10
+        mode_priority = prefer_mode_order.get(mode_value, len(prefer_mode_tokens))
+
+        score = 0
         if course_token:
             display_course = str(chart.get("display_course") or "").strip().casefold()
             canonical_course = str(chart.get("canonical_course") or "").strip().casefold()
@@ -52,7 +56,7 @@ def select_best_chart(
                 score -= 3
             if canonical_course == course_token:
                 score -= 2
-        return (score, index)
+        return (mode_priority, score, index)
 
     filtered: list[tuple[int, Mapping[str, object]]] = []
     if course_token:
