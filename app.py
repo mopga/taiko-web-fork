@@ -1384,7 +1384,7 @@ def route_import_report():
     )
 
 
-def invalidate_song_cache():
+def invalidate_category_cache():
     try:
         app.cache.delete_memoized(route_api_categories)
     except Exception:
@@ -1393,7 +1393,7 @@ def invalidate_song_cache():
 
 def perform_song_scan(*, full: bool = False):
     summary = song_scanner.scan(full=full)
-    invalidate_song_cache()
+    invalidate_category_cache()
     app.logger.info("Song scan finished: %s", summary)
     return summary
 

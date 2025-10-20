@@ -747,11 +747,11 @@ class Loader{
                 var promise = pageEvents.load(request)
                 if(!customResponse){
                         promise = promise.then(() => {
+                                if(request.status === 304){
+                                        return {__notModified: true}
+                                }
                                 if(request.status === 200){
                                         return request.response
-                                }
-                                if(request.status === 304){
-                                        return ""
                                 }
                                 return Promise.reject(`${url} (${request.status})`)
                         })
@@ -796,6 +796,10 @@ class Loader{
                 function fetchPage(page){
                         const url = `api/songs?page=${page}&limit=${limit}`
                         return loaderInstance.ajax(url).then(response => {
+                                if(response && typeof response === "object" && response.__notModified){
+                                        const reused = reuseCachedPage(page)
+                                        return reused === null ? [] : reused
+                                }
                                 if(response === "" || response === null || typeof response === "undefined"){
                                         return reuseCachedPage(page)
                                 }
@@ -818,6 +822,9 @@ class Loader{
                                         }
                                         const detailUrl = `api/song/${encodeURIComponent(entry.id)}`
                                         return loaderInstance.ajax(detailUrl).then(detailResponse => {
+                                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
+                                                        return detailCache[entry.id] || null
+                                                }
                                                 if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
                                                         return detailCache[entry.id] || null
                                                 }
