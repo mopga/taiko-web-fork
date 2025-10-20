@@ -571,7 +571,7 @@ function normalizeChartResponse(payload){
         };
 }
 
-export function registerRestNotesLoader(Loader){
+function registerRestNotesLoader(Loader){
         if(!Loader || !Loader.prototype){
                 console.warn("[notes-loader] Loader is not ready");
                 return;
