@@ -1,4 +1,38 @@
-const MODES_MANIFEST_CACHE_TTL = 12000;
+const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
+
+function resolveManifestStatus(manifest){
+        if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
+                return manifest.status.trim();
+        }
+        return "ok";
+}
+
+function commitModesStore(store){
+        if(!store || typeof store !== "object"){
+                return;
+        }
+        if(typeof store.cacheTtlMs !== "number" || store.cacheTtlMs <= 0){
+                store.cacheTtlMs = DEFAULT_MODES_MANIFEST_CACHE_TTL_MS;
+        }
+        if(store.manifest && (!store.categoryIndex || typeof store.categoryIndex !== "object") && resolveManifestStatus(store.manifest) === "ok"){
+                store.categoryIndex = buildModesCategoryIndex(store.manifest);
+        }
+        if(typeof window !== "undefined"){
+                window.__modes__ = store;
+        }
+        const status = store.status || resolveManifestStatus(store.manifest);
+        if(store.manifest){
+                assets.modesManifest = store.manifest;
+        }else if(status){
+                assets.modesManifest = {status: status};
+        }
+        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                const payload = store.manifest || (status ? {status: status} : null);
+                if(payload){
+                        modesHelper.updateManifest(payload);
+                }
+        }
+}
 
 function buildModesCategoryIndex(manifest){
         const index = {};
@@ -698,16 +732,9 @@ class Loader{
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null
                 const now = Date.now()
-                if(existingStore && now - (existingStore.fetchedAt || 0) < MODES_MANIFEST_CACHE_TTL){
-                        if(existingStore.manifest){
-                                assets.modesManifest = existingStore.manifest
-                        }
-                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
-                                const payload = existingStore.manifest || (existingStore.status ? {status: existingStore.status} : null)
-                                if(payload){
-                                        modesHelper.updateManifest(payload)
-                                }
-                        }
+                const ttl = existingStore && typeof existingStore.cacheTtlMs === "number" && existingStore.cacheTtlMs > 0 ? existingStore.cacheTtlMs : DEFAULT_MODES_MANIFEST_CACHE_TTL_MS
+                if(existingStore && now - (existingStore.fetchedAt || 0) < ttl){
+                        commitModesStore(existingStore)
                         return Promise.resolve()
                 }
                 return this.ajax("api/modes").then(response => {
@@ -715,39 +742,38 @@ class Loader{
                         try{
                                 manifest = JSON.parse(response)
                         }catch(e){
+                                const errorStore = {
+                                        manifest: null,
+                                        status: "error",
+                                        fetchedAt: Date.now(),
+                                        cacheTtlMs: DEFAULT_MODES_MANIFEST_CACHE_TTL_MS,
+                                        categoryIndex: {},
+                                }
+                                commitModesStore(errorStore)
                                 return
                         }
                         if(!manifest || typeof manifest !== "object"){
-                                return
-                        }
-                        if(manifest.status && manifest.status !== "ok"){
-                                const store = {
-                                        manifest: manifest,
-                                        status: manifest.status,
+                                const invalidStore = {
+                                        manifest: null,
+                                        status: "error",
                                         fetchedAt: Date.now(),
+                                        cacheTtlMs: DEFAULT_MODES_MANIFEST_CACHE_TTL_MS,
                                         categoryIndex: {},
                                 }
-                                if(typeof window !== "undefined"){
-                                        window.__modes__ = store
-                                }
-                                if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
-                                        modesHelper.updateManifest(manifest)
-                                }
+                                commitModesStore(invalidStore)
                                 return
                         }
+                        const status = resolveManifestStatus(manifest)
+                        const ttlSeconds = Number(manifest.cache_ttl)
+                        const cacheTtlMs = Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds * 1000 : DEFAULT_MODES_MANIFEST_CACHE_TTL_MS
                         const store = {
                                 manifest: manifest,
-                                status: manifest.status || "ok",
+                                status: status,
                                 fetchedAt: Date.now(),
-                                categoryIndex: buildModesCategoryIndex(manifest),
+                                cacheTtlMs: cacheTtlMs,
+                                categoryIndex: status === "ok" ? buildModesCategoryIndex(manifest) : {},
                         }
-                        if(typeof window !== "undefined"){
-                                window.__modes__ = store
-                        }
-                        assets.modesManifest = manifest
-                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
-                                modesHelper.updateManifest(manifest)
-                        }
+                        commitModesStore(store)
                 }).catch(() => {})
         }
 	loadScript(url){

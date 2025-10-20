@@ -224,14 +224,35 @@
         }
 
         function longTypeFromEntry(entry){
-                const kind = normaliseToken(entry && entry.kind ? String(entry.kind) : "");
-                const sizeToken = normaliseToken(entry && entry.size);
-                const isBig = entry && entry.big === true || sizeToken === "big";
-                if(kind === "drumroll"){
+                if(!entry || typeof entry !== "object"){
+                        return null;
+                }
+                const rawKind = entry.kind != null ? String(entry.kind) : "";
+                const rawType = entry.type != null ? String(entry.type) : "";
+                const sizeToken = normaliseToken(entry.size);
+                let token = normaliseToken(rawType) || normaliseToken(rawKind);
+                token = token.replace(/\s+/g, "");
+                let isBig = entry.big === true || sizeToken === "big";
+                if(token.startsWith("dai")){
+                        isBig = true;
+                        token = token.slice(3);
+                }
+                if(token.startsWith("big")){
+                        isBig = true;
+                        token = token.slice(3);
+                }
+                if(token.endsWith("big")){
+                        isBig = true;
+                        token = token.slice(0, -3);
+                }
+                if(token === "balloon" || token === "balloons" || token === "balloonnote"){
+                        return "balloon";
+                }
+                if(token === "drumroll" || token === "roll" || token === "renda" || token === "ren" || token === "drum"){
                         return isBig ? "daiDrumroll" : "drumroll";
                 }
-                if(kind === "balloon"){
-                        return "balloon";
+                if(token === "taiko" && isBig){
+                        return "daiDrumroll";
                 }
                 return null;
         }
@@ -356,7 +377,8 @@
 
                         const longs = Array.isArray(measure && measure.longs) ? measure.longs : [];
                         longs.forEach(longEntry => {
-                                const offset = coerceNumber(longEntry && longEntry.at, 0) || 0;
+                                const offsetSource = longEntry && Object.prototype.hasOwnProperty.call(longEntry, "at") ? longEntry.at : longEntry && longEntry.offset;
+                                const offset = coerceNumber(offsetSource, 0) || 0;
                                 const length = coerceNumber(longEntry && longEntry.len_ms, 0) || 0;
                                 const endAt = coerceNumber(longEntry && longEntry.end_at, null);
                                 const absolute = startMs + Math.max(0, offset);
@@ -366,13 +388,14 @@
                                         return;
                                 }
                                 circleId++;
+                                const requiredHitsValue = coerceNumber(longEntry && (longEntry.hits || longEntry.required_hits), type === "balloon" ? 1 : 0) || 0;
                                 const circleCfg = buildCircleConfig({
                                         id: circleId,
                                         ms: absolute,
                                         type: type,
                                         speed: speed,
                                         endTime: endMs,
-                                        requiredHits: coerceNumber(longEntry && (longEntry.hits || longEntry.required_hits), 1) || 1,
+                                        requiredHits: type === "balloon" ? Math.max(1, requiredHitsValue) : Math.max(0, requiredHitsValue),
                                         beatMS: beatMS,
                                         section: offset === 0 && notes.length === 0,
                                 });

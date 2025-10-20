@@ -40,6 +40,7 @@ class LoadSong{
 		var songObj
                 this.promises = []
                 this._legacyNotesQueued = false
+                this._legacyNotesPromise = null
 		if(id !== "calibration"){
 			assets.sounds["v_start"].play()
 			assets.songs.forEach(song => {
@@ -175,12 +176,10 @@ class LoadSong{
                                 }
                                 return true
                         }
-                        this.queueLegacyNotesLoad(song, songObj)
-                        return false
+                        return this.queueLegacyNotesLoad(song, songObj).then(() => false)
                 }).catch(error => {
                         console.warn("notes-loader: promise rejected", error)
-                        this.queueLegacyNotesLoad(song, songObj)
-                        return false
+                        return this.queueLegacyNotesLoad(song, songObj).then(() => false)
                 })
                 this.addPromise(notesHandling, "notes-loader")
 
@@ -233,7 +232,7 @@ class LoadSong{
         }
         queueLegacyNotesLoad(song, songObj){
                 if(this._legacyNotesQueued){
-                        return
+                        return this._legacyNotesPromise || Promise.resolve()
                 }
                 this._legacyNotesQueued = true
                 var chart = songObj.chart
@@ -241,20 +240,26 @@ class LoadSong{
                         var chartDiff = this.selectedSong.difficulty
                         chart = chart[chartDiff]
                 }
+                let legacyPromise
                 if(chart){
-                        this.addPromise(chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
+                        const readPromise = chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
                                 this.songData = data.replace(/\0/g, "").split("\n")
-                        }), chart.url)
+                        })
+                        legacyPromise = this.addPromise(readPromise, chart.url)
                 }else{
                         this.songData = ""
+                        legacyPromise = Promise.resolve()
                 }
+                this._legacyNotesPromise = Promise.resolve(legacyPromise)
+                return this._legacyNotesPromise
         }
         addPromise(promise, url){
-                this.promises.push(promise.catch(response => {
+                const wrapped = Promise.resolve(promise).catch(response => {
                         this.errorMsg(response, url)
-                        return Promise.resolve()
-                }))
-	}
+                })
+                this.promises.push(wrapped)
+                return wrapped
+        }
 	errorMsg(error, url){
 		if(!this.error){
 			if(url){
