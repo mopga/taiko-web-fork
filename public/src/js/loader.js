@@ -732,8 +732,12 @@ class Loader{
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null
                 const now = Date.now()
-                const ttl = existingStore && typeof existingStore.cacheTtlMs === "number" && existingStore.cacheTtlMs > 0 ? existingStore.cacheTtlMs : DEFAULT_MODES_MANIFEST_CACHE_TTL_MS
-                if(existingStore && now - (existingStore.fetchedAt || 0) < ttl){
+                if(
+                        existingStore &&
+                        typeof existingStore.cacheTtlMs === "number" &&
+                        existingStore.cacheTtlMs > 0 &&
+                        now - (existingStore.fetchedAt || 0) < existingStore.cacheTtlMs
+                ){
                         commitModesStore(existingStore)
                         return Promise.resolve()
                 }
@@ -766,12 +770,13 @@ class Loader{
                         const status = resolveManifestStatus(manifest)
                         const ttlSeconds = Number(manifest.cache_ttl)
                         const cacheTtlMs = Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds * 1000 : DEFAULT_MODES_MANIFEST_CACHE_TTL_MS
+                        const isOk = status === "ok"
                         const store = {
-                                manifest: manifest,
+                                manifest: isOk ? manifest : null,
                                 status: status,
                                 fetchedAt: Date.now(),
                                 cacheTtlMs: cacheTtlMs,
-                                categoryIndex: status === "ok" ? buildModesCategoryIndex(manifest) : {},
+                                categoryIndex: isOk ? buildModesCategoryIndex(manifest) : {},
                         }
                         commitModesStore(store)
                 }).catch(() => {})
