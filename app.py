@@ -877,7 +877,13 @@ def route_api_songs():
 
         category_id = song.get('category_id')
         genre_value = song.get('genre')
-        category_value = None
+        category_value = song.get('category')
+        if isinstance(category_value, str):
+            category_value = category_value.strip()
+            if not category_value:
+                category_value = None
+        else:
+            category_value = None
         if isinstance(genre_value, str):
             trimmed_genre = genre_value.strip()
             if trimmed_genre:
@@ -980,7 +986,10 @@ def route_api_tower_chart():
     if not title:
         return jsonify({'status': 'error', 'message': 'missing_title'}), 400
     course_param = request.args.get('course', '').strip().casefold() or 'oni'
-    mode_param = request.args.get('mode', '').strip().casefold()
+    mode_param_raw = request.args.get('mode', '').strip()
+    mode_param = mode_param_raw.casefold()
+    if mode_param in {'dan', 'dojo'}:
+        mode_param = 'dandojo'
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
     song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
@@ -991,7 +1000,7 @@ def route_api_tower_chart():
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
     charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    prefer_modes = (mode_param,) if mode_param else ("tower", "dan")
+    prefer_modes = (mode_param,) if mode_param else ("tower", "dandojo")
     best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
 
     if best_chart is None:
@@ -1058,7 +1067,10 @@ def route_api_dan_chart():
     rank_raw = request.args.get('rank', '').strip()
     if not rank_raw:
         return jsonify({'status': 'error', 'message': 'missing_rank'}), 400
-    mode_param = request.args.get('mode', '').strip().casefold() or 'dan'
+    mode_param_raw = request.args.get('mode', '').strip()
+    mode_param = mode_param_raw.casefold() or 'dandojo'
+    if mode_param in {'dan', 'dojo'}:
+        mode_param = 'dandojo'
     rank_param = rank_raw.casefold()
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
@@ -1070,7 +1082,7 @@ def route_api_dan_chart():
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
     charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    prefer_modes = (mode_param,) if mode_param else ('dan',)
+    prefer_modes = (mode_param,) if mode_param else ('dandojo',)
     best_chart = select_best_chart(charts, rank_param, prefer_modes=prefer_modes)
 
     if best_chart is None:
@@ -1108,7 +1120,13 @@ def route_api_dan_chart():
         except (TypeError, ValueError):
             total_notes = sum(len(m.get('notes', [])) for m in normalized_measures)
 
-    rank_label = best_chart.get('display_course') or rank_param
+    rank_value = best_chart.get('rank')
+    if isinstance(rank_value, (int, float)):
+        rank_label = str(rank_value)
+    elif isinstance(rank_value, str) and rank_value.strip():
+        rank_label = rank_value
+    else:
+        rank_label = best_chart.get('display_course') or rank_param
     duration_value = chart_data.get('duration_ms')
     try:
         duration_int = int(duration_value)
@@ -1120,6 +1138,7 @@ def route_api_dan_chart():
         'title': song.get('title'),
         'mode': best_chart.get('mode'),
         'display_course': best_chart.get('display_course'),
+        'rank': best_chart.get('rank'),
         'chart_data': chart_data,
     }
 

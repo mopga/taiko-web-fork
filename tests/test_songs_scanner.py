@@ -395,6 +395,7 @@ class TestSongsScanner(unittest.TestCase):
             genre=None,
             category_id=0,
             category_title="Unsorted",
+            pack=None,
             charts=[],
             import_issues=[],
             normalized_title="sample",
@@ -1334,7 +1335,7 @@ LEVEL:7
         charts = inserted['charts']
         self.assertEqual(len(charts), 1)
         chart = charts[0]
-        self.assertEqual(chart.get('mode'), 'dan')
+        self.assertEqual(chart.get('mode'), 'standard')
         self.assertIn('mapped-course', chart.get('issues', []))
         self.assertTrue(chart['valid'])
         paths = inserted.get('paths', {})
@@ -1375,7 +1376,7 @@ LEVEL:7
         chart = db.songs.inserted[0]['charts'][0]
         self.assertEqual(chart.get('course'), 'oni')
         self.assertEqual(chart.get('canonical_course'), 'oni')
-        self.assertEqual(chart.get('mode'), 'dan')
+        self.assertEqual(chart.get('mode'), 'standard')
         self.assertTrue(chart.get('valid'))
         self.assertIn('mapped-course', chart.get('issues', []))
 
@@ -2930,6 +2931,80 @@ LEVEL:7
         self.assertEqual(inserted.get('genre'), 'Taiko Tower 01')
         self.assertEqual(inserted.get('category_id'), 0)
         self.assertEqual(inserted.get('valid_chart_count'), 3)
+
+    def test_scan_canonicalises_category_and_pack_metadata(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        pack_dir = songs_dir / "10 Taiko Towers" / "07 Taiko Tower 07 Ama-kuchi"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = pack_dir / "main.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan()
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(inserted.get('category'), 'Taiko Towers')
+        self.assertEqual(inserted.get('category_id'), 10)
+        self.assertEqual(inserted.get('pack'), '07 Taiko Tower 07 Ama-kuchi')
+        self.assertEqual(inserted.get('title'), 'Taiko Tower 7 Ama-kuchi')
+        charts = inserted.get('charts') or []
+        self.assertTrue(charts)
+        chart = charts[0]
+        self.assertEqual(chart.get('mode'), 'tower')
+        self.assertEqual(chart.get('display_course'), 'tower')
+        self.assertIsNone(chart.get('rank'))
+
+    def test_scan_marks_dandojo_mode_for_dojo_category(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        pack_dir = songs_dir / "Dan Dojo" / "Trial Pack"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = pack_dir / "main.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:",
+            "COURSE:Dojo",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan()
+
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(inserted.get('category'), 'Dan Dojo')
+        self.assertEqual(inserted.get('pack'), 'Trial Pack')
+        charts = inserted.get('charts') or []
+        self.assertTrue(charts)
+        chart = charts[0]
+        self.assertEqual(chart.get('mode'), 'dandojo')
+        self.assertEqual(chart.get('display_course'), 'dandojo')
+        self.assertTrue(chart.get('rank'))
 
     def test_scanner_flags_empty_chart(self):
         tmp_dir = Path(self._tmp_dir())

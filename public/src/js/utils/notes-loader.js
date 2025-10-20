@@ -549,7 +549,7 @@ function buildRestUrl(modeKey, song, selection){
         if(modeKey === "dandojo"){
                 const rank = selection.rank || selection.dan || 1;
                 params.set("rank", String(rank));
-                params.set("mode", "dan");
+                params.set("mode", "dandojo");
                 return {url: "/api/dan/chart?" + params.toString()};
         }
         return {url: ""};

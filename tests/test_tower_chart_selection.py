@@ -28,10 +28,10 @@ def test_select_best_chart_allows_custom_prefer_modes():
     charts = [
         {"course": "Oni", "mode": "standard", "display_course": "oni"},
         {"course": "Oni", "mode": "tower", "display_course": "tower"},
-        {"course": "Oni", "mode": "dan", "display_course": "dan"},
+        {"course": "Oni", "mode": "dandojo", "display_course": "dandojo"},
     ]
 
-    best_chart = select_best_chart(charts, "oni", prefer_modes=("dan",))
+    best_chart = select_best_chart(charts, "oni", prefer_modes=("dandojo",))
 
     assert best_chart is charts[2]
 
@@ -39,10 +39,10 @@ def test_select_best_chart_allows_custom_prefer_modes():
 def test_select_best_chart_respects_prefer_modes_order():
     charts = [
         {"course": "Oni", "mode": "tower", "display_course": "tower"},
-        {"course": "Oni", "mode": "dan", "display_course": "oni"},
+        {"course": "Oni", "mode": "dandojo", "display_course": "oni"},
     ]
 
-    best_chart = select_best_chart(charts, "oni", prefer_modes=("dan", "tower"))
+    best_chart = select_best_chart(charts, "oni", prefer_modes=("dandojo", "tower"))
 
     assert best_chart is charts[1]
 
