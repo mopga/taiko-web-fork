@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Sequence
 
-_TOWER_MODES = {"tower", "dan"}
-
 
 def normalise_course_tokens(chart: Mapping[str, object]) -> set[str]:
     tokens: set[str] = set()
@@ -21,7 +19,8 @@ def normalise_course_tokens(chart: Mapping[str, object]) -> set[str]:
 
 def select_best_chart(
     charts: Optional[Sequence[Mapping[str, object]]],
-    course: str,
+    course: Optional[str] = None,
+    prefer_modes: Sequence[object] = ("tower", "dan"),
 ) -> Optional[Mapping[str, object]]:
     """Return the preferred chart for the provided course token."""
 
@@ -29,6 +28,14 @@ def select_best_chart(
         return None
 
     course_token = (course or "").strip().casefold()
+    prefer_mode_tokens: tuple[str, ...] = tuple(
+        token
+        for token in (
+            str(mode or "").strip().casefold()
+            for mode in (prefer_modes or ())
+        )
+        if token
+    )
     best_chart: Optional[Mapping[str, object]] = None
     best_priority = (float("inf"), float("inf"))
 
@@ -40,7 +47,14 @@ def select_best_chart(
             if course_token not in tokens:
                 continue
         mode_value = str(chart.get("mode") or "").strip().casefold()
-        priority = (0 if mode_value in _TOWER_MODES else 1, index)
+        if prefer_mode_tokens:
+            try:
+                mode_priority = prefer_mode_tokens.index(mode_value)
+            except ValueError:
+                mode_priority = len(prefer_mode_tokens)
+        else:
+            mode_priority = 0
+        priority = (mode_priority, index)
         if priority < best_priority:
             best_priority = priority
             best_chart = chart
@@ -52,7 +66,7 @@ def select_best_chart(
         if not isinstance(chart, Mapping):
             continue
         mode_value = str(chart.get("mode") or "").strip().casefold()
-        if mode_value in _TOWER_MODES:
+        if prefer_mode_tokens and mode_value in prefer_mode_tokens:
             return chart
 
     return None

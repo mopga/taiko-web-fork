@@ -37,6 +37,7 @@ from redis import Redis
 
 from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
+from tower_chart_normalization import normalize_measures_relative
 
 
 LOGGER = logging.getLogger(__name__)
@@ -870,6 +871,7 @@ def route_api_tower_chart():
     if not title:
         return jsonify({'status': 'error', 'message': 'missing_title'}), 400
     course_param = request.args.get('course', '').strip().casefold() or 'oni'
+    mode_param = request.args.get('mode', '').strip().casefold()
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
     song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
@@ -880,7 +882,8 @@ def route_api_tower_chart():
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
     charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    best_chart = select_best_chart(charts, course_param)
+    prefer_modes = (mode_param,) if mode_param else ("tower", "dan")
+    best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
 
     if best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
@@ -897,7 +900,6 @@ def route_api_tower_chart():
     measures = chart_data.get('measures')
     if not isinstance(measures, list):
         measures = []
-        chart_data['measures'] = measures
     duration_value = chart_data.get('duration_ms')
     try:
         duration_ms = int(duration_value)
@@ -906,6 +908,7 @@ def route_api_tower_chart():
     if duration_ms < 0:
         duration_ms = 0
     chart_data['duration_ms'] = duration_ms
+    chart_data['measures'] = normalize_measures_relative(measures)
 
     response = {
         'status': 'ok',
