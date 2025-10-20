@@ -250,8 +250,28 @@ class Loader{
 			style.appendChild(document.createTextNode(css.join("\n")))
 			document.head.appendChild(style)
 			
-                        this.addPromise(this.ajax("api/songs").then(songs => {
-                                songs = JSON.parse(songs);
+                        this.addPromise(this.loadSongsCatalog().then(songs => {
+                                songs = songs.filter(song => song && typeof song === "object");
+                                songs.forEach(song => {
+                                        const stableId = typeof song.id === "string" ? song.id : (typeof song.stableId === "string" ? song.stableId : "");
+                                        if(typeof song.legacy_id === "number"){
+                                                song.numericId = song.legacy_id;
+                                                song.id = song.legacy_id;
+                                        }else if(typeof song.id !== "string" && typeof song.id !== "number"){
+                                                song.id = stableId;
+                                        }
+                                        song.stableId = stableId || (typeof song.id === "string" ? song.id : "");
+                                        song.enabled = song.enabled !== false;
+                                        if(!Array.isArray(song.import_issues)){
+                                                song.import_issues = [];
+                                        }
+                                        if(!song.paths || typeof song.paths !== "object"){
+                                                song.paths = {};
+                                        }
+                                        if(!song.type){
+                                                song.type = "tja";
+                                        }
+                                });
                                 songs = songs.filter(song => song.enabled !== false);
                                 songs.forEach(song => {
                                         if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.enrichSongMetadata === "function"){
@@ -261,14 +281,20 @@ class Loader{
                                         if(!Array.isArray(song.import_issues)){
                                                 song.import_issues = []
                                         }
-                                        var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + song.id + "/")
+                                        var stableId = song.stableId || song.id || ""
+                                        var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + stableId + "/")
                                         if(dirUrl.slice(-1) !== "/"){
                                                 dirUrl += "/"
+                                        }
+                                        paths.dir_url = dirUrl
+                                        if(!paths.tja_url){
+                                                paths.tja_url = dirUrl + "main.tja"
                                         }
                                         if(paths.audio_url){
                                                 song.music = new RemoteFile(paths.audio_url)
                                         }else if(song.music_type){
-                                                song.music = new RemoteFile(dirUrl + "main." + song.music_type)
+                                                paths.audio_url = dirUrl + "main." + song.music_type
+                                                song.music = new RemoteFile(paths.audio_url)
                                         }
 
                                         if(song.type === "tja"){
@@ -728,6 +754,49 @@ class Loader{
                 }
                 request.send()
                 return promise
+        }
+        loadSongsCatalog(){
+                const limit = 200
+                const collected = []
+                const fetchPage = (page) => {
+                        const url = `api/songs?page=${page}&limit=${limit}`
+                        return this.ajax(url).then(response => {
+                                let entries
+                                try{
+                                        entries = JSON.parse(response)
+                                }catch(e){
+                                        entries = []
+                                }
+                                if(!Array.isArray(entries) || entries.length === 0){
+                                        return
+                                }
+                                const detailPromises = entries.map(entry => {
+                                        if(!entry || typeof entry.id !== "string" || !entry.id){
+                                                return Promise.resolve(null)
+                                        }
+                                        const detailUrl = `api/song/${encodeURIComponent(entry.id)}`
+                                        return this.ajax(detailUrl).then(detailResponse => {
+                                                try{
+                                                        return JSON.parse(detailResponse)
+                                                }catch(err){
+                                                        return null
+                                                }
+                                        }).catch(() => null)
+                                })
+                                return Promise.all(detailPromises).then(details => {
+                                        details.forEach(detail => {
+                                                if(detail && typeof detail === "object"){
+                                                        collected.push(detail)
+                                                }
+                                        })
+                                        if(entries.length === limit){
+                                                return fetchPage(page + 1)
+                                        }
+                                        return null
+                                })
+                        }).catch(() => null)
+                }
+                return fetchPage(1).then(() => collected)
         }
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null

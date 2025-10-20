@@ -25,7 +25,7 @@ import unicodedata
 from pymongo.database import Database
 
 try:  # pragma: no cover - pymongo always available in production
-    from pymongo import ReturnDocument
+    from pymongo import ReturnDocument, UpdateOne
     from pymongo.errors import DuplicateKeyError, PyMongoError, WriteError
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
     class _ReturnDocumentFallback:
@@ -33,6 +33,12 @@ except Exception:  # pragma: no cover - fallback when pymongo unavailable
         AFTER = 1
 
     ReturnDocument = _ReturnDocumentFallback()  # type: ignore[assignment]
+    class _UpdateOneFallback:  # pragma: no cover - simple shim for tests
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    UpdateOne = _UpdateOneFallback  # type: ignore[assignment]
     DuplicateKeyError = None  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
     WriteError = None  # type: ignore[assignment]
@@ -2333,6 +2339,8 @@ class SongScanner:
         self._group_locks: Dict[str, threading.Lock] = {}
         self._group_locks_guard = threading.Lock()
         self._state_collection = getattr(self.db, 'song_scanner_state', None)
+        self._manifest_collection = getattr(self.db, 'songs_manifest', None)
+        self._manifest_checksum: Optional[str] = None
         db_name = getattr(self.db, 'name', None)
         client = getattr(self.db, 'client', None)
         host_label: Optional[str] = None
@@ -2369,6 +2377,8 @@ class SongScanner:
             'songs_scanner_stable_id_unique',
             'songs_group_key_lookup',
         }
+
+        self._ensure_manifest_indexes()
 
         def _collection_index_names(collection, label: str) -> Optional[Set[str]]:
             try:
@@ -3703,6 +3713,7 @@ class SongScanner:
 
         document = {
             'title': base.title,
+            'title_lc': base.title.casefold(),
             'titleJa': base.title_ja,
             'title_lang': title_lang,
             'subtitle': base.subtitle,
@@ -3747,6 +3758,170 @@ class SongScanner:
         if source_song_id is not None:
             document['scanner_source_song_id'] = source_song_id
         return document
+
+    def _build_manifest_entry(
+        self,
+        document: Dict[str, object],
+        records: List[TjaImportRecord],
+        record_meta: Dict[str, Dict[str, object]],
+    ) -> Optional[Dict[str, object]]:
+        if not document.get('enabled', True):
+            return None
+        stable_id = document.get('scanner_stable_id') or document.get('id')
+        if not isinstance(stable_id, str) or not stable_id:
+            return None
+
+        title_value = str(document.get('title') or '')
+        category_value = document.get('category')
+        if not isinstance(category_value, str) or not category_value.strip():
+            category_value = DEFAULT_CATEGORY_TITLE
+        else:
+            category_value = category_value.strip()
+
+        courses_doc = document.get('courses') if isinstance(document.get('courses'), dict) else {}
+        difficulties = {
+            'easy': bool(courses_doc.get('easy')),
+            'normal': bool(courses_doc.get('normal')),
+            'hard': bool(courses_doc.get('hard')),
+            'oni': bool(courses_doc.get('oni')),
+            'ura': bool(courses_doc.get('ura')),
+        }
+
+        charts_payload = document.get('charts') if isinstance(document.get('charts'), list) else []
+        max_duration = 0
+        for chart in charts_payload:
+            if not isinstance(chart, dict):
+                continue
+            chart_data = chart.get('chart_data')
+            if not isinstance(chart_data, dict):
+                continue
+            duration_val = chart_data.get('duration_ms')
+            try:
+                duration_int = int(duration_val)
+            except (TypeError, ValueError):
+                duration_int = 0
+            if duration_int > max_duration:
+                max_duration = duration_int
+
+        if max_duration <= 0:
+            duration_candidate = document.get('duration_ms')
+            try:
+                duration_int = int(duration_candidate)
+            except (TypeError, ValueError):
+                duration_int = 0
+            if duration_int > 0:
+                max_duration = duration_int
+
+        sha1_values: List[str] = []
+        mtime_values: List[int] = []
+        for record in records:
+            meta = record_meta.get(record.relative_path)
+            if not isinstance(meta, dict):
+                continue
+            sha1_value = meta.get('tja_sha1') or meta.get('tja_hash')
+            if isinstance(sha1_value, str) and sha1_value:
+                sha1_values.append(sha1_value)
+            mtime_value = meta.get('tja_mtime_ns')
+            if isinstance(mtime_value, int):
+                mtime_values.append(mtime_value)
+            elif isinstance(mtime_value, (float, str)):
+                try:
+                    mtime_values.append(int(mtime_value))
+                except (TypeError, ValueError):
+                    continue
+
+        if sha1_values:
+            sha1_payload = '|'.join(sorted(sha1_values))
+            sha1_combined = hashlib.sha1(sha1_payload.encode('utf-8')).hexdigest()
+        else:
+            sha1_combined = hashlib.sha1(stable_id.encode('utf-8')).hexdigest()
+
+        file_mtime = max(mtime_values) if mtime_values else None
+
+        base_record = self._select_base_record(records)
+        file_path = base_record.relative_path if base_record.relative_path else None
+
+        manifest_entry: Dict[str, object] = {
+            'id': stable_id,
+            'title': title_value,
+            'title_lc': title_value.casefold(),
+            'category': category_value,
+            'difficulties': difficulties,
+            'duration_ms': max_duration,
+            'file_path': file_path,
+            'file_mtime': file_mtime,
+            'sha1': sha1_combined,
+        }
+
+        return manifest_entry
+
+    def _sync_manifest_entries(self, entries: Dict[str, Dict[str, object]]) -> Optional[str]:
+        collection = self._manifest_collection
+        if collection is None:
+            return None
+        now = datetime.now(UTC)
+        existing_ids: Set[str] = set()
+        try:
+            cursor = collection.find({'_id': {'$ne': '__meta__'}}, {'_id': 1})
+        except Exception:
+            cursor = []
+        for doc in cursor:
+            if isinstance(doc, dict):
+                identifier = doc.get('_id')
+                if isinstance(identifier, str):
+                    existing_ids.add(identifier)
+
+        desired_ids = set(entries.keys())
+        stale_ids = existing_ids - desired_ids
+        if stale_ids:
+            try:
+                collection.delete_many({'_id': {'$in': list(stale_ids)}})
+            except Exception:  # pragma: no cover - best effort cleanup
+                LOGGER.debug('Failed to prune %d stale songs manifest entries', len(stale_ids))
+
+        operations: List[UpdateOne] = []
+        for entry_id, entry in entries.items():
+            payload = dict(entry)
+            payload['_id'] = entry_id
+            payload['updated_at'] = now
+            if 'title_lc' not in payload and isinstance(payload.get('title'), str):
+                payload['title_lc'] = payload['title'].casefold()
+            operations.append(UpdateOne({'_id': entry_id}, {'$set': payload}, upsert=True))
+            if len(operations) >= 500:
+                try:
+                    collection.bulk_write(operations, ordered=False)
+                except Exception:  # pragma: no cover - tolerate bulk write failures
+                    LOGGER.debug('Failed to bulk write songs manifest chunk size=%d', len(operations), exc_info=True)
+                operations = []
+
+        if operations:
+            try:
+                collection.bulk_write(operations, ordered=False)
+            except Exception:  # pragma: no cover - tolerate bulk write failures
+                LOGGER.debug('Failed to bulk write songs manifest final chunk', exc_info=True)
+
+        checksum_inputs = [
+            f"{entry_id}:{entries[entry_id].get('sha1', '')}"
+            for entry_id in sorted(entries)
+        ]
+        checksum_source = '|'.join(checksum_inputs)
+        checksum = hashlib.sha1(checksum_source.encode('utf-8')).hexdigest() if checksum_inputs else hashlib.sha1(b'').hexdigest()
+        try:
+            collection.update_one(
+                {'_id': '__meta__'},
+                {
+                    '$set': {
+                        'checksum': checksum,
+                        'updated_at': now,
+                        'count': len(entries),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:  # pragma: no cover - tolerate meta update failures
+            LOGGER.debug('Failed to update songs manifest meta', exc_info=True)
+        self._manifest_checksum = checksum
+        return checksum
 
     def _seed_legacy_scanner_ids(self) -> None:
         songs_collection = getattr(self.db, 'songs', None)
@@ -4085,6 +4260,7 @@ class SongScanner:
         record_meta: Dict[str, Dict[str, object]] = {}
         group_key_by_path: Dict[str, str] = {}
         dirty_groups: Set[str] = set()
+        manifest_entries_by_id: Dict[str, Dict[str, object]] = {}
 
         for tja_path in self._iter_tja_files():
             summary['found'] += 1
@@ -4132,6 +4308,7 @@ class SongScanner:
             record: Optional[TjaImportRecord] = None
             diagnostics: List[str] = []
             file_hash: Optional[str] = None
+            file_sha1: Optional[str] = None
             fingerprint: Optional[str] = None
             was_dirty = needs_processing
 
@@ -4141,6 +4318,9 @@ class SongScanner:
                     record = self._record_from_state(record_payload)
                     if record:
                         file_hash = str(state_doc.get('tja_hash') or record.tja_hash)
+                        sha1_value = state_doc.get('tja_sha1')
+                        if isinstance(sha1_value, str) and sha1_value:
+                            file_sha1 = sha1_value
                         fingerprint = str(state_doc.get('fingerprint') or record.fingerprint)
                         group_key_by_path[tja_key] = compute_group_key(record)
                         summary['skipped'] += 1
@@ -4169,6 +4349,7 @@ class SongScanner:
                     audio_path, diagnostics = self._detect_audio(tja_path, parsed)
                     tja_bytes = tja_path.read_bytes()
                     file_hash = md5_bytes(tja_bytes)
+                    file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
                     fingerprint = parsed.fingerprint
 
                     audio_url = None
@@ -4222,6 +4403,14 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
 
+            if file_sha1 is None:
+                try:
+                    tja_bytes = tja_path.read_bytes()
+                except Exception:
+                    file_sha1 = None
+                else:
+                    file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
+
             key = group_key_by_path.get(tja_key) or compute_group_key(record)
             group_key_by_path[tja_key] = key
             aggregated_records[key].append(record)
@@ -4234,6 +4423,7 @@ class SongScanner:
                 'tja_hash': file_hash or record.tja_hash,
                 'tja_mtime_ns': tja_mtime_ns,
                 'tja_size': tja_size,
+                'tja_sha1': file_sha1,
                 'audio_hash': record.audio_hash,
                 'audio_mtime_ns': record.audio_mtime_ns,
                 'audio_size': record.audio_size,
@@ -4267,6 +4457,13 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
             if song_id is not None:
+                manifest_entry = self._build_manifest_entry(
+                    document,
+                    records,
+                    record_meta,
+                )
+                if manifest_entry:
+                    manifest_entries_by_id[manifest_entry['id']] = manifest_entry
                 for chart_entry in charts_payload:
                     course_label = (
                         chart_entry.get('canonical_course')
@@ -4311,6 +4508,7 @@ class SongScanner:
                     'tja_hash': meta.get('tja_hash'),
                     'tja_mtime_ns': meta.get('tja_mtime_ns'),
                     'tja_size': meta.get('tja_size'),
+                    'tja_sha1': meta.get('tja_sha1'),
                     'audio_path': record.audio_path,
                     'audio_hash': meta.get('audio_hash'),
                     'audio_mtime_ns': meta.get('audio_mtime_ns'),
@@ -4339,6 +4537,14 @@ class SongScanner:
                 except Exception:  # pragma: no cover - best effort cleanup
                     LOGGER.debug('Failed to prune %d stale scanner state entries', len(stale_paths))
 
+        if manifest_entries_by_id:
+            try:
+                checksum = self._sync_manifest_entries(manifest_entries_by_id)
+                if checksum:
+                    summary['manifest_checksum'] = checksum
+            except Exception:
+                LOGGER.debug('Failed to synchronise songs manifest entries', exc_info=True)
+
         for cat_id, title in categories.items():
             update = {
                 'id': cat_id,
@@ -4365,6 +4571,23 @@ class SongScanner:
     @property
     def watchdog_supported(self) -> bool:
         return self._watchdog_supported
+
+    def _ensure_manifest_indexes(self) -> None:
+        collection = self._manifest_collection
+        if collection is None:
+            return
+        try:
+            collection.create_index('title_lc', name='songs_manifest_title_lc')
+        except Exception:  # pragma: no cover - index creation is best-effort
+            LOGGER.debug('Failed to ensure songs manifest title index', exc_info=True)
+        try:
+            collection.create_index('category', name='songs_manifest_category')
+        except Exception:  # pragma: no cover - index creation is best-effort
+            LOGGER.debug('Failed to ensure songs manifest category index', exc_info=True)
+        try:
+            collection.create_index('id', unique=True, name='songs_manifest_id_unique')
+        except Exception:  # pragma: no cover - tolerate index errors
+            LOGGER.debug('Failed to ensure songs manifest id index', exc_info=True)
 
     def start_watcher(self, callback: Optional[Callable[[], None]] = None, debounce_seconds: float = 1.0):
         if not self.watchdog_supported:

@@ -15,6 +15,7 @@ import schema
 import threading
 import time
 import unicodedata
+from typing import Optional
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -29,6 +30,7 @@ import flask
 from functools import wraps
 from flask import Flask, g, jsonify, render_template, request, abort, redirect, session, flash, make_response, send_from_directory
 from flask_caching import Cache
+from flask_compress import Compress
 from flask_session import Session
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
@@ -54,6 +56,23 @@ def _coerce_int(value: object, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return number
+
+
+def _get_manifest_collection():
+    return getattr(db, 'songs_manifest', None)
+
+
+def _load_manifest_meta() -> Optional[dict]:
+    collection = _get_manifest_collection()
+    if collection is None:
+        return None
+    try:
+        meta = collection.find_one({'_id': '__meta__'})
+        if isinstance(meta, dict):
+            return meta
+    except Exception:
+        app.logger.debug('Failed to load songs manifest meta', exc_info=True)
+    return None
 
 
 def _ensure_chart_duration(chart_data: dict) -> None:
@@ -164,6 +183,9 @@ def take_config(name, required=False):
     return None
 
 app = Flask(__name__)
+app.config.setdefault('COMPRESS_MIN_SIZE', 1024)
+compress = Compress()
+compress.init_app(app)
 
 mongo_config = take_config('MONGO') or {}
 mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
@@ -261,6 +283,14 @@ try:
     db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
 except Exception:
     app.logger.debug('Could not ensure audioHash/titleNormalized index')
+try:
+    db.songs.create_index('title_lc', name='songs_title_lc_index')
+except Exception:
+    app.logger.debug('Could not ensure title_lc index')
+try:
+    db.songs.create_index('category', name='songs_category_index')
+except Exception:
+    app.logger.debug('Could not ensure category index')
 db.scores.create_index('username')
 try:
     db.song_scanner_state.create_index('tja_path', unique=True)
@@ -855,97 +885,179 @@ def route_api_preview():
 
 
 @app.route(basedir + 'api/songs')
-@app.cache.cached(timeout=60, query_string=True)
 def route_api_songs():
-    include_disabled = request.args.get('include_disabled', '').lower() in ('1', 'true', 'yes', 'all')
-    query = {} if include_disabled else {'enabled': True}
-    songs = list(db.songs.find(query, {'_id': False}))
-    for song in songs:
-        song.setdefault('titleJa', None)
-        song.setdefault('subtitleJa', None)
-        maker_id = song.get('maker_id')
-        if maker_id is not None:
-            if maker_id == 0:
-                song['maker'] = 0
-            else:
-                song['maker'] = db.makers.find_one({'id': maker_id}, {'_id': False})
-        else:
-            song['maker'] = None
-        song.pop('maker_id', None)
+    manifest_collection = _get_manifest_collection()
+    if manifest_collection is None:
+        response = make_response(jsonify([]))
+        response.headers['Cache-Control'] = 'public, max-age=60'
+        return response
 
-        paths = song.get('paths') or {}
+    try:
+        limit = max(1, min(_coerce_int(request.args.get('limit'), 200), 200))
+    except Exception:
+        limit = 200
+    try:
+        page = max(1, _coerce_int(request.args.get('page'), 1))
+    except Exception:
+        page = 1
+    skip = (page - 1) * limit
 
-        category_id = song.get('category_id')
-        genre_value = song.get('genre')
-        category_value = song.get('category')
-        if isinstance(category_value, str):
-            category_value = category_value.strip()
-            if not category_value:
-                category_value = None
-        else:
-            category_value = None
-        if isinstance(genre_value, str):
-            trimmed_genre = genre_value.strip()
-            if trimmed_genre:
-                category_value = trimmed_genre
-        if not category_value and category_id is not None:
-            category_doc = db.categories.find_one({'id': category_id})
-            if category_doc:
-                category_value = category_doc.get('title') or 'Unsorted'
-        if not category_value:
-            # derive category from folder name if genre is empty
-            category_value = None
-            dir_url_value = paths.get('dir_url') if isinstance(paths.get('dir_url'), str) else None
-            if dir_url_value:
-                dir_url_value = dir_url_value.strip()
-            if dir_url_value:
-                base_url_value = (SONGS_BASEURL_VALUE or '').strip()
-                dir_parsed = urlparse(dir_url_value)
-                dir_path = (dir_parsed.path or dir_url_value)
-                dir_path = dir_path.replace('\\', '/').strip('/')
-                base_parts = []
-                if base_url_value:
-                    base_parsed = urlparse(base_url_value)
-                    base_path = (base_parsed.path or base_url_value)
-                    base_path = base_path.replace('\\', '/').strip('/')
-                    if base_path:
-                        base_parts = [part for part in base_path.split('/') if part]
-                dir_parts = [part for part in dir_path.split('/') if part]
-                relative_parts = dir_parts
-                if base_parts and len(dir_parts) >= len(base_parts):
-                    if dir_parts[: len(base_parts)] == base_parts:
-                        relative_parts = dir_parts[len(base_parts):]
-                if relative_parts:
-                    folder_name = unquote(relative_parts[0]).strip()
-                    if folder_name:
-                        folder_name = unicodedata.normalize("NFC", folder_name)
-                        category_value = folder_name
-        song['category'] = category_value or 'Unsorted'
+    filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
+    category_param = request.args.get('category', '')
+    if isinstance(category_param, str):
+        category_value = category_param.strip()
+        if category_value:
+            filters['category'] = category_value
 
-        skin_id = song.get('skin_id')
-        if skin_id:
-            song['song_skin'] = db.song_skins.find_one({'id': skin_id}, {'_id': False, 'id': False})
-        else:
-            song['song_skin'] = None
-        song.pop('skin_id', None)
-        song.pop('managed_by_scanner', None)
+    search_param = request.args.get('q', '')
+    if isinstance(search_param, str):
+        search_value = search_param.strip().casefold()
+        if search_value:
+            filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
 
-        if 'tja_url' not in paths and song.get('type') == 'tja':
-            paths['tja_url'] = '%s%s/main.tja' % (SONGS_BASEURL_VALUE, song['id'])
-        if 'audio_url' not in paths:
-            music_type = song.get('music_type')
-            if music_type:
-                paths['audio_url'] = '%s%s/main.%s' % (SONGS_BASEURL_VALUE, song['id'], music_type)
-        if 'dir_url' not in paths:
-            paths['dir_url'] = '%s%s/' % (SONGS_BASEURL_VALUE, song['id'])
-        song['paths'] = paths
-        song['song_path'] = paths.get('tja_url')
-        song['audio_path'] = paths.get('audio_url')
+    projection = {
+        '_id': 0,
+        'id': 1,
+        'title': 1,
+        'category': 1,
+        'difficulties': 1,
+        'duration_ms': 1,
+    }
 
-        if not song.get('music_type') and paths.get('audio_url'):
-            song['music_type'] = paths['audio_url'].split('.')[-1].lower()
+    try:
+        cursor = (
+            manifest_collection.find(filters, projection)
+            .sort('title_lc', 1)
+            .skip(skip)
+            .limit(limit)
+        )
+        payload = list(cursor)
+    except Exception:
+        app.logger.exception('Failed to query songs manifest')
+        payload = []
 
-    return cache_wrap(flask.jsonify(songs), 60)
+    meta = _load_manifest_meta()
+    etag = meta.get('checksum') if isinstance(meta, dict) else None
+    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    if etag and request.headers.get('If-None-Match') == etag:
+        response = make_response('', 304)
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        return response
+
+    response = make_response(jsonify(payload))
+    if etag:
+        response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = cache_control
+    return response
+
+
+@app.route(basedir + 'api/song/<song_id>')
+def route_api_song_detail(song_id: str):
+    if not isinstance(song_id, str):
+        abort(400)
+    stable_id = song_id.strip()
+    if not stable_id:
+        abort(400)
+
+    projection = {
+        '_id': False,
+        'id': True,
+        'scanner_stable_id': True,
+        'title': True,
+        'titleJa': True,
+        'subtitle': True,
+        'subtitleJa': True,
+        'category': True,
+        'preview': True,
+        'paths': True,
+        'music_type': True,
+        'type': True,
+        'courses': True,
+        'import_issues': True,
+        'valid_chart_count': True,
+        'charts': True,
+    }
+
+    try:
+        song_doc = db.songs.find_one({'scanner_stable_id': stable_id}, projection)
+    except Exception:
+        app.logger.exception('Failed to load song detail for %s', stable_id)
+        abort(500)
+
+    if not isinstance(song_doc, dict):
+        abort(404)
+
+    charts_payload = song_doc.get('charts') if isinstance(song_doc.get('charts'), list) else []
+    sanitized_charts: list[dict[str, object]] = []
+    max_duration = 0
+    for entry in charts_payload:
+        if not isinstance(entry, dict):
+            continue
+        chart_data = entry.get('chart_data') if isinstance(entry.get('chart_data'), dict) else {}
+        duration_val = chart_data.get('duration_ms') if isinstance(chart_data, dict) else None
+        try:
+            duration_int = int(duration_val) if duration_val is not None else 0
+        except (TypeError, ValueError):
+            duration_int = 0
+        if duration_int > max_duration:
+            max_duration = duration_int
+        sanitized_entry = {
+            'course': entry.get('course'),
+            'canonical_course': entry.get('canonical_course'),
+            'mode': entry.get('mode'),
+            'display_course': entry.get('display_course'),
+            'level': entry.get('level'),
+            'branch': entry.get('branch'),
+            'valid': entry.get('valid'),
+            'issues': entry.get('issues'),
+            'total_notes': entry.get('total_notes'),
+            'tja_path': entry.get('tja_path'),
+            'rank': entry.get('rank'),
+            'tja_url': entry.get('tja_url'),
+        }
+        sanitized_charts.append(sanitized_entry)
+
+    courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
+    difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
+
+    manifest_meta = _get_manifest_collection()
+    manifest_entry = None
+    if manifest_meta is not None:
+        try:
+            manifest_entry = manifest_meta.find_one({'_id': stable_id}, {'duration_ms': 1, '_id': False})
+        except Exception:
+            manifest_entry = None
+    if isinstance(manifest_entry, dict):
+        duration_override = manifest_entry.get('duration_ms')
+        try:
+            duration_candidate = int(duration_override)
+        except (TypeError, ValueError):
+            duration_candidate = None
+        if duration_candidate:
+            max_duration = max(max_duration, duration_candidate)
+
+    payload = {
+        'id': stable_id,
+        'legacy_id': song_doc.get('id'),
+        'title': song_doc.get('title'),
+        'titleJa': song_doc.get('titleJa'),
+        'subtitle': song_doc.get('subtitle'),
+        'subtitleJa': song_doc.get('subtitleJa'),
+        'category': song_doc.get('category'),
+        'preview': song_doc.get('preview'),
+        'music_type': song_doc.get('music_type'),
+        'type': song_doc.get('type') or 'tja',
+        'paths': song_doc.get('paths'),
+        'courses': courses_doc,
+        'difficulties': difficulties,
+        'charts': sanitized_charts,
+        'import_issues': song_doc.get('import_issues', []),
+        'valid_chart_count': song_doc.get('valid_chart_count', 0),
+        'duration_ms': max_duration,
+    }
+
+    return jsonify(payload)
 
 
 @app.route(basedir + 'api/modes')
