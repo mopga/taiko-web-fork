@@ -115,6 +115,35 @@ function detectModeForSong(songMeta){
         return DEFAULT_MODE_KEY;
 }
 
+function resolveModeKey(song, selection){
+        const rawMode = normaliseToken(selection && selection.mode ? selection.mode : "");
+        if(rawMode === "tower" || rawMode === "dandojo"){
+                return rawMode;
+        }
+
+        const charts = Array.isArray(song && song.charts) ? song.charts : [];
+        for(let i = 0; i < charts.length; i++){
+                const chart = charts[i] || {};
+                const chartMode = normaliseToken(chart.mode || chart.display_course || "");
+                if(chartMode === "tower"){
+                        return "tower";
+                }
+                if(chartMode === "dandojo" || chartMode === "dan"){
+                        return "dandojo";
+                }
+        }
+
+        const categoryToken = normaliseToken((selection && selection.category) || song && song.category || "");
+        if(categoryToken === "taiko towers"){
+                return "tower";
+        }
+        if(categoryToken === "dan dojo"){
+                return "dandojo";
+        }
+
+        return DEFAULT_MODE_KEY;
+}
+
 function coerceNumber(value, fallback){
         if(value === null || value === undefined){
                 return fallback;
@@ -204,6 +233,50 @@ function transformMeasuresToEvents(measures, durationHint){
         }
 
         return {notes: events, durationMs: durationMs};
+}
+
+function computeDurationFromEvents(events){
+        if(!Array.isArray(events) || !events.length){
+                return 0;
+        }
+        const lastEvent = events[events.length - 1];
+        const time = lastEvent && typeof lastEvent.timeMs === "number" ? lastEvent.timeMs : 0;
+        return time >= 0 ? time : 0;
+}
+
+function computeTotalNotes(events){
+        if(!Array.isArray(events) || !events.length){
+                return 0;
+        }
+        let total = 0;
+        for(let i = 0; i < events.length; i++){
+                const entry = events[i];
+                if(entry && typeof entry === "object" && typeof entry.timeMs === "number"){
+                        total++;
+                }
+        }
+        return total;
+}
+
+function applyResultToContext(result, context){
+        if(!result){
+                return result;
+        }
+        if(context && context !== globalObject && typeof context === "object"){
+                const events = Array.isArray(result.notes) ? result.notes : [];
+                let durationMs = typeof result.durationMs === "number" ? result.durationMs : computeDurationFromEvents(events);
+                if(!Number.isFinite(durationMs) || durationMs < 0){
+                        durationMs = 0;
+                }
+                let totalNotes = result.meta && result.meta.totalNotes != null ? result.meta.totalNotes : computeTotalNotes(events);
+                if(!Number.isFinite(totalNotes) || totalNotes < 0){
+                        totalNotes = events.length;
+                }
+                context.songData = events;
+                context.durationMs = durationMs;
+                context.totalNotes = totalNotes;
+        }
+        return result;
 }
 
 function noteTypeFromEntry(entry){
@@ -580,47 +653,105 @@ function registerRestNotesLoader(Loader){
         const loadNotesForSong = async function loadNotesForSong(songMeta, selection){
                 const song = songMeta || {};
                 const currentSelection = Object.assign({}, selection || {});
+                const context = this && typeof this === "object" ? this : null;
                 if(!currentSelection.title){
                         currentSelection.title = song.title || song.originalTitle || song.id || "";
                 }
-                if(!currentSelection.course){
-                        currentSelection.course = currentSelection.difficulty || song.difficulty;
-                }
-                console.debug("[notes] selection", {
-                        title: currentSelection.title,
-                        course: currentSelection.course,
-                        rank: currentSelection.rank,
-                        mode: currentSelection.mode || song.mode || song.default_mode || null,
-                });
 
-                const modeKey = detectModeForSong(song);
-                if(modeKey === DEFAULT_MODE_KEY){
+                const modeKey = resolveModeKey(song, currentSelection);
+                if(modeKey !== "tower" && modeKey !== "dandojo"){
                         return null;
                 }
-                const plan = buildRestUrl(modeKey, song, currentSelection);
-                if(!plan.url){
+
+                const charts = Array.isArray(song && song.charts) ? song.charts : [];
+                const query = new URLSearchParams();
+                if(currentSelection.title){
+                        query.set("title", currentSelection.title);
+                }
+
+                let url = "";
+                if(modeKey === "tower"){
+                        let course = currentSelection.course || currentSelection.difficulty || null;
+                        if(course === null || course === undefined || course === ""){
+                                const towerChart = charts.find(chart => {
+                                        const token = normaliseToken(chart && (chart.mode || chart.display_course));
+                                        return token === "tower" || token.includes("tower");
+                                }) || null;
+                                if(towerChart){
+                                        course = towerChart.course || towerChart.difficulty || towerChart.level || towerChart.rank || null;
+                                }
+                        }
+                        if(course === null || course === undefined || course === ""){
+                                course = "oni";
+                        }
+                        currentSelection.course = course;
+                        if(!currentSelection.difficulty){
+                                currentSelection.difficulty = course;
+                        }
+                        query.set("course", String(course));
+                        query.set("mode", "tower");
+                        url = "/api/tower/chart?" + query.toString();
+                }else{
+                        let rank = currentSelection.rank;
+                        if(rank === undefined || rank === null || rank === ""){
+                                rank = currentSelection.dan;
+                        }
+                        if(rank === undefined || rank === null || rank === ""){
+                                const danChart = charts.find(chart => {
+                                        const token = normaliseToken(chart && (chart.mode || chart.display_course));
+                                        return token === "dandojo" || token === "dan";
+                                }) || null;
+                                if(danChart){
+                                        if(danChart.rank !== undefined && danChart.rank !== null && danChart.rank !== ""){
+                                                rank = danChart.rank;
+                                        }else if(danChart.course !== undefined && danChart.course !== null && danChart.course !== ""){
+                                                rank = danChart.course;
+                                        }
+                                }
+                        }
+                        if(rank === undefined || rank === null || rank === ""){
+                                rank = song.rank;
+                        }
+                        if(rank === undefined || rank === null || rank === ""){
+                                rank = 1;
+                        }
+                        currentSelection.rank = rank;
+                        query.set("rank", String(rank));
+                        query.set("mode", "dandojo");
+                        url = "/api/dan/chart?" + query.toString();
+                }
+
+                currentSelection.mode = modeKey;
+
+                if(!url){
                         return null;
                 }
 
                 const now = Date.now();
-                const cached = notesCache.get(plan.url);
+                const cached = notesCache.get(url);
                 if(cached && cached.expires > now){
-                        return cached.promise;
+                        return cached.promise.then(result => applyResultToContext(result, context));
                 }
 
-                const promise = fetchJsonWithCache(plan.url).then(json => {
+                const promise = fetchJsonWithCache(url).then(json => {
                         const normalized = normalizeChartResponse(json);
-                        console.debug(`[notes] REST status=${normalized.status} measures=${normalized.measures.length}`, {url: plan.url});
                         if(normalized.status !== "ok" || !normalized.measures.length){
                                 throw new Error("status_" + normalized.status);
                         }
+
                         const transformed = transformMeasuresToEvents(normalized.measures, normalized.durationMs);
-                        const totalNotes = normalized.totalNotes || transformed.notes.length;
+                        const notes = Array.isArray(transformed && transformed.notes) ? transformed.notes : [];
+                        if(!notes.length){
+                                return null;
+                        }
+
+                        const totalNotes = normalized.totalNotes || notes.length;
                         const result = {
                                 modeKey: modeKey,
-                                notes: transformed.notes,
-                                durationMs: transformed.durationMs,
+                                notes: notes,
+                                durationMs: normalized.durationMs !== undefined ? normalized.durationMs : transformed.durationMs,
                         };
+
                         const parsed = convertMeasuresToParsedChart(normalized.chartData, {modeKey: modeKey, selection: currentSelection});
                         if(parsed && parsed.chart){
                                 result.parsedChart = parsed.chart;
@@ -628,8 +759,8 @@ function registerRestNotesLoader(Loader){
                                         result.durationMs = parsed.durationMs;
                                 }
                                 result.meta = parsed.meta || {};
-                        }else if(result.notes.length){
-                                const fallbackChart = buildFallbackParsedChart(result.notes);
+                        }else{
+                                const fallbackChart = buildFallbackParsedChart(notes);
                                 if(fallbackChart){
                                         result.parsedChart = fallbackChart;
                                 }
@@ -639,41 +770,48 @@ function registerRestNotesLoader(Loader){
                                         totalNotes: totalNotes,
                                 };
                         }
+
                         if(!result.meta){
-                                result.meta = {
-                                        mode: modeKey,
-                                        course: normalized.chartData.course || currentSelection.course || currentSelection.rank || null,
-                                        totalNotes: totalNotes,
-                                };
-                        }else if(!result.meta.totalNotes){
+                                result.meta = {};
+                        }
+                        if(!result.meta.mode){
+                                result.meta.mode = modeKey;
+                        }
+                        if(result.meta.totalNotes == null){
                                 result.meta.totalNotes = totalNotes;
+                        }
+                        if(result.meta.course == null){
+                                result.meta.course = normalized.chartData.course || currentSelection.course || currentSelection.rank || null;
+                        }
+
+                        if(result.durationMs == null){
+                                result.durationMs = transformed.durationMs;
+                        }
+                        if(result.durationMs == null){
+                                result.durationMs = computeDurationFromEvents(notes);
                         }
                         if(result.durationMs < 0){
                                 result.durationMs = 0;
                         }
-                        console.debug("[notes] using REST", {
-                                mode: modeKey,
-                                url: plan.url,
-                                totalNotes: result.meta.totalNotes,
-                                durationMs: result.durationMs,
-                        });
+
                         return result;
                 }).catch(error => {
-                        console.debug("[notes] fallback to builtin", {
+                        console.debug("[notes] REST fetch failed", {
                                 mode: modeKey,
-                                url: plan.url,
+                                url: url,
                                 error: error && error.message ? error.message : error,
                         });
                         return null;
                 });
 
-                notesCache.set(plan.url, {promise: promise, expires: now + REST_CACHE_TTL});
+                notesCache.set(url, {promise: promise, expires: now + REST_CACHE_TTL});
                 promise.then(value => {
                         if(value === null){
-                                notesCache.delete(plan.url);
+                                notesCache.delete(url);
                         }
                 });
-                return promise;
+
+                return promise.then(result => applyResultToContext(result, context));
         };
 
         Loader.prototype.loadNotesForSong = loadNotesForSong;
