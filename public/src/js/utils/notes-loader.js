@@ -1,6 +1,8 @@
 ;(function(global){
+        const DEFAULT_MODE_KEY = "standard";
         const REST_CACHE_TTL = 12000;
-        const restCache = new Map();
+        const httpCache = new Map();
+        const notesCache = new Map();
 
         function normaliseToken(value){
                 if(typeof value !== "string"){
@@ -9,81 +11,203 @@
                 return value.trim().toLowerCase();
         }
 
+        function canonicalModeKey(raw){
+                const token = normaliseToken(raw);
+                if(!token){
+                        return DEFAULT_MODE_KEY;
+                }
+                if(token === "dan" || token === "dojo" || token === "dandojo"){
+                        return "dandojo";
+                }
+                if(token === "tower" || token === "towers"){
+                        return "tower";
+                }
+                if(token === "std" || token === "default"){
+                        return DEFAULT_MODE_KEY;
+                }
+                return token;
+        }
+
+        function buildCategoryIndex(manifest){
+                const index = {};
+                if(!manifest || typeof manifest !== "object"){
+                        return index;
+                }
+                const modes = Array.isArray(manifest.modes) ? manifest.modes : [];
+                modes.forEach(entry => {
+                        if(!entry || typeof entry !== "object"){
+                                return;
+                        }
+                        const key = canonicalModeKey(entry.key || entry.mode);
+                        if(!key){
+                                return;
+                        }
+                        const categories = Array.isArray(entry.categories) ? entry.categories : [];
+                        categories.forEach(category => {
+                                if(typeof category === "string" && category.trim()){
+                                        index[normaliseToken(category)] = key;
+                                }
+                        });
+                });
+                return index;
+        }
+
+        function getModesStore(){
+                if(typeof window === "undefined"){
+                        return null;
+                }
+                const store = window.__modes__;
+                if(store && typeof store === "object" && store.manifest && !store.categoryIndex){
+                        store.categoryIndex = buildCategoryIndex(store.manifest);
+                }
+                return store || null;
+        }
+
+        function getCategoryIndex(){
+                const store = getModesStore();
+                if(store && store.categoryIndex){
+                        return store.categoryIndex;
+                }
+                if(global.modesHelper && global.modesHelper.manifest){
+                        const manifest = global.modesHelper.manifest;
+                        if(!manifest.__categoryIndex){
+                                manifest.__categoryIndex = buildCategoryIndex(manifest);
+                        }
+                        return manifest.__categoryIndex;
+                }
+                return {};
+        }
+
+        function detectModeForSong(songMeta){
+                const song = songMeta || {};
+                const canonicalModes = [];
+                const seen = new Set();
+                const rawModes = Array.isArray(song.modes) ? song.modes : [];
+                rawModes.forEach(mode => {
+                        const canonical = canonicalModeKey(mode);
+                        if(canonical && !seen.has(canonical)){
+                                canonicalModes.push(canonical);
+                                seen.add(canonical);
+                        }
+                });
+                const defaultMode = canonicalModeKey(song.default_mode);
+                if(canonicalModes.length){
+                        if(defaultMode && seen.has(defaultMode)){
+                                return defaultMode;
+                        }
+                        return canonicalModes[0];
+                }
+                if(defaultMode && defaultMode !== DEFAULT_MODE_KEY){
+                        return defaultMode;
+                }
+                const fallbackMode = canonicalModeKey(song.mode);
+                if(fallbackMode && fallbackMode !== DEFAULT_MODE_KEY){
+                        return fallbackMode;
+                }
+                const category = song.category || song.category_title;
+                if(category){
+                        const mapped = getCategoryIndex()[normaliseToken(category)];
+                        if(mapped){
+                                return canonicalModeKey(mapped);
+                        }
+                }
+                return DEFAULT_MODE_KEY;
+        }
+
         function coerceNumber(value, fallback){
                 if(value === null || value === undefined){
                         return fallback;
                 }
-                const num = Number(value);
-                if(Number.isFinite(num)){
-                        return num;
+                const number = Number(value);
+                if(Number.isFinite(number)){
+                        return number;
                 }
                 return fallback;
         }
 
-        function buildRestUrl(source, songMeta, selection, modeKey){
-                const endpoint = typeof source.endpoint === "string" ? source.endpoint : "";
-                const params = Array.isArray(source.params) ? source.params : [];
-                const query = [];
-                params.forEach(param => {
-                        let value = "";
-                        switch(param){
-                                case "title":
-                                        value = selection.title || songMeta.title || songMeta.originalTitle || songMeta.id || "";
-                                        break;
-                                case "course":
-                                case "difficulty":
-                                        value = selection.course || selection.difficulty || selection.rank || "";
-                                        break;
-                                case "rank":
-                                        value = selection.rank || selection.difficulty || selection.course || "";
-                                        break;
-                                case "mode":
-                                        value = modeKey;
-                                        break;
-                                default:
-                                        if(selection[param]){
-                                                value = selection[param];
-                                        }else if(songMeta[param]){
-                                                value = songMeta[param];
-                                        }
-                        }
-                        if(value !== undefined && value !== null && String(value).length){
-                                query.push(encodeURIComponent(param) + "=" + encodeURIComponent(String(value)));
-                        }
-                });
-                return {
-                        url: endpoint + (query.length ? "?" + query.join("&") : ""),
-                };
-        }
-
-        function fetchWithCache(url, ttl){
+        function fetchJsonWithCache(url){
                 const now = Date.now();
-                const existing = restCache.get(url);
+                const existing = httpCache.get(url);
                 if(existing && existing.expires > now){
                         return existing.promise;
                 }
-                const fetchPromise = fetch(url, {credentials: "same-origin"}).then(response => {
+                const promise = fetch(url, {credentials: "same-origin"}).then(response => {
                         if(!response.ok){
                                 throw new Error(url + " (" + response.status + ")");
                         }
                         return response.json();
-                }).then(json => {
-                        if(!json || typeof json !== "object" || json.status !== "ok"){
-                                const message = json && json.message ? json.message : "invalid_response";
-                                throw new Error(message);
+                });
+                httpCache.set(url, {promise: promise, expires: now + REST_CACHE_TTL});
+                promise.catch(() => {
+                        httpCache.delete(url);
+                });
+                return promise;
+        }
+
+        function noteKindFromEntry(note){
+                if(!note || typeof note !== "object"){
+                        return null;
+                }
+                const explicit = coerceNumber(note.kind, null);
+                if(explicit === 1 || explicit === 2){
+                        return explicit;
+                }
+                const typeToken = normaliseToken(note.type);
+                if(typeToken === "ka" || typeToken === "katsu" || typeToken === "kat"){
+                        return 2;
+                }
+                if(typeToken === "don" || typeToken === "dong" || typeToken === "do"){
+                        return 1;
+                }
+                return null;
+        }
+
+        function transformMeasuresToEvents(measures, durationHint){
+                const list = Array.isArray(measures) ? measures : [];
+                const events = [];
+                let durationMs = coerceNumber(durationHint, 0) || 0;
+                let maxTime = durationMs;
+
+                list.forEach(measure => {
+                        const startMs = coerceNumber(measure && measure.start_ms, 0) || 0;
+                        const duration = coerceNumber(measure && measure.duration_ms, 0) || 0;
+                        if(startMs + duration > maxTime){
+                                maxTime = startMs + duration;
                         }
-                        return json;
+                        const notes = Array.isArray(measure && measure.notes) ? measure.notes : [];
+                        notes.forEach(entry => {
+                                const offsetValue = entry && Object.prototype.hasOwnProperty.call(entry, "at") ? entry.at : entry && entry.offset;
+                                const offset = coerceNumber(offsetValue, 0) || 0;
+                                const absolute = startMs + Math.max(0, offset);
+                                const kind = noteKindFromEntry(entry);
+                                const resolvedKind = kind === 2 ? 2 : 1;
+                                events.push({timeMs: Math.round(absolute), kind: resolvedKind});
+                                if(absolute > maxTime){
+                                        maxTime = absolute;
+                                }
+                        });
                 });
-                restCache.set(url, {promise: fetchPromise, expires: now + ttl});
-                fetchPromise.catch(() => {
-                        restCache.delete(url);
+
+                events.sort((a, b) => {
+                        if(a.timeMs === b.timeMs){
+                                return a.kind - b.kind;
+                        }
+                        return a.timeMs - b.timeMs;
                 });
-                return fetchPromise;
+
+                if(maxTime > durationMs){
+                        durationMs = Math.round(maxTime);
+                }
+                if(durationMs < 0){
+                        durationMs = 0;
+                }
+
+                return {notes: events, durationMs: durationMs};
         }
 
         function noteTypeFromEntry(entry){
                 const rawType = normaliseToken(entry && entry.type ? String(entry.type) : "");
-                const kind = entry && entry.kind;
+                const kind = coerceNumber(entry && entry.kind, null);
                 const sizeToken = normaliseToken(entry && entry.size);
                 const isBig = entry && entry.big === true || rawType.startsWith("dai") || sizeToken === "big" || rawType.includes("big");
                 let base = rawType;
@@ -128,8 +252,34 @@
                 };
         }
 
+        function createCircleFromConfig(config){
+                if(typeof global.Circle === "function"){
+                        const circle = new global.Circle(config);
+                        return circle;
+                }
+                return {
+                        id: config.id,
+                        start: config.start,
+                        ms: config.start,
+                        originalMS: config.start,
+                        type: config.type,
+                        txt: config.txt,
+                        speed: config.speed,
+                        gogoTime: config.gogoTime,
+                        endTime: config.endTime,
+                        originalEndTime: config.endTime,
+                        requiredHits: config.requiredHits,
+                        beatMS: config.beatMS,
+                        section: config.section,
+                        branch: null,
+                };
+        }
+
         function convertMeasuresToParsedChart(payload, context){
-                const chartData = payload && payload.chart_data ? payload.chart_data : {};
+                if(!payload || typeof payload !== "object"){
+                        return null;
+                }
+                const chartData = payload.chart_data || {};
                 const measures = Array.isArray(chartData.measures) ? chartData.measures : [];
                 const circles = [];
                 const events = [];
@@ -170,8 +320,9 @@
 
                         const notes = Array.isArray(measure && measure.notes) ? measure.notes : [];
                         notes.forEach((note, noteIndex) => {
-                                const offset = coerceNumber(note && note.at, 0) || 0;
-                                const absolute = startMs + offset;
+                                const offsetValue = note && Object.prototype.hasOwnProperty.call(note, "at") ? note.at : note && note.offset;
+                                const offset = coerceNumber(offsetValue, 0) || 0;
+                                const absolute = startMs + Math.max(0, offset);
                                 const type = noteTypeFromEntry(note);
                                 if(!type){
                                         return;
@@ -187,8 +338,17 @@
                                         beatMS: beatMS,
                                         section: noteIndex === 0 && offset === 0,
                                 });
-                                const circle = new global.Circle(circleCfg);
+                                const circle = createCircleFromConfig(circleCfg);
                                 circles.push(circle);
+                                if(circle.ms === undefined){
+                                        circle.ms = circle.start;
+                                }
+                                if(circle.originalMS === undefined){
+                                        circle.originalMS = circle.ms;
+                                }
+                                if(circle.originalEndTime === undefined){
+                                        circle.originalEndTime = circle.endTime;
+                                }
                                 if(earliestMs === null || circle.ms < earliestMs){
                                         earliestMs = circle.ms;
                                 }
@@ -216,10 +376,17 @@
                                         beatMS: beatMS,
                                         section: offset === 0 && notes.length === 0,
                                 });
-                                const circle = new global.Circle(circleCfg);
-                                circle.endTime = endMs;
-                                circle.originalEndTime = endMs;
+                                const circle = createCircleFromConfig(circleCfg);
                                 circles.push(circle);
+                                if(circle.ms === undefined){
+                                        circle.ms = circle.start;
+                                }
+                                if(circle.originalMS === undefined){
+                                        circle.originalMS = circle.ms;
+                                }
+                                if(circle.originalEndTime === undefined){
+                                        circle.originalEndTime = circle.endTime;
+                                }
                                 if(earliestMs === null || circle.ms < earliestMs){
                                         earliestMs = circle.ms;
                                 }
@@ -247,11 +414,11 @@
 
                 const beatInterval = circles.length ? (circles[0].beatMS || 600) : (firstBeatMS || 600);
 
-                let durationMs = coerceNumber(chartData.duration_ms, 0);
-                if(!durationMs || durationMs < 0){
+                let durationMs = coerceNumber(chartData.duration_ms, 0) || 0;
+                if(durationMs <= 0){
                         const lastCircle = circles[circles.length - 1];
                         if(lastCircle){
-                                durationMs = Math.max(lastCircle.endTime, lastCircle.ms);
+                                durationMs = Math.max(lastCircle.endTime || lastCircle.ms, lastCircle.ms);
                         }else if(parsedMeasures.length){
                                 const lastMeasure = parsedMeasures[parsedMeasures.length - 1];
                                 durationMs = lastMeasure.ms;
@@ -270,7 +437,7 @@
                 };
 
                 const selection = context && context.selection ? context.selection : {};
-                const difficulty = selection.difficulty || "oni";
+                const difficulty = selection.difficulty || selection.course || "oni";
                 const stars = selection.stars || 0;
                 if(typeof global.AutoScore === "function"){
                         const autoscore = new global.AutoScore(difficulty, stars, 2, circles);
@@ -288,50 +455,163 @@
                         durationMs: durationMs,
                         meta: {
                                 mode: context ? context.modeKey : null,
-                                course: chartData.course || selection.difficulty || null,
+                                course: chartData.course || selection.difficulty || selection.course || null,
                                 totalNotes: chartData.total_notes || circles.length,
                         },
                 };
         }
 
-        function loadNotesForSong(songMeta, selection){
-                const song = songMeta || {};
-                const currentSelection = Object.assign({}, selection);
-                if(!currentSelection.title){
-                        currentSelection.title = song.title || song.originalTitle || song.id || "";
+        function buildFallbackParsedChart(events){
+                if(!Array.isArray(events)){
+                        return null;
                 }
-                const resolver = global.modesHelper ? global.modesHelper.resolveSongMode(song, currentSelection) : {modeKey: "standard", definition: {notes_source: {type: "builtin", format: "engine-v1"}}};
-                const modeKey = resolver.modeKey || "standard";
-                const source = resolver.definition && resolver.definition.notes_source ? resolver.definition.notes_source : {type: "builtin", format: "engine-v1"};
-
-                if(!source || source.type === "builtin" || source.type === "engine" || source.type === "internal"){
-                        return {
-                                type: "builtin",
-                                modeKey: modeKey,
-                                source: source,
-                        };
-                }
-
-                if(source.type === "rest"){
-                        const plan = buildRestUrl(source, song, currentSelection, modeKey);
-                        const promise = fetchWithCache(plan.url, REST_CACHE_TTL).then(json => {
-                                return convertMeasuresToParsedChart(json, {modeKey: modeKey, selection: currentSelection});
+                const circles = [];
+                let id = 0;
+                events.forEach(event => {
+                        if(!event || typeof event.timeMs !== "number"){
+                                return;
+                        }
+                        const kind = event.kind === 2 ? 2 : 1;
+                        const type = kind === 2 ? "ka" : "don";
+                        id++;
+                        const circleCfg = buildCircleConfig({
+                                id: id,
+                                ms: event.timeMs,
+                                type: type,
+                                speed: 1,
+                                endTime: event.timeMs,
+                                requiredHits: 0,
+                                beatMS: 600,
+                                section: id === 1,
                         });
-                        return {
-                                type: "rest",
-                                modeKey: modeKey,
-                                source: source,
-                                requestUrl: plan.url,
-                                promise: promise,
-                        };
-                }
-
+                        const circle = createCircleFromConfig(circleCfg);
+                        if(circle.ms === undefined){
+                                circle.ms = circle.start;
+                                circle.originalMS = circle.start;
+                        }
+                        if(circle.originalEndTime === undefined){
+                                circle.originalEndTime = circle.endTime;
+                        }
+                        circles.push(circle);
+                });
+                circles.sort((a, b) => a.ms - b.ms);
                 return {
-                        type: "builtin",
-                        modeKey: modeKey,
-                        source: source,
+                        circles: circles,
+                        measures: [],
+                        events: [],
+                        branches: null,
+                        beatInfo: {beatInterval: 600},
+                        soundOffset: 0,
+                        scoremode: 2,
+                        scoreinit: 0,
+                        scorediff: 0,
                 };
         }
 
+        function buildRestUrl(modeKey, song, selection){
+                const params = new URLSearchParams();
+                const title = selection.title || song.title || song.originalTitle || song.id || "";
+                if(title){
+                        params.set("title", title);
+                }
+                if(modeKey === "tower"){
+                        const course = selection.course || selection.difficulty || "oni";
+                        params.set("course", course);
+                        params.set("mode", "tower");
+                        return {url: "/api/tower/chart?" + params.toString()};
+                }
+                if(modeKey === "dandojo"){
+                        const rank = selection.rank || selection.dan || 1;
+                        params.set("rank", String(rank));
+                        params.set("mode", "dan");
+                        return {url: "/api/dan/chart?" + params.toString()};
+                }
+                return {url: ""};
+        }
+
+        function loadNotesForSong(songMeta, selection){
+                const song = songMeta || {};
+                const currentSelection = Object.assign({}, selection || {});
+                if(!currentSelection.title){
+                        currentSelection.title = song.title || song.originalTitle || song.id || "";
+                }
+                const modeKey = detectModeForSong(song);
+                if(modeKey === DEFAULT_MODE_KEY){
+                        return Promise.resolve(null);
+                }
+                const plan = buildRestUrl(modeKey, song, currentSelection);
+                if(!plan.url){
+                        return Promise.resolve(null);
+                }
+                const now = Date.now();
+                const cached = notesCache.get(plan.url);
+                if(cached && cached.expires > now){
+                        return cached.promise;
+                }
+
+                const promise = fetchJsonWithCache(plan.url).then(json => {
+                        if(!json || typeof json !== "object" || json.status !== "ok"){
+                                const status = json && json.status ? json.status : "error";
+                                throw new Error("status_" + status);
+                        }
+                        const chartData = json.chart_data || {};
+                        const measures = Array.isArray(chartData.measures) ? chartData.measures : [];
+                        const transformed = transformMeasuresToEvents(measures, chartData.duration_ms);
+                        const result = {
+                                modeKey: modeKey,
+                                notes: transformed.notes,
+                                durationMs: transformed.durationMs,
+                        };
+                        const parsed = convertMeasuresToParsedChart(json, {modeKey: modeKey, selection: currentSelection}) || {};
+                        if(parsed.chart){
+                                result.parsedChart = parsed.chart;
+                                if(parsed.durationMs && (!result.durationMs || result.durationMs < parsed.durationMs)){
+                                        result.durationMs = parsed.durationMs;
+                                }
+                                if(parsed.meta){
+                                        result.meta = parsed.meta;
+                                }
+                        }else{
+                                const fallbackChart = buildFallbackParsedChart(transformed.notes);
+                                if(fallbackChart){
+                                        result.parsedChart = fallbackChart;
+                                }
+                                result.meta = {
+                                        mode: modeKey,
+                                        course: chartData.course || currentSelection.course || currentSelection.rank || null,
+                                        totalNotes: transformed.notes.length,
+                                };
+                        }
+                        if(!result.meta){
+                                result.meta = {
+                                        mode: modeKey,
+                                        course: chartData.course || currentSelection.course || currentSelection.rank || null,
+                                        totalNotes: chartData.total_notes || transformed.notes.length,
+                                };
+                        }
+                        if(result.durationMs < 0){
+                                result.durationMs = 0;
+                        }
+                        console.info("notes-loader:", modeKey, result.notes.length, plan.url);
+                        return result;
+                }).catch(error => {
+                        console.warn("notes-loader:", modeKey, "fallback", plan.url, error && error.message ? error.message : error);
+                        return null;
+                });
+
+                notesCache.set(plan.url, {promise: promise, expires: now + REST_CACHE_TTL});
+                promise.then(value => {
+                        if(value === null){
+                                notesCache.delete(plan.url);
+                        }
+                });
+                return promise;
+        }
+
         global.loadNotesForSong = loadNotesForSong;
+        global.notesLoader = {
+                loadNotesForSong: loadNotesForSong,
+                detectModeForSong: detectModeForSong,
+                transformMeasuresToEvents: transformMeasuresToEvents,
+        };
 })(this);

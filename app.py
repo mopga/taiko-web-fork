@@ -48,6 +48,60 @@ _FEATURE_MODES_MANIFEST_ENV = "FEATURE_MODES_MANIFEST"
 _MODES_MANIFEST_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
 
 
+def _coerce_int(value: object, default: int = 0) -> int:
+    try:
+        number = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return number
+
+
+def _ensure_chart_duration(chart_data: dict) -> None:
+    if not isinstance(chart_data, dict):
+        return
+    measures = chart_data.get("measures")
+    if not isinstance(measures, list):
+        chart_data["duration_ms"] = max(0, _coerce_int(chart_data.get("duration_ms"), 0))
+        return
+
+    max_time = 0
+    for measure in measures:
+        if not isinstance(measure, dict):
+            continue
+        start_ms = _coerce_int(measure.get("start_ms"), 0)
+        duration_ms = _coerce_int(measure.get("duration_ms"), 0)
+        measure_end = start_ms + max(0, duration_ms)
+        if measure_end > max_time:
+            max_time = measure_end
+
+        notes = measure.get("notes") if isinstance(measure.get("notes"), list) else []
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            offset_value = note.get("at") if "at" in note else note.get("offset")
+            absolute = start_ms + max(0, _coerce_int(offset_value, 0))
+            if absolute > max_time:
+                max_time = absolute
+
+        longs = measure.get("longs") if isinstance(measure.get("longs"), list) else []
+        for long_note in longs:
+            if not isinstance(long_note, dict):
+                continue
+            offset = _coerce_int(long_note.get("at"), 0)
+            absolute = start_ms + max(0, offset)
+            end_at_value = long_note.get("end_at")
+            if end_at_value is not None:
+                end_absolute = start_ms + max(offset, _coerce_int(end_at_value, offset))
+            else:
+                length = _coerce_int(long_note.get("len_ms"), 0)
+                end_absolute = absolute + max(0, length)
+            if end_absolute > max_time:
+                max_time = end_absolute
+
+    duration_value = _coerce_int(chart_data.get("duration_ms"), 0)
+    chart_data["duration_ms"] = max(duration_value, max_time, 0)
+
+
 def _parse_bool_env(value: str) -> bool:
     token = value.strip().lower()
     return token not in {"0", "false", "no", "off"}
@@ -965,6 +1019,7 @@ def route_api_tower_chart():
     chart_data['duration_ms'] = duration_ms
     normalized_measures = normalize_measures_relative(measures)
     chart_data['measures'] = normalized_measures
+    _ensure_chart_duration(chart_data)
 
     total_notes = chart_data.get('total_notes')
     if not isinstance(total_notes, int):
@@ -1044,6 +1099,7 @@ def route_api_dan_chart():
     chart_data['duration_ms'] = duration_ms
     normalized_measures = normalize_measures_relative(measures)
     chart_data['measures'] = normalized_measures
+    _ensure_chart_duration(chart_data)
 
     total_notes = chart_data.get('total_notes')
     if not isinstance(total_notes, int):

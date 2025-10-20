@@ -1,3 +1,35 @@
+const MODES_MANIFEST_CACHE_TTL = 12000;
+
+function buildModesCategoryIndex(manifest){
+        const index = {};
+        if(!manifest || typeof manifest !== "object"){
+                return index;
+        }
+        const modes = Array.isArray(manifest.modes) ? manifest.modes : [];
+        modes.forEach(entry => {
+                if(!entry || typeof entry !== "object"){
+                        return;
+                }
+                const rawKey = typeof entry.key === "string" ? entry.key : (typeof entry.mode === "string" ? entry.mode : "");
+                const key = rawKey.trim();
+                if(!key){
+                        return;
+                }
+                const lower = key.toLowerCase();
+                const canonical = lower === "dan" || lower === "dojo" ? "dandojo" : lower;
+                if(!canonical){
+                        return;
+                }
+                const categories = Array.isArray(entry.categories) ? entry.categories : [];
+                categories.forEach(category => {
+                        if(typeof category === "string" && category.trim()){
+                                index[category.trim().toLowerCase()] = canonical;
+                        }
+                });
+        });
+        return index;
+}
+
 class Loader{
 	constructor(...args){
 		this.init(...args)
@@ -130,17 +162,7 @@ class Loader{
 			}), url)
 		})
 		
-                this.addPromise(this.ajax("api/modes").then(response => {
-                        try{
-                                var manifest = JSON.parse(response)
-                        }catch(e){
-                                return
-                        }
-                        assets.modesManifest = manifest
-                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
-                                modesHelper.updateManifest(manifest)
-                        }
-                }).catch(() => {}), "api/modes")
+                this.addPromise(this.loadModesManifest(), "api/modes")
 
                 this.addPromise(this.ajax("api/categories").then(cats => {
                         assets.categories = JSON.parse(cats)
@@ -654,25 +676,80 @@ class Loader{
 		}
 		return css.join("\n")
 	}
-	ajax(url, customRequest, customResponse){
-		var request = new XMLHttpRequest()
-		request.open("GET", url)
-		var promise = pageEvents.load(request)
-		if(!customResponse){
-			promise = promise.then(() => {
-				if(request.status === 200){
-					return request.response
-				}else{
-					return Promise.reject(`${url} (${request.status})`)
-				}
-			})
-		}
-		if(customRequest){
-			customRequest(request)
-		}
-		request.send()
-		return promise
-	}
+        ajax(url, customRequest, customResponse){
+                var request = new XMLHttpRequest()
+                request.open("GET", url)
+                var promise = pageEvents.load(request)
+                if(!customResponse){
+                        promise = promise.then(() => {
+                                if(request.status === 200){
+                                        return request.response
+                                }else{
+                                        return Promise.reject(`${url} (${request.status})`)
+                                }
+                        })
+                }
+                if(customRequest){
+                        customRequest(request)
+                }
+                request.send()
+                return promise
+        }
+        loadModesManifest(){
+                const existingStore = typeof window !== "undefined" ? window.__modes__ : null
+                const now = Date.now()
+                if(existingStore && now - (existingStore.fetchedAt || 0) < MODES_MANIFEST_CACHE_TTL){
+                        if(existingStore.manifest){
+                                assets.modesManifest = existingStore.manifest
+                        }
+                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                                const payload = existingStore.manifest || (existingStore.status ? {status: existingStore.status} : null)
+                                if(payload){
+                                        modesHelper.updateManifest(payload)
+                                }
+                        }
+                        return Promise.resolve()
+                }
+                return this.ajax("api/modes").then(response => {
+                        let manifest
+                        try{
+                                manifest = JSON.parse(response)
+                        }catch(e){
+                                return
+                        }
+                        if(!manifest || typeof manifest !== "object"){
+                                return
+                        }
+                        if(manifest.status && manifest.status !== "ok"){
+                                const store = {
+                                        manifest: manifest,
+                                        status: manifest.status,
+                                        fetchedAt: Date.now(),
+                                        categoryIndex: {},
+                                }
+                                if(typeof window !== "undefined"){
+                                        window.__modes__ = store
+                                }
+                                if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                                        modesHelper.updateManifest(manifest)
+                                }
+                                return
+                        }
+                        const store = {
+                                manifest: manifest,
+                                status: manifest.status || "ok",
+                                fetchedAt: Date.now(),
+                                categoryIndex: buildModesCategoryIndex(manifest),
+                        }
+                        if(typeof window !== "undefined"){
+                                window.__modes__ = store
+                        }
+                        assets.modesManifest = manifest
+                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                                modesHelper.updateManifest(manifest)
+                        }
+                }).catch(() => {})
+        }
 	loadScript(url){
 		var script = document.createElement("script")
 		var url = url + this.queryString
