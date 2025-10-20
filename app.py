@@ -939,7 +939,7 @@ def route_api_songs():
 
     search_param = request.args.get('q', '')
     if isinstance(search_param, str):
-        search_value = search_param.strip().casefold()
+        search_value = search_param.strip().lower()
         if search_value:
             filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
 
