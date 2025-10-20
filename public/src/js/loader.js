@@ -773,9 +773,9 @@ class Loader{
                         const isOk = status === "ok"
                         const store = {
                                 manifest: isOk ? manifest : null,
-                                status: status,
+                                status,
                                 fetchedAt: Date.now(),
-                                cacheTtlMs: cacheTtlMs,
+                                cacheTtlMs,
                                 categoryIndex: isOk ? buildModesCategoryIndex(manifest) : {},
                         }
                         commitModesStore(store)
