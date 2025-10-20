@@ -887,29 +887,48 @@ def route_api_preview():
 @app.route(basedir + 'api/songs')
 def route_api_songs():
     manifest_collection = _get_manifest_collection()
+    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    vary_header = 'If-None-Match, Accept-Encoding'
     if manifest_collection is None:
         response = make_response(jsonify([]))
-        response.headers['Cache-Control'] = 'public, max-age=86400, stale-while-revalidate=600'
+        response.headers['Cache-Control'] = cache_control
+        response.headers['Vary'] = vary_header
         return response
 
     meta = _load_manifest_meta()
     etag = meta.get('checksum') if isinstance(meta, dict) else None
-    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    total_count = meta.get('count') if isinstance(meta, dict) else None
+
+    try:
+        limit_value = request.args.get('limit', 200)
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 200))
+
+    try:
+        page_value = request.args.get('page', 1)
+        page = int(page_value)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(page, 1)
+
+    skip = (page - 1) * limit
+
+    if isinstance(total_count, int) and total_count >= 0 and skip >= total_count:
+        response = make_response(jsonify([]))
+        if etag:
+            response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        response.headers['Vary'] = vary_header
+        return response
+
     if etag and request.headers.get('If-None-Match') == etag:
         response = make_response('', 304)
         response.headers['ETag'] = etag
         response.headers['Cache-Control'] = cache_control
+        response.headers['Vary'] = vary_header
         return response
-
-    try:
-        limit = max(1, min(_coerce_int(request.args.get('limit'), 200), 200))
-    except Exception:
-        limit = 200
-    try:
-        page = max(1, _coerce_int(request.args.get('page'), 1))
-    except Exception:
-        page = 1
-    skip = (page - 1) * limit
 
     filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
     category_param = request.args.get('category', '')
@@ -949,6 +968,7 @@ def route_api_songs():
     if etag:
         response.headers['ETag'] = etag
     response.headers['Cache-Control'] = cache_control
+    response.headers['Vary'] = vary_header
     return response
 
 

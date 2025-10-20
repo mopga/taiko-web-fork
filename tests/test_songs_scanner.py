@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import os
 import queue
 import sys
 import tempfile
@@ -9,6 +10,8 @@ from typing import List, Optional
 from unittest import mock
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+os.environ.setdefault('TJA_VALIDATION_LOG', '1')
 
 import songs_scanner
 from songs_scanner import ChartRecord, SongScanner, TjaImportRecord, compute_group_key, parse_tja
