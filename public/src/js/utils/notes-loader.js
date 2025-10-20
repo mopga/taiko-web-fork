@@ -5,6 +5,31 @@ const REST_CACHE_TTL = 12000;
 const httpCache = new Map();
 const notesCache = new Map();
 
+function getSongDataStruct(songData){
+        if(Array.isArray(songData)){
+                return {format: "legacy-array", notes: songData};
+        }
+        if(songData && typeof songData === "object"){
+                if(songData.format === "parsed-chart"){
+                        const data = songData.data || {};
+                        const notes = Array.isArray(data.notes) ? data.notes : (Array.isArray(data.circles) ? data.circles : []);
+                        const meta = data.meta || songData.meta;
+                        const durationMs = data.durationMs != null ? data.durationMs : (songData.durationMs != null ? songData.durationMs : null);
+                        return {format: "parsed-chart", notes: notes, meta: meta, durationMs: durationMs};
+                }
+                if(songData.format === "note-events"){
+                        const data = songData.data || {};
+                        return {
+                                format: "note-events",
+                                notes: Array.isArray(data.notes) ? data.notes : [],
+                                meta: data.meta,
+                                durationMs: data.durationMs,
+                        };
+                }
+        }
+        return {format: "empty", notes: []};
+}
+
 function normaliseToken(value){
         if(typeof value !== "string"){
                 return "";
@@ -214,6 +239,58 @@ function noteKindFromEntry(note){
         return null;
 }
 
+function copyOptionalFields(target, source){
+        if(!source || typeof source !== "object"){
+                return;
+        }
+        if(source.lane != null){
+                target.lane = source.lane;
+        }else if(source.track != null){
+                target.lane = source.track;
+        }
+        if(source.drumType != null){
+                target.drumType = source.drumType;
+        }else if(source.drum_type != null){
+                target.drumType = source.drum_type;
+        }
+        if(source.branch != null && target.branch == null){
+                target.branch = source.branch;
+        }
+        if(source.section != null && target.section == null){
+                target.section = source.section;
+        }
+        if(source.sound != null){
+                target.sound = source.sound;
+        }
+        if(source.hitSound != null){
+                target.hitSound = source.hitSound;
+        }
+        if(source.volume != null){
+                target.volume = source.volume;
+        }
+        if(source.scroll != null && target.scroll == null){
+                target.scroll = source.scroll;
+        }
+        if(Object.prototype.hasOwnProperty.call(source, "gogotime") && target.gogotime == null){
+                target.gogotime = !!source.gogotime;
+        }
+        if(Object.prototype.hasOwnProperty.call(source, "gogo") && target.gogotime == null){
+                target.gogotime = !!source.gogo;
+        }
+}
+
+function isBalloonEntry(entry){
+        if(!entry || typeof entry !== "object"){
+                return false;
+        }
+        const typeToken = normaliseToken(entry.type);
+        if(typeToken === "balloon" || typeToken === "balloons" || typeToken === "balloonnote"){
+                return true;
+        }
+        const kindToken = normaliseToken(entry.kind);
+        return kindToken === "balloon" || kindToken === "balloons";
+}
+
 function convertMeasuresToEngineEvents(measures){
         const events = [];
         const list = Array.isArray(measures) ? measures : [];
@@ -228,38 +305,54 @@ function convertMeasuresToEngineEvents(measures){
                 const balloons = Array.isArray(measure.balloons) ? measure.balloons : [];
                 const scroll = measure.scroll;
                 const gogo = Object.prototype.hasOwnProperty.call(measure, "gogotime") ? measure.gogotime : measure.gogo;
+                const branch = measure.branch != null ? measure.branch : null;
 
                 for(let j = 0; j < notes.length; j++){
                         const note = notes[j] || {};
                         const offsetValue = Object.prototype.hasOwnProperty.call(note, "at") ? note.at : note.offset;
                         const offset = coerceNumber(offsetValue, 0) || 0;
                         const time = baseStart + Math.max(0, offset);
-                        const rawType = note.type != null ? String(note.type).toLowerCase() : "";
-                        const rawKind = note.kind != null ? String(note.kind).toLowerCase() : "";
-                        const numericKind = note.kind;
-                        const isBalloon = rawType === "balloon" || rawType === "balloons" || rawType === "balloonnote";
+                        const isBalloon = isBalloonEntry(note);
                         if(isBalloon){
                                 const hitsValue = note.hits != null ? note.hits : (note.target != null ? note.target : note.required_hits);
-                                const hits = coerceNumber(hitsValue, 5) || 5;
-                                const balloonEvent = {type: "balloon", time: time, hits: Math.max(1, Math.round(hits))};
+                                const hits = Math.max(1, Math.round(coerceNumber(hitsValue, 5) || 5));
+                                const balloonEvent = {type: "balloon", time: time, ms: time, hits: hits};
                                 if(scroll != null){
                                         balloonEvent.scroll = scroll;
                                 }
                                 if(gogo != null){
                                         balloonEvent.gogotime = !!gogo;
                                 }
+                                if(branch != null && balloonEvent.branch == null){
+                                        balloonEvent.branch = branch;
+                                }
+                                copyOptionalFields(balloonEvent, note);
                                 events.push(balloonEvent);
                                 continue;
                         }
-                        const kindToken = rawType || rawKind;
-                        const isKa = numericKind === 2 || kindToken === "ka" || kindToken === "katsu" || kindToken === "kat";
-                        const shortEvent = {type: isKa ? "ka" : "don", time: time};
+                        const type = noteTypeFromEntry(note);
+                        if(!type){
+                                continue;
+                        }
+                        const shortEvent = {type: type, time: time, ms: time};
+                        const kind = noteKindFromEntry(note);
+                        if(kind != null){
+                                shortEvent.kind = kind;
+                        }
                         if(scroll != null){
                                 shortEvent.scroll = scroll;
                         }
                         if(gogo != null){
                                 shortEvent.gogotime = !!gogo;
                         }
+                        if(branch != null){
+                                shortEvent.branch = branch;
+                        }
+                        const sizeToken = normaliseToken(note.size);
+                        if(note.big === true || sizeToken === "big" || type === "daiDon" || type === "daiKa"){
+                                shortEvent.big = true;
+                        }
+                        copyOptionalFields(shortEvent, note);
                         events.push(shortEvent);
                 }
 
@@ -272,12 +365,12 @@ function convertMeasuresToEngineEvents(measures){
                         const len = longNote.len_ms != null ? coerceNumber(longNote.len_ms, 0) : (longNote.len != null ? coerceNumber(longNote.len, 0) : coerceNumber(longNote.length_ms, 0));
                         const endTime = endAt != null ? baseStart + Math.max(endAt, offset) : startTime + Math.max(0, len);
                         const hitsValue = longNote.hits != null ? longNote.hits : (longNote.required_hits != null ? longNote.required_hits : null);
-                        const longTypeTokenRaw = longNote.type != null ? String(longNote.type) : (longNote.kind != null ? String(longNote.kind) : "");
-                        const longTypeToken = longTypeTokenRaw.toLowerCase().replace(/\s+/g, "");
-                        if(longTypeToken === "balloon" || longTypeToken === "balloons" || longTypeToken === "balloonnote"){
+                        const longType = longTypeFromEntry(longNote);
+                        if(longType === "balloon"){
                                 const balloonEvent = {
                                         type: "balloon",
                                         time: startTime,
+                                        ms: startTime,
                                         hits: Math.max(1, Math.round(coerceNumber(hitsValue, 5) || 5)),
                                 };
                                 if(scroll != null){
@@ -286,14 +379,22 @@ function convertMeasuresToEngineEvents(measures){
                                 if(gogo != null){
                                         balloonEvent.gogotime = !!gogo;
                                 }
+                                if(branch != null){
+                                        balloonEvent.branch = branch;
+                                }
+                                copyOptionalFields(balloonEvent, longNote);
                                 events.push(balloonEvent);
                                 continue;
                         }
                         const rollEvent = {
-                                type: "roll",
+                                type: longType === "daiDrumroll" ? "daiDrumroll" : "drumroll",
                                 time: startTime,
+                                ms: startTime,
                                 endTime: endTime,
                         };
+                        if(rollEvent.type === "daiDrumroll"){
+                                rollEvent.big = true;
+                        }
                         if(hitsValue != null){
                                 rollEvent.hits = Math.max(0, Math.round(coerceNumber(hitsValue, 0)));
                         }
@@ -303,6 +404,10 @@ function convertMeasuresToEngineEvents(measures){
                         if(gogo != null){
                                 rollEvent.gogotime = !!gogo;
                         }
+                        if(branch != null){
+                                rollEvent.branch = branch;
+                        }
+                        copyOptionalFields(rollEvent, longNote);
                         events.push(rollEvent);
                 }
 
@@ -315,6 +420,7 @@ function convertMeasuresToEngineEvents(measures){
                         const balloonEvent = {
                                 type: "balloon",
                                 time: time,
+                                ms: time,
                                 hits: Math.max(1, Math.round(coerceNumber(hitsValue, 5) || 5)),
                         };
                         if(scroll != null){
@@ -323,6 +429,10 @@ function convertMeasuresToEngineEvents(measures){
                         if(gogo != null){
                                 balloonEvent.gogotime = !!gogo;
                         }
+                        if(branch != null){
+                                balloonEvent.branch = branch;
+                        }
+                        copyOptionalFields(balloonEvent, balloon);
                         events.push(balloonEvent);
                 }
 
@@ -963,6 +1073,10 @@ function registerRestNotesLoader(Loader){
                                 result.durationMs = computeDurationFromEvents(events);
                         }
 
+                        if(result.durationMs != null && result.meta.durationMs == null){
+                                result.meta.durationMs = result.durationMs;
+                        }
+
                         if(context && context !== globalObject && typeof context === "object"){
                                 context.songData = events;
                                 context.durationMs = result.durationMs;
@@ -998,12 +1112,16 @@ function registerRestNotesLoader(Loader){
                         detectModeForSong: detectModeForSong,
                         transformMeasuresToEvents: transformMeasuresToEvents,
                         convertMeasuresToEngineEvents: convertMeasuresToEngineEvents,
+                        convertMeasuresToParsedChart: convertMeasuresToParsedChart,
+                        buildFallbackParsedChart: buildFallbackParsedChart,
+                        getSongDataStruct: getSongDataStruct,
                 };
         }
 }
 
 if(globalObject){
         globalObject.registerRestNotesLoader = registerRestNotesLoader;
+        globalObject.getSongDataStruct = getSongDataStruct;
         const queue = globalObject.__restNotesLoaderRegistrations__;
         if(Array.isArray(queue)){
                 while(queue.length){

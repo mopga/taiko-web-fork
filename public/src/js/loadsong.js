@@ -63,9 +63,12 @@ class LoadSong{
                 songAudio.normalizeSongAudio(songObj)
                 songAudio.normalizeSongAudio(song)
                 this.songObj = songObj
-		song.songBg = this.randInt(1, 5)
-		song.songStage = this.randInt(1, 3)
-		song.donBg = this.randInt(1, 6)
+                if(this.songObj && typeof this.songObj.duration_ms === "number"){
+                        this.selectedSong.duration_ms = this.songObj.duration_ms
+                }
+                song.songBg = this.randInt(1, 5)
+                song.songStage = this.randInt(1, 3)
+                song.donBg = this.randInt(1, 6)
 		if(this.songObj && this.songObj.category_id === 9){
 			 LoadSong.insertBackgroundVideo(this.songObj.id)
 				}
@@ -170,11 +173,21 @@ class LoadSong{
                                         if(result.durationMs && !songObj.duration_ms){
                                                 songObj.duration_ms = result.durationMs
                                         }
+                                        if(songObj.duration_ms){
+                                                this.selectedSong.duration_ms = songObj.duration_ms
+                                        }else if(result.durationMs){
+                                                this.selectedSong.duration_ms = result.durationMs
+                                        }
+                                        if(this.selectedSong.notesMeta && result.durationMs && this.selectedSong.notesMeta.durationMs == null){
+                                                this.selectedSong.notesMeta.durationMs = result.durationMs
+                                        }
                                         if(result.parsedChart){
                                                 this.songData = {format: "parsed-chart", data: result.parsedChart}
                                         }else{
                                                 this.songData = {format: "note-events", data: result}
                                         }
+                                        this.selectedSong.songData = this.songData
+                                        this.updateSongDataReference()
                                 }
                                 return true
                         }
@@ -194,11 +207,21 @@ class LoadSong{
                                 if(result.durationMs && !songObj.duration_ms){
                                         songObj.duration_ms = result.durationMs
                                 }
+                                if(songObj.duration_ms){
+                                        this.selectedSong.duration_ms = songObj.duration_ms
+                                }else if(result.durationMs){
+                                        this.selectedSong.duration_ms = result.durationMs
+                                }
+                                if(this.selectedSong.notesMeta && result.durationMs && this.selectedSong.notesMeta.durationMs == null){
+                                        this.selectedSong.notesMeta.durationMs = result.durationMs
+                                }
                                 if(result.parsedChart){
                                         this.songData = {format: "parsed-chart", data: result.parsedChart}
                                 }else{
                                         this.songData = {format: "note-events", data: result}
                                 }
+                                this.selectedSong.songData = this.songData
+                                this.updateSongDataReference()
                                 return true
                         }
                         return this.queueLegacyNotesLoad(song, songObj).then(() => false)
@@ -269,10 +292,14 @@ class LoadSong{
                 if(chart){
                         const readPromise = chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
                                 this.songData = data.replace(/\0/g, "").split("\n")
+                                this.selectedSong.songData = this.songData
+                                this.updateSongDataReference()
                         })
                         legacyPromise = this.addPromise(readPromise, chart.url)
                 }else{
                         this.songData = ""
+                        this.selectedSong.songData = this.songData
+                        this.updateSongDataReference()
                         legacyPromise = Promise.resolve()
                 }
                 this._legacyNotesPromise = Promise.resolve(legacyPromise)
@@ -284,6 +311,32 @@ class LoadSong{
                 })
                 this.promises.push(wrapped)
                 return wrapped
+        }
+        updateSongDataReference(){
+                if(typeof window === "undefined"){
+                        return
+                }
+                const root = window._taiko = window._taiko || {}
+                const songScope = root.song = root.song || {}
+                songScope.songData = this.songData
+                songScope.selectedSong = this.selectedSong
+                if(this.songObj){
+                        songScope.songObj = this.songObj
+                }
+                if(this.selectedSong && this.selectedSong.notesMeta){
+                        songScope.meta = this.selectedSong.notesMeta
+                }else if(songScope.meta){
+                        delete songScope.meta
+                }
+                if(this.selectedSong && typeof this.selectedSong.duration_ms === "number"){
+                        songScope.durationMs = this.selectedSong.duration_ms
+                }else if(this.selectedSong && this.selectedSong.notesMeta && this.selectedSong.notesMeta.durationMs != null){
+                        songScope.durationMs = this.selectedSong.notesMeta.durationMs
+                }else if(songScope.meta && songScope.meta.durationMs != null){
+                        songScope.durationMs = songScope.meta.durationMs
+                }else{
+                        delete songScope.durationMs
+                }
         }
 	errorMsg(error, url){
 		if(!this.error){
