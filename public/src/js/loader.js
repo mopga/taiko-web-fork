@@ -810,3 +810,29 @@ class Loader{
 		pageEvents.remove(root, "touchstart")
 	}
 }
+
+;(function setupRestNotesLoaderRegistration(){
+	const globalObject = typeof window !== "undefined" ? window : (typeof globalThis !== "undefined" ? globalThis : this)
+	if(!globalObject){
+		return
+	}
+	const registerWithLoader = () => {
+		if(typeof globalObject.registerRestNotesLoader === "function"){
+			try{
+				globalObject.registerRestNotesLoader(Loader)
+			}catch(error){
+				console.warn("[notes-loader] register failed", error)
+			}
+		}
+	}
+	if(typeof globalObject.registerRestNotesLoader === "function"){
+		registerWithLoader()
+	}else{
+		const queue = globalObject.__restNotesLoaderRegistrations__
+		if(Array.isArray(queue)){
+			queue.push(registerWithLoader)
+		}else{
+			globalObject.__restNotesLoaderRegistrations__ = [registerWithLoader]
+		}
+	}
+})()
