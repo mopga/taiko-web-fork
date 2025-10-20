@@ -37,80 +37,7 @@ from redis import Redis
 
 from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
-
-
-def _normalize_measures_relative(measures):
-    """Convert absolute note timings to be relative to their measure start."""
-
-    normalized_measures = []
-    if not isinstance(measures, list):
-        return normalized_measures
-
-    for index, measure in enumerate(measures):
-        if isinstance(measure, dict):
-            new_measure = dict(measure)
-        else:
-            try:
-                new_measure = dict(measure)
-            except (TypeError, ValueError):
-                new_measure = {}
-
-        notes_source = new_measure.get('notes') if isinstance(new_measure, dict) else []
-        if not isinstance(notes_source, list):
-            notes_source = []
-
-        bpm_value = new_measure.get('bpm') if isinstance(new_measure, dict) else None
-        try:
-            bpm = float(bpm_value)
-            if bpm <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            bpm = 120.0
-        measure_len = int(round(4 * (60000.0 / bpm)))
-
-        absolute_positions = []
-        for note in notes_source:
-            note_mapping = note if isinstance(note, dict) else None
-            if note_mapping is None:
-                try:
-                    note_mapping = dict(note)
-                except (TypeError, ValueError):
-                    continue
-            try:
-                absolute_positions.append(float(note_mapping.get('at')))
-            except (TypeError, ValueError):
-                continue
-
-        if absolute_positions:
-            start_ms = int(round(min(absolute_positions)))
-        else:
-            start_ms = int(index * measure_len)
-
-        normalized_notes = []
-        for note in notes_source:
-            note_mapping = note if isinstance(note, dict) else None
-            if note_mapping is None:
-                try:
-                    note_mapping = dict(note)
-                except (TypeError, ValueError):
-                    continue
-            note_copy = dict(note_mapping)
-            try:
-                absolute_at = int(round(float(note_copy.get('at'))))
-            except (TypeError, ValueError):
-                absolute_at = start_ms
-            relative_at = absolute_at - start_ms
-            if relative_at < 0:
-                relative_at = 0
-            note_copy['at'] = relative_at
-            normalized_notes.append(note_copy)
-
-        new_measure['start_ms'] = start_ms
-        new_measure['duration_ms'] = measure_len
-        new_measure['notes'] = normalized_notes
-        normalized_measures.append(new_measure)
-
-    return normalized_measures
+from tower_chart_normalization import normalize_measures_relative
 
 
 LOGGER = logging.getLogger(__name__)
@@ -981,7 +908,7 @@ def route_api_tower_chart():
     if duration_ms < 0:
         duration_ms = 0
     chart_data['duration_ms'] = duration_ms
-    chart_data['measures'] = _normalize_measures_relative(measures)
+    chart_data['measures'] = normalize_measures_relative(measures)
 
     response = {
         'status': 'ok',
