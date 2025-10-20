@@ -5,15 +5,18 @@ class Controller{
 	init(selectedSong, songData, autoPlayEnabled, multiplayer, touchEnabled){
 		this.selectedSong = selectedSong
 		this.songData = songData
-		this.autoPlayEnabled = autoPlayEnabled
-		this.saveScore = !autoPlayEnabled
-		this.multiplayer = multiplayer
-		this.touchEnabled = touchEnabled
-		if(multiplayer === 2){
-			this.snd = p2.player === 2 ? "_p1" : "_p2"
-			this.don = p2.don || defaultDon
-		}else{
-			this.snd = multiplayer ? "_p" + p2.player : ""
+                this.autoPlayEnabled = autoPlayEnabled
+                this.saveScore = !autoPlayEnabled
+                this.multiplayer = multiplayer
+                this.touchEnabled = touchEnabled
+                this.songEndGuard = null
+                const loaderApi = typeof notesLoader !== "undefined" ? notesLoader : (typeof window !== "undefined" ? window.notesLoader : null)
+                this.songDataStruct = typeof getSongDataStruct === "function" ? getSongDataStruct(songData) : null
+                if(multiplayer === 2){
+                        this.snd = p2.player === 2 ? "_p1" : "_p2"
+                        this.don = p2.don || defaultDon
+                }else{
+                        this.snd = multiplayer ? "_p" + p2.player : ""
 			this.don = account.loggedIn ? account.don : defaultDon
 		}
 		if(this.snd === "_p2" && this.objEqual(defaultDon, this.don)){
@@ -39,10 +42,21 @@ class Controller{
 		
                 if(songData && typeof songData === "object" && songData.format === "parsed-chart" && songData.data){
                         this.parsedSongData = songData.data
-                }else if(selectedSong.type === "tja"){
-                        this.parsedSongData = new ParseTja(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
-                }else{
-                        this.parsedSongData = new ParseOsu(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
+                }else if(this.songDataStruct && this.songDataStruct.format === "note-events" && songData && typeof songData === "object"){ 
+                        let parsedChart = songData.data && songData.data.parsedChart
+                        if(!parsedChart && loaderApi && typeof loaderApi.buildFallbackParsedChart === "function"){
+                                parsedChart = loaderApi.buildFallbackParsedChart(this.songDataStruct.notes)
+                        }
+                        if(parsedChart){
+                                this.parsedSongData = parsedChart
+                        }
+                }
+                if(!this.parsedSongData){
+                        if(selectedSong.type === "tja"){
+                                this.parsedSongData = new ParseTja(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
+                        }else{
+                                this.parsedSongData = new ParseOsu(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
+                        }
                 }
                 if(!this.parsedSongData){
                         this.parsedSongData = {circles: [], measures: [], events: [], branches: null, beatInfo: {beatInterval: 600}, soundOffset: 0}
@@ -126,26 +140,27 @@ class Controller{
 			}
 		})
 	}
-	startMainLoop(){
-		this.mainLoopRunning = true
-		window.gamestatus = 'start'
-		this.gameLoop()
-		this.viewLoop()
-		if(this.multiplayer !== 2){
-			this.gameInterval = setInterval(this.gameLoop.bind(this), 1000 / 60)
-			pageEvents.send("game-start", {
-				selectedSong: this.selectedSong,
-				autoPlayEnabled: this.autoPlayEnabled,
+        startMainLoop(){
+                this.mainLoopRunning = true
+                window.gamestatus = 'start'
+                this.gameLoop()
+                this.viewLoop()
+                this.installSongEndGuard()
+                if(this.multiplayer !== 2){
+                        this.gameInterval = setInterval(this.gameLoop.bind(this), 1000 / 60)
+                        pageEvents.send("game-start", {
+                                selectedSong: this.selectedSong,
+                                autoPlayEnabled: this.autoPlayEnabled,
 				multiplayer: this.multiplayer,
 				touchEnabled: this.touchEnabled
 			})
 		}
 	}
-	stopMainLoop(){
-		this.mainLoopRunning = false
-		window.gamestatus = 'stop'
-		
-		if (window.videoElement) {
+        stopMainLoop(){
+                this.mainLoopRunning = false
+                window.gamestatus = 'stop'
+
+                if (window.videoElement) {
         // 停止视频播放
         window.videoElement.pause();
         
@@ -156,14 +171,18 @@ class Controller{
         window.videoElement = null;
     }
 		
-		
-		if(this.game.mainAsset){
-			this.game.mainAsset.stop()
-		}
-		if(this.multiplayer !== 2){
-			clearInterval(this.gameInterval)
-		}
-	}
+
+                if(this.game.mainAsset){
+                        this.game.mainAsset.stop()
+                }
+                if(this.multiplayer !== 2){
+                        clearInterval(this.gameInterval)
+                }
+                if(this.songEndGuard){
+                        clearTimeout(this.songEndGuard)
+                        this.songEndGuard = null
+                }
+        }
 	gameLoop(){
 		if(this.mainLoopRunning){
 			if(this.multiplayer === 1){
@@ -307,11 +326,11 @@ class Controller{
 			})
 		}
 	}
-	addPromise(promises, promise, url){
-		promises.push(promise.catch(error => {
-			if(this.restartSongError){
-				return
-			}
+        addPromise(promises, promise, url){
+                promises.push(promise.catch(error => {
+                        if(this.restartSongError){
+                                return
+                        }
 			this.restartSongError = true
 			if(url){
 				error = (Array.isArray(error) ? error[0] + ": " : (error ? error + ": " : "")) + url
@@ -331,8 +350,94 @@ class Controller{
 				})
 			}, 500)
 			return Promise.reject(error)
-		}))
-	}
+                }))
+        }
+        resolveExpectedSongDuration(){
+                let duration = 0
+                if(this.selectedSong && typeof this.selectedSong.duration_ms === "number" && this.selectedSong.duration_ms > duration){
+                        duration = this.selectedSong.duration_ms
+                }
+                if(this.selectedSong && this.selectedSong.notesMeta && typeof this.selectedSong.notesMeta.durationMs === "number" && this.selectedSong.notesMeta.durationMs > duration){
+                        duration = this.selectedSong.notesMeta.durationMs
+                }
+                if(this.parsedSongData && Array.isArray(this.parsedSongData.circles)){
+                        for(let i = 0; i < this.parsedSongData.circles.length; i++){
+                                const circle = this.parsedSongData.circles[i]
+                                if(!circle || typeof circle !== "object"){
+                                        continue
+                                }
+                                const end = typeof circle.endTime === "number" ? circle.endTime : null
+                                const start = typeof circle.ms === "number" ? circle.ms : null
+                                if(end !== null && end > duration){
+                                        duration = end
+                                }
+                                if(start !== null && start > duration){
+                                        duration = start
+                                }
+                        }
+                }
+                if(this.parsedSongData && Array.isArray(this.parsedSongData.measures) && this.parsedSongData.measures.length){
+                        const lastMeasure = this.parsedSongData.measures[this.parsedSongData.measures.length - 1]
+                        if(lastMeasure){
+                                const measureTime = typeof lastMeasure.ms === "number" ? lastMeasure.ms : (typeof lastMeasure.originalMS === "number" ? lastMeasure.originalMS : null)
+                                if(measureTime !== null && measureTime > duration){
+                                        duration = measureTime
+                                }
+                        }
+                }
+                if(this.parsedSongData && typeof this.parsedSongData.soundOffset === "number" && this.parsedSongData.soundOffset < 0){
+                        duration += Math.abs(this.parsedSongData.soundOffset)
+                }
+                if(!duration && this.songDataStruct && Array.isArray(this.songDataStruct.notes) && this.songDataStruct.notes.length){
+                        let eventsMax = 0
+                        for(let i = 0; i < this.songDataStruct.notes.length; i++){
+                                const entry = this.songDataStruct.notes[i]
+                                if(!entry || typeof entry !== "object"){
+                                        continue
+                                }
+                                const start = typeof entry.time === "number" ? entry.time : (typeof entry.ms === "number" ? entry.ms : null)
+                                const end = typeof entry.endTime === "number" ? entry.endTime : (typeof entry.end_ms === "number" ? entry.end_ms : null)
+                                if(end !== null && end > eventsMax){
+                                        eventsMax = end
+                                }
+                                if(start !== null && start > eventsMax){
+                                        eventsMax = start
+                                }
+                        }
+                        if(eventsMax > duration){
+                                duration = eventsMax
+                        }
+                }
+                if(this.songDataStruct && typeof this.songDataStruct.durationMs === "number" && this.songDataStruct.durationMs > duration){
+                        duration = this.songDataStruct.durationMs
+                }
+                return duration
+        }
+        installSongEndGuard(){
+                if(this.songEndGuard){
+                        clearTimeout(this.songEndGuard)
+                        this.songEndGuard = null
+                }
+                const duration = this.resolveExpectedSongDuration()
+                if(!Number.isFinite(duration) || duration <= 0){
+                        return
+                }
+                const wait = Math.max(0, Math.round(duration + 2000))
+                this.songEndGuard = setTimeout(() => {
+                        if(!this.mainLoopRunning || this.game.musicFadeOut >= 2){
+                                return
+                        }
+                        if(!this.game.fadeOutStarted){
+                                const fallbackStart = typeof this.game.getAccurateTime === "function" ? this.game.getAccurateTime() : this.game.elapsedTime
+                                const reference = Number.isFinite(fallbackStart) ? fallbackStart : duration
+                                this.game.fadeOutStarted = reference
+                                if(this.multiplayer === 1 && this.syncWith && this.syncWith.game && !this.syncWith.game.fadeOutStarted){
+                                        this.syncWith.game.fadeOutStarted = reference
+                                }
+                        }
+                        this.game.whenFadeoutMusic()
+                }, wait)
+        }
 	playSound(id, time, noSnd){
 		if(!this.drumSounds && (id === "neiro_1_don" || id === "neiro_1_ka" || id === "se_don" || id === "se_ka")){
 			return
