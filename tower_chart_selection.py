@@ -69,6 +69,16 @@ def select_best_chart(
                 score -= 3
             if canonical_course == course_token:
                 score -= 2
+
+            rank_value = chart.get("rank")
+            if isinstance(rank_value, str):
+                rank_token = rank_value.strip().casefold()
+            elif isinstance(rank_value, (int, float)):
+                rank_token = str(rank_value).strip().casefold()
+            else:
+                rank_token = ""
+            if rank_token and rank_token == course_token:
+                score -= 3
         return (mode_priority, score, index)
 
     filtered: list[tuple[int, Mapping[str, object]]] = []

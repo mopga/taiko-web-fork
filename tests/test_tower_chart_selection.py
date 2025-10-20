@@ -78,3 +78,24 @@ def test_select_best_chart_uses_preferred_mode_when_no_course_match():
     best_chart = select_best_chart(charts, "oni")
 
     assert best_chart is charts[1]
+
+
+def test_select_best_chart_prefers_matching_rank_for_dandojo():
+    charts = [
+        {
+            "mode": "dandojo",
+            "course": "Kaiden",
+            "canonical_course": "kaiden",
+            "rank": "tatsujin",
+        },
+        {
+            "mode": "dandojo",
+            "course": "Kaiden",
+            "canonical_course": "kaiden",
+            "rank": "kaiden",
+        },
+    ]
+
+    best_chart = select_best_chart(charts, "kaiden")
+
+    assert best_chart is charts[1]
