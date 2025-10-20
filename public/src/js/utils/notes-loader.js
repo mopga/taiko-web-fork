@@ -141,6 +141,11 @@ function resolveModeKey(song, selection){
                 return "dandojo";
         }
 
+        const detected = detectModeForSong(song);
+        if(detected === "tower" || detected === "dandojo"){
+                return detected;
+        }
+
         return DEFAULT_MODE_KEY;
 }
 
