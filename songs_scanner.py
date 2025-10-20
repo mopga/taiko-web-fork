@@ -4266,6 +4266,14 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate collection access issues
                 LOGGER.debug('Failed to read song scanner state collection')
 
+        failed_state_updates: Dict[str, Dict[str, object]] = {}
+
+        def _safe_sha1(path: Path) -> Optional[str]:
+            try:
+                return hashlib.sha1(path.read_bytes()).hexdigest()
+            except Exception:
+                return None
+
         try:
             cursor = self.db.songs.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
         except AttributeError:
@@ -4313,6 +4321,31 @@ class SongScanner:
             tja_mtime_ns = getattr(tja_stat, 'st_mtime_ns', int(tja_stat.st_mtime * 1_000_000_000))
             tja_size = tja_stat.st_size
 
+            current_file_sha1: Optional[str] = None
+            parse_failed_at: Optional[datetime] = None
+            failure_state_sha1: Optional[str] = None
+            last_ok_sha1: Optional[str] = None
+            if state_doc is not None:
+                raw_failed_at = state_doc.get('parse_failed_at')
+                if isinstance(raw_failed_at, datetime):
+                    parse_failed_at = raw_failed_at
+                elif isinstance(raw_failed_at, str) and raw_failed_at:
+                    with contextlib.suppress(ValueError):
+                        parsed_dt = datetime.fromisoformat(raw_failed_at)
+                        if parsed_dt.tzinfo is None:
+                            parse_failed_at = parsed_dt.replace(tzinfo=UTC)
+                        else:
+                            parse_failed_at = parsed_dt
+                elif isinstance(raw_failed_at, (int, float)) and raw_failed_at > 0:
+                    with contextlib.suppress(Exception):
+                        parse_failed_at = datetime.fromtimestamp(raw_failed_at, UTC)
+                sha1_candidate = state_doc.get('tja_sha1')
+                if isinstance(sha1_candidate, str) and sha1_candidate:
+                    failure_state_sha1 = sha1_candidate
+                last_ok_candidate = state_doc.get('last_ok_sha1')
+                if isinstance(last_ok_candidate, str) and last_ok_candidate:
+                    last_ok_sha1 = last_ok_candidate
+
             needs_processing = full or state_doc is None
             if state_doc is not None and not needs_processing:
                 if state_doc.get('tja_mtime_ns') != tja_mtime_ns or state_doc.get('tja_size') != tja_size:
@@ -4333,12 +4366,22 @@ class SongScanner:
                 else:
                     needs_processing = True
 
+            skip_due_to_failure = False
+            if parse_failed_at and not full and not needs_processing:
+                if failure_state_sha1:
+                    current_file_sha1 = _safe_sha1(tja_path)
+                    if current_file_sha1 and current_file_sha1 != failure_state_sha1:
+                        needs_processing = True
+                    else:
+                        skip_due_to_failure = True
+                else:
+                    skip_due_to_failure = True
+
             record: Optional[TjaImportRecord] = None
             diagnostics: List[str] = []
             file_hash: Optional[str] = None
             file_sha1: Optional[str] = None
             fingerprint: Optional[str] = None
-            was_dirty = needs_processing
 
             if not needs_processing and state_doc:
                 record_payload = state_doc.get('record') if isinstance(state_doc.get('record'), dict) else None
@@ -4353,7 +4396,12 @@ class SongScanner:
                         group_key_by_path[tja_key] = compute_group_key(record)
                         summary['skipped'] += 1
                 if record is None:
-                    needs_processing = True
+                    if skip_due_to_failure:
+                        summary['skipped'] += 1
+                    else:
+                        needs_processing = True
+
+            was_dirty = needs_processing
 
             if needs_processing:
                 LOGGER.debug('scan-job-start: %s', tja_path)
@@ -4378,6 +4426,7 @@ class SongScanner:
                     tja_bytes = tja_path.read_bytes()
                     file_hash = md5_bytes(tja_bytes)
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
+                    current_file_sha1 = file_sha1
                     fingerprint = parsed.fingerprint
 
                     audio_url = None
@@ -4424,11 +4473,36 @@ class SongScanner:
                 except Exception:
                     LOGGER.error('scan-job-crash: file=%s', tja_path, exc_info=True)
                     summary['errors'] += 1
+                    failure_sha1 = current_file_sha1 or failure_state_sha1 or _safe_sha1(tja_path)
+                    if failure_sha1 is not None or parse_failed_at is not None:
+                        failure_payload = {
+                            'tja_path': tja_key,
+                            'tja_mtime_ns': tja_mtime_ns,
+                            'tja_size': tja_size,
+                            'tja_sha1': failure_sha1,
+                            'parse_failed_at': datetime.now(UTC),
+                        }
+                        if last_ok_sha1:
+                            failure_payload['last_ok_sha1'] = last_ok_sha1
+                        failed_state_updates[tja_key] = failure_payload
                     continue
                 LOGGER.debug('scan-job-finish: %s', tja_path)
 
             if record is None:
+                if skip_due_to_failure:
+                    continue
                 summary['errors'] += 1
+                failure_sha1 = current_file_sha1 or failure_state_sha1 or _safe_sha1(tja_path)
+                failure_payload = {
+                    'tja_path': tja_key,
+                    'tja_mtime_ns': tja_mtime_ns,
+                    'tja_size': tja_size,
+                    'tja_sha1': failure_sha1,
+                    'parse_failed_at': datetime.now(UTC),
+                }
+                if last_ok_sha1:
+                    failure_payload['last_ok_sha1'] = last_ok_sha1
+                failed_state_updates[tja_key] = failure_payload
                 continue
 
             if file_sha1 is None:
@@ -4438,6 +4512,8 @@ class SongScanner:
                     file_sha1 = None
                 else:
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
+            if file_sha1 is not None:
+                current_file_sha1 = file_sha1
 
             key = group_key_by_path.get(tja_key) or compute_group_key(record)
             group_key_by_path[tja_key] = key
@@ -4456,6 +4532,8 @@ class SongScanner:
                 'audio_mtime_ns': record.audio_mtime_ns,
                 'audio_size': record.audio_size,
                 'fingerprint': fingerprint or record.fingerprint,
+                'parse_failed_at': None if was_dirty else parse_failed_at,
+                'last_ok_sha1': file_sha1 if was_dirty else (last_ok_sha1 or file_sha1),
             }
 
             if record.category_id != 0:
@@ -4544,6 +4622,8 @@ class SongScanner:
                     'song_id': song_id,
                     'group_key': key,
                     'fingerprint': meta.get('fingerprint'),
+                    'parse_failed_at': meta.get('parse_failed_at'),
+                    'last_ok_sha1': meta.get('last_ok_sha1'),
                     'record': asdict(record),
                 }
                 if tja_key in state_docs:
@@ -4556,6 +4636,15 @@ class SongScanner:
                         self._state_collection.insert_one(payload)
                     except Exception:
                         LOGGER.debug('Failed to insert song scanner state for %s', tja_key)
+
+        if self._state_collection is not None and failed_state_updates:
+            for tja_key, failure_payload in failed_state_updates.items():
+                payload = dict(failure_payload)
+                payload.setdefault('tja_path', tja_key)
+                try:
+                    self._state_collection.update_one({'tja_path': tja_key}, {'$set': payload}, upsert=True)
+                except Exception:
+                    LOGGER.debug('Failed to persist failure state for %s', tja_key)
 
         if self._state_collection is not None:
             stale_paths = set(state_docs.keys()) - seen_state_paths

@@ -861,10 +861,80 @@ class Loader{
                         }).catch(() => cachedDetail || null)
                 }
 
+                async function fetchPage(pageNumber, limit){
+                        const baseUrl = `api/songs?page=${pageNumber}&limit=${limit}`
+                        const hasCache = pageCache instanceof Map && pageCache.has(pageNumber)
+                        const supportsFetch = typeof fetch === "function"
+
+                        async function performRequest(url, bypassCache){
+                                if(supportsFetch){
+                                        const init = {
+                                                method: "GET",
+                                                credentials: "same-origin",
+                                        }
+                                        if(bypassCache){
+                                                init.cache = "no-store"
+                                                init.headers = {
+                                                        "Cache-Control": "no-cache",
+                                                        "Pragma": "no-cache",
+                                                }
+                                        }
+                                        const response = await fetch(url, init)
+                                        if(response.status === 304){
+                                                return {notModified: true}
+                                        }
+                                        if(response.status === 200){
+                                                const body = await response.text()
+                                                return {body}
+                                        }
+                                        const error = new Error(`${url} (${response.status})`)
+                                        error.status = response.status
+                                        throw error
+                                }
+                                return loaderInstance
+                                        .ajax(url, request => {
+                                                if(bypassCache){
+                                                        try{
+                                                                request.setRequestHeader("Cache-Control", "no-cache")
+                                                        }catch(e){}
+                                                        try{
+                                                                request.setRequestHeader("Pragma", "no-cache")
+                                                        }catch(e){}
+                                                }
+                                        })
+                                        .then(result => {
+                                                if(result && typeof result === "object" && result.__notModified){
+                                                        return {notModified: true}
+                                                }
+                                                return {body: result}
+                                        })
+                                        .catch(error => {
+                                                if(error && typeof error === "object" && error.__notModified){
+                                                        return {notModified: true}
+                                                }
+                                                throw error
+                                        })
+                        }
+
+                        const initial = await performRequest(baseUrl, false)
+                        if(initial.notModified){
+                                if(hasCache){
+                                        return {__notModified: true}
+                                }
+                                const bypassUrl = `${baseUrl}${baseUrl.indexOf("?") === -1 ? "?" : "&"}_bypass=${Date.now()}`
+                                const retry = await performRequest(bypassUrl, true)
+                                if(retry.notModified){
+                                        return []
+                                }
+                                return retry.body
+                        }
+                        return initial.body
+                }
+
                 async function processPage(pageNumber){
                         let response
                         try{
-                                response = await loaderInstance.ajax(`api/songs?page=${pageNumber}&limit=${LIMIT}`)
+                                response = await fetchPage(pageNumber, LIMIT)
                         }catch(err){
                                 const cached = getCachedPage(pageNumber)
                                 if(cached && cached.length){

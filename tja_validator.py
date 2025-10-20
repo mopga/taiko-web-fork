@@ -42,7 +42,6 @@ class TjaValidationController:
 
     def __init__(self) -> None:
         self._mode = _coerce_mode(os.getenv("TJA_VALIDATION_MODE"))
-        self._log_lines = _coerce_bool(os.getenv("TJA_VALIDATION_LOG"), default=False)
         self._summary_enabled = _coerce_bool(os.getenv("TJA_VALIDATION_SUMMARY"), default=True)
         self._lock = threading.Lock()
         self._file_stats: Dict[str, _FileStats] = {}
@@ -80,35 +79,6 @@ class TjaValidationController:
                     stats.courses.setdefault(code, set()).add(course_key)
             self._global_counts[code] += 1
             self._files_by_code[code].add(key)
-        if self._log_lines:
-            if code == 'overlap_start':
-                LOGGER.warning(
-                    'strict-long-start-overlap: course=%s file=%s token=%s',
-                    course or '',
-                    key,
-                    token or '',
-                )
-            elif code == 'end_without_start':
-                LOGGER.warning(
-                    'strict-long-end-without-start: course=%s file=%s',
-                    course or '',
-                    key,
-                )
-            elif code == 'unknown_note_token':
-                LOGGER.warning(
-                    'strict-unknown-note-token: token=%s course=%s file=%s',
-                    token or '',
-                    course or '',
-                    key,
-                )
-            else:
-                LOGGER.warning(
-                    'validation-%s: file=%s course=%s token=%s',
-                    code,
-                    key,
-                    course or '',
-                    token or '',
-                )
         return self._mode == "strict"
 
     def finalize_file(self, path: object) -> None:
@@ -118,15 +88,26 @@ class TjaValidationController:
             stats = self._file_stats.pop(key, None)
         if self._mode == "strict" and stats and stats.counts:
             for code in sorted(stats.counts):
-                LOGGER.error(
-                    "validation-error: file=%s code=%s count=%d",
-                    key,
-                    code,
-                    stats.counts[code],
-                )
+                count = stats.counts[code]
+                courses = sorted(stats.courses.get(code, set())) if stats.courses else []
+                if courses:
+                    LOGGER.error(
+                        "validation-error: file=%s code=%s count=%d courses=%s",
+                        key,
+                        code,
+                        count,
+                        ",".join(courses),
+                    )
+                else:
+                    LOGGER.error(
+                        "validation-error: file=%s code=%s count=%d",
+                        key,
+                        code,
+                        count,
+                    )
 
     def flush_summary(self) -> None:
-        if not self._summary_enabled:
+        if self._mode != "warn" or not self._summary_enabled:
             return
         with self._lock:
             total_files = len(self._seen_files)
