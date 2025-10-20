@@ -159,6 +159,9 @@ ENCODINGS = ["utf-8-sig", "utf-16", "utf-8", "shift_jis", "cp932", "latin-1"]
 NOTE_TOKEN_CLEAN_RE = re.compile(r"[^0-9]")
 NOTE_LINE_RE = re.compile(r"^[0-9,\s\|]+$")
 
+DIR_NUMERIC_PREFIX_RE = re.compile(r"^\s*(\d+)\s*[-_.]?\s*(.*)$")
+LEADING_ZERO_TOKEN_RE = re.compile(r"\b0+\d+\b")
+
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
 HEADER_KEYS = {
@@ -557,6 +560,7 @@ class ChartRecord:
     total_notes: int = 0
     measures: int = 0
     first_note_preview: Optional[str] = None
+    rank: Optional[str] = None
     chart_data: Optional[Dict[str, object]] = None
 
 
@@ -720,6 +724,7 @@ class TjaImportRecord:
     charts: List[ChartRecord]
     import_issues: List[str]
     normalized_title: str
+    pack: Optional[str] = None
 
 
 def _normalise_newlines(text: str) -> str:
@@ -815,6 +820,50 @@ def _clean_metadata_value(value: str) -> str:
     cleaned = value.replace("\x00", "")
     cleaned = _normalise_invisible_whitespace(cleaned)
     return cleaned
+
+
+def _split_numeric_prefix(value: Optional[str]) -> Tuple[Optional[int], str]:
+    if value is None:
+        return (None, "")
+    cleaned = _clean_metadata_value(str(value))
+    trimmed = cleaned.strip()
+    if not trimmed:
+        return (None, "")
+    match = DIR_NUMERIC_PREFIX_RE.match(trimmed)
+    if match:
+        remainder = match.group(2).strip()
+        if remainder:
+            try:
+                return int(match.group(1)), remainder
+            except ValueError:
+                pass
+    return (None, trimmed)
+
+
+def _strip_leading_zero_tokens(value: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        try:
+            return str(int(token))
+        except ValueError:
+            return token
+
+    return LEADING_ZERO_TOKEN_RE.sub(_replace, value)
+
+
+def _normalise_space_runs(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _resolve_category_mode(category_title: Optional[str]) -> str:
+    if not isinstance(category_title, str):
+        return "standard"
+    lowered = category_title.strip().casefold()
+    if lowered == "taiko towers":
+        return "tower"
+    if lowered == "dan dojo":
+        return "dandojo"
+    return "standard"
 
 
 def _normalise_course_token(value: str) -> str:
@@ -2495,7 +2544,13 @@ class SongScanner:
         self._metrics = _ScanMetrics()
         self._seed_legacy_scanner_ids()
 
-    def _build_chart_records(self, parsed: ParsedTJA, tja_path: Path) -> Tuple[List[ChartRecord], List[str]]:
+    def _build_chart_records(
+        self,
+        parsed: ParsedTJA,
+        tja_path: Path,
+        *,
+        category_mode: str = "standard",
+    ) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
         import_issues: List[str] = []
         parts = list(tja_path.parts)
@@ -2531,6 +2586,8 @@ class SongScanner:
                 return fallback
             normalised = _clean_metadata_value(course.normalised) if course.normalised else None
             return normalised
+
+        category_mode = (category_mode or "standard").strip().casefold()
 
         for course in parsed.courses:
             course_name = course.canonical
@@ -2610,23 +2667,50 @@ class SongScanner:
 
             chart_data_copy = _clone_chart_data(course.chart_data)
 
+            output_mode = mode
+            output_display_course = display_course
+            rank_value: Optional[str] = None
+
+            if category_mode == "tower":
+                output_mode = "tower"
+                output_display_course = "tower"
+            elif category_mode == "dandojo":
+                output_mode = "dandojo"
+                output_display_course = "dandojo"
+                rank_candidates: Sequence[Optional[str]] = (
+                    display_course,
+                    course.raw_name,
+                    course.normalised,
+                )
+                for candidate in rank_candidates:
+                    if not isinstance(candidate, str):
+                        continue
+                    cleaned_rank = _normalise_space_runs(_clean_metadata_value(candidate))
+                    if cleaned_rank:
+                        rank_value = cleaned_rank
+                        break
+            else:
+                if mode in {"tower", "dan", "dojo"}:
+                    output_mode = "standard"
+
             record = ChartRecord(
                 course=course_name,
                 raw_course=course.raw_name,
                 normalised=course.normalised,
                 level=level_value,
                 branch=course.branch,
-                mode=mode,
-                display_course=display_course,
-                segments=segments_copy,
-                unknown_directives=course.unknown_directives,
                 valid=valid,
                 issues=sorted(set(issues)),
+                mode=output_mode,
+                display_course=output_display_course,
+                segments=segments_copy,
+                unknown_directives=course.unknown_directives,
                 coerced=coerced,
                 hit_notes=course.hit_notes,
                 total_notes=course.total_notes,
                 measures=course.measures,
                 first_note_preview=course.first_note_preview,
+                rank=rank_value,
                 chart_data=chart_data_copy,
             )
             LOGGER.info(
@@ -2693,10 +2777,40 @@ class SongScanner:
         category_id: int,
         category_title: str,
     ) -> TjaImportRecord:
-        charts, chart_issues = self._build_chart_records(parsed, tja_path)
+        category_mode = _resolve_category_mode(category_title)
+        charts, chart_issues = self._build_chart_records(
+            parsed,
+            tja_path,
+            category_mode=category_mode,
+        )
         import_issues = list(chart_issues)
 
-        fallback_title = _clean_metadata_value(tja_path.stem)
+        parts = list(relative_tja.parts)
+        pack_dir: Optional[str] = None
+        if len(parts) >= 3:
+            pack_dir = parts[1]
+        elif len(parts) == 2:
+            parent = relative_tja.parent
+            parent_name = parent.name
+            if parent_name and parent_name != parts[0]:
+                pack_dir = parent_name
+
+        pack_value: Optional[str] = None
+        pack_title: Optional[str] = None
+        if pack_dir:
+            pack_candidate = _clean_metadata_value(pack_dir)
+            pack_candidate = _normalise_space_runs(pack_candidate) if pack_candidate else ""
+            if pack_candidate:
+                pack_value = pack_candidate
+            _, pack_remainder = _split_numeric_prefix(pack_dir)
+            if pack_remainder:
+                pack_title = _normalise_space_runs(
+                    _strip_leading_zero_tokens(pack_remainder)
+                )
+
+        fallback_title = pack_title or _clean_metadata_value(tja_path.stem)
+        if fallback_title:
+            fallback_title = _normalise_space_runs(_strip_leading_zero_tokens(fallback_title))
         if not fallback_title:
             fallback_title = UNKNOWN_VALUE
 
@@ -2772,6 +2886,7 @@ class SongScanner:
             genre=genre_value,
             category_id=category_id,
             category_title=category_title,
+            pack=pack_value,
             charts=charts,
             import_issues=sorted(set(import_issues)),
             normalized_title=normalized_title,
@@ -2796,6 +2911,14 @@ class SongScanner:
                     return UNKNOWN_VALUE
                 return stored or UNKNOWN_VALUE
 
+            def _restore_rank(value: object) -> Optional[str]:
+                if isinstance(value, str):
+                    cleaned = _clean_metadata_value(value).strip()
+                    return cleaned or None
+                if isinstance(value, (int, float)):
+                    return str(value)
+                return None
+
             charts = [
                 ChartRecord(
                     course=_restore_course(item),
@@ -2814,6 +2937,7 @@ class SongScanner:
                     total_notes=int(item.get('total_notes', 0)) if item.get('total_notes') is not None else 0,
                     measures=int(item.get('measures', 0)) if item.get('measures') is not None else 0,
                     first_note_preview=item.get('first_note_preview'),
+                    rank=_restore_rank(item.get('rank')),
                     chart_data=_clone_chart_data(item.get('chart_data')),
                 )
                 for item in charts_raw
@@ -2844,6 +2968,7 @@ class SongScanner:
                 genre=payload.get('genre'),
                 category_id=int(payload.get('category_id', 0)),
                 category_title=str(payload.get('category_title', DEFAULT_CATEGORY_TITLE)),
+                pack=_clean_metadata_value(str(payload.get('pack'))) if isinstance(payload.get('pack'), str) and payload.get('pack').strip() else None,
                 charts=charts,
                 import_issues=list(payload.get('import_issues', [])),
                 normalized_title=str(payload.get('normalized_title', '')),
@@ -3422,7 +3547,7 @@ class SongScanner:
 
         def _dedup_key(chart: ChartRecord) -> Tuple[str, Optional[str]]:
             if chart.mode != "standard":
-                label = chart.display_course or chart.raw_course or chart.normalised or chart.course
+                label = chart.rank or chart.display_course or chart.raw_course or chart.normalised or chart.course
                 return (f"{chart.mode}:{chart.course}", label)
             if chart.course == UNKNOWN_VALUE:
                 raw = chart.raw_course or chart.normalised or ""
@@ -3459,6 +3584,7 @@ class SongScanner:
                     'unknown_directives': chart.unknown_directives,
                     'tja_path': record.relative_path,
                     'tja_url': record.tja_url,
+                    'rank': chart.rank,
                     'chart_data': _clone_chart_data(chart.chart_data),
                 }
                 key = _dedup_key(chart)
@@ -3589,6 +3715,7 @@ class SongScanner:
             'valid_chart_count': valid_chart_count,
             'enabled': enabled,
             'category_id': base.category_id,
+            'category': base.category_title,
             'type': 'tja',
             'offset': base.offset,
             'skin_id': 0,
@@ -3613,6 +3740,8 @@ class SongScanner:
             'scanner_primary_course': primary_course,
             'scanner_primary_difficulty': primary_difficulty,
         }
+        if base.pack:
+            document['pack'] = base.pack
         if audio_hash is not None:
             document['audioHash'] = audio_hash
         if source_song_id is not None:
@@ -3887,17 +4016,18 @@ class SongScanner:
         parts = relative.parts
         if not parts:
             return 0, DEFAULT_CATEGORY_TITLE
-        if len(parts) == 1:
+        if len(parts) <= 1:
             return 0, DEFAULT_CATEGORY_TITLE
         top_folder = parts[0]
-        match = re.match(r'^(\d{2})\s+(.+)$', top_folder)
-        if match:
-            number = int(match.group(1))
-            raw_title = match.group(2).strip()
-            title = _clean_metadata_value(raw_title) or DEFAULT_CATEGORY_TITLE
-            return number, title
-        fallback = _clean_metadata_value(top_folder) or DEFAULT_CATEGORY_TITLE
-        return 0, fallback
+        prefix, title_candidate = _split_numeric_prefix(top_folder)
+        if title_candidate:
+            title_value = _normalise_space_runs(title_candidate)
+        else:
+            title_value = _normalise_space_runs(_clean_metadata_value(top_folder)) if top_folder else ""
+        if not title_value:
+            title_value = DEFAULT_CATEGORY_TITLE
+        category_id = prefix if prefix is not None else 0
+        return category_id, title_value
 
     def scan(self, *, full: bool = False) -> Dict[str, int]:
         """Scan songs directory and sync metadata with MongoDB."""

@@ -5,22 +5,36 @@ from __future__ import annotations
 from typing import Mapping, Optional, Sequence
 
 
+def _canonical_mode_token(mode: object) -> str:
+    if not isinstance(mode, str):
+        return ""
+    token = mode.strip().casefold()
+    if token in {"dan", "dojo"}:
+        return "dandojo"
+    return token
+
+
 def normalise_course_tokens(chart: Mapping[str, object]) -> set[str]:
     tokens: set[str] = set()
     for key in ("course", "canonical_course", "display_course", "raw_course"):
         value = chart.get(key)
         if isinstance(value, str) and value:
             tokens.add(value.strip().casefold())
-    mode_value = chart.get("mode")
-    if isinstance(mode_value, str) and mode_value:
-        tokens.add(mode_value.strip().casefold())
+    mode_value = _canonical_mode_token(chart.get("mode"))
+    if mode_value:
+        tokens.add(mode_value)
+    rank_value = chart.get("rank")
+    if isinstance(rank_value, str) and rank_value.strip():
+        tokens.add(rank_value.strip().casefold())
+    elif isinstance(rank_value, (int, float)):
+        tokens.add(str(rank_value).strip().casefold())
     return {token for token in tokens if token}
 
 
 def select_best_chart(
     charts: Optional[Sequence[Mapping[str, object]]],
     course: Optional[str] = None,
-    prefer_modes: Sequence[object] = ("tower", "dan"),
+    prefer_modes: Sequence[object] = ("tower", "dandojo"),
 ) -> Optional[Mapping[str, object]]:
     """Return the preferred chart for the provided course token."""
 
@@ -31,8 +45,7 @@ def select_best_chart(
     prefer_mode_tokens: tuple[str, ...] = tuple(
         token
         for token in (
-            str(mode or "").strip().casefold()
-            for mode in (prefer_modes or ())
+            _canonical_mode_token(mode) for mode in (prefer_modes or ())
         )
         if token
     )
@@ -45,7 +58,7 @@ def select_best_chart(
     }
 
     def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int, int]:
-        mode_value = str(chart.get("mode") or "").strip().casefold()
+        mode_value = _canonical_mode_token(chart.get("mode"))
         mode_priority = prefer_mode_order.get(mode_value, len(prefer_mode_tokens))
 
         score = 0
@@ -56,6 +69,16 @@ def select_best_chart(
                 score -= 3
             if canonical_course == course_token:
                 score -= 2
+
+            rank_value = chart.get("rank")
+            if isinstance(rank_value, str):
+                rank_token = rank_value.strip().casefold()
+            elif isinstance(rank_value, (int, float)):
+                rank_token = str(rank_value).strip().casefold()
+            else:
+                rank_token = ""
+            if rank_token and rank_token == course_token:
+                score -= 3
         return (mode_priority, score, index)
 
     filtered: list[tuple[int, Mapping[str, object]]] = []
