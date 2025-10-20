@@ -1,4 +1,9 @@
 const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
+const songsCatalogCache = {
+        pages: Object.create(null),
+        lastResult: [],
+        details: Object.create(null),
+};
 
 function resolveManifestStatus(manifest){
         if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
@@ -250,8 +255,28 @@ class Loader{
 			style.appendChild(document.createTextNode(css.join("\n")))
 			document.head.appendChild(style)
 			
-                        this.addPromise(this.ajax("api/songs").then(songs => {
-                                songs = JSON.parse(songs);
+                        this.addPromise(this.loadSongsCatalog().then(songs => {
+                                songs = songs.filter(song => song && typeof song === "object");
+                                songs.forEach(song => {
+                                        const stableId = typeof song.id === "string" ? song.id : (typeof song.stableId === "string" ? song.stableId : "");
+                                        if(typeof song.legacy_id === "number"){
+                                                song.numericId = song.legacy_id;
+                                                song.id = song.legacy_id;
+                                        }else if(typeof song.id !== "string" && typeof song.id !== "number"){
+                                                song.id = stableId;
+                                        }
+                                        song.stableId = stableId || (typeof song.id === "string" ? song.id : "");
+                                        song.enabled = song.enabled !== false;
+                                        if(!Array.isArray(song.import_issues)){
+                                                song.import_issues = [];
+                                        }
+                                        if(!song.paths || typeof song.paths !== "object"){
+                                                song.paths = {};
+                                        }
+                                        if(!song.type){
+                                                song.type = "tja";
+                                        }
+                                });
                                 songs = songs.filter(song => song.enabled !== false);
                                 songs.forEach(song => {
                                         if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.enrichSongMetadata === "function"){
@@ -261,14 +286,20 @@ class Loader{
                                         if(!Array.isArray(song.import_issues)){
                                                 song.import_issues = []
                                         }
-                                        var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + song.id + "/")
+                                        var stableId = song.stableId || song.id || ""
+                                        var dirUrl = paths.dir_url || (gameConfig.songs_baseurl + stableId + "/")
                                         if(dirUrl.slice(-1) !== "/"){
                                                 dirUrl += "/"
+                                        }
+                                        paths.dir_url = dirUrl
+                                        if(!paths.tja_url){
+                                                paths.tja_url = dirUrl + "main.tja"
                                         }
                                         if(paths.audio_url){
                                                 song.music = new RemoteFile(paths.audio_url)
                                         }else if(song.music_type){
-                                                song.music = new RemoteFile(dirUrl + "main." + song.music_type)
+                                                paths.audio_url = dirUrl + "main." + song.music_type
+                                                song.music = new RemoteFile(paths.audio_url)
                                         }
 
                                         if(song.type === "tja"){
@@ -716,11 +747,13 @@ class Loader{
                 var promise = pageEvents.load(request)
                 if(!customResponse){
                         promise = promise.then(() => {
+                                if(request.status === 304){
+                                        return {__notModified: true}
+                                }
                                 if(request.status === 200){
                                         return request.response
-                                }else{
-                                        return Promise.reject(`${url} (${request.status})`)
                                 }
+                                return Promise.reject(`${url} (${request.status})`)
                         })
                 }
                 if(customRequest){
@@ -728,6 +761,117 @@ class Loader{
                 }
                 request.send()
                 return promise
+        }
+        loadSongsCatalog(){
+                const limit = 200
+                const collected = []
+                const loaderInstance = this
+                const pageCache = songsCatalogCache.pages || (songsCatalogCache.pages = Object.create(null))
+                const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
+
+                function pruneCacheAfter(page){
+                        Object.keys(pageCache).forEach(key => {
+                                const numericKey = parseInt(key, 10)
+                                if(Number.isFinite(numericKey) && numericKey > page){
+                                        delete pageCache[key]
+                                }
+                        })
+                }
+
+                function reuseCachedPage(page){
+                        const cachedPage = pageCache && pageCache[page]
+                        if(Array.isArray(cachedPage) && cachedPage.length){
+                                cachedPage.forEach(detail => {
+                                        if(detail && typeof detail === "object"){
+                                                collected.push(detail)
+                                        }
+                                })
+                                if(cachedPage.length === limit){
+                                        return fetchPage(page + 1)
+                                }
+                        }
+                        return null
+                }
+
+                function fetchPage(page){
+                        const url = `api/songs?page=${page}&limit=${limit}`
+                        return loaderInstance.ajax(url).then(response => {
+                                if(response && typeof response === "object" && response.__notModified){
+                                        const reused = reuseCachedPage(page)
+                                        return reused === null ? [] : reused
+                                }
+                                if(response === "" || response === null || typeof response === "undefined"){
+                                        return reuseCachedPage(page)
+                                }
+                                let entries
+                                try{
+                                        entries = JSON.parse(response)
+                                }catch(e){
+                                        entries = []
+                                }
+                                if(!Array.isArray(entries) || entries.length === 0){
+                                        if(pageCache){
+                                                delete pageCache[page]
+                                                pruneCacheAfter(page)
+                                        }
+                                        return null
+                                }
+                                const detailPromises = entries.map(entry => {
+                                        if(!entry || typeof entry.id !== "string" || !entry.id){
+                                                return Promise.resolve(null)
+                                        }
+                                        const detailUrl = `api/song/${encodeURIComponent(entry.id)}`
+                                        return loaderInstance.ajax(detailUrl).then(detailResponse => {
+                                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
+                                                        return detailCache[entry.id] || null
+                                                }
+                                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
+                                                        return detailCache[entry.id] || null
+                                                }
+                                                try{
+                                                        const parsed = JSON.parse(detailResponse)
+                                                        if(parsed && typeof parsed === "object"){
+                                                                const detailId = typeof parsed.id === "string" && parsed.id ? parsed.id : entry.id
+                                                                if(detailId){
+                                                                        detailCache[detailId] = parsed
+                                                                }
+                                                        }
+                                                        return parsed
+                                                }catch(err){
+                                                        return detailCache[entry.id] || null
+                                                }
+                                        }).catch(() => detailCache[entry.id] || null)
+                                })
+                                return Promise.all(detailPromises).then(details => {
+                                        const pageDetails = []
+                                        details.forEach(detail => {
+                                                if(detail && typeof detail === "object"){
+                                                        collected.push(detail)
+                                                        pageDetails.push(detail)
+                                                }
+                                        })
+                                        pageCache[page] = pageDetails
+                                        if(pageDetails.length < limit){
+                                                pruneCacheAfter(page)
+                                        }
+                                        if(entries.length === limit){
+                                                return fetchPage(page + 1)
+                                        }
+                                        return null
+                                })
+                        }).catch(() => reuseCachedPage(page))
+                }
+
+                return fetchPage(1).then(() => {
+                        if(collected.length === 0){
+                                if(Array.isArray(songsCatalogCache.lastResult) && songsCatalogCache.lastResult.length){
+                                        return songsCatalogCache.lastResult.slice()
+                                }
+                                return []
+                        }
+                        songsCatalogCache.lastResult = collected.slice()
+                        return collected
+                })
         }
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null
