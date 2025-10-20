@@ -1,3 +1,69 @@
+const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
+
+function resolveManifestStatus(manifest){
+        if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
+                return manifest.status.trim();
+        }
+        return "ok";
+}
+
+function commitModesStore(store){
+        if(!store || typeof store !== "object"){
+                return;
+        }
+        if(typeof store.cacheTtlMs !== "number" || store.cacheTtlMs <= 0){
+                store.cacheTtlMs = DEFAULT_MODES_MANIFEST_CACHE_TTL_MS;
+        }
+        if(store.manifest && (!store.categoryIndex || typeof store.categoryIndex !== "object") && resolveManifestStatus(store.manifest) === "ok"){
+                store.categoryIndex = buildModesCategoryIndex(store.manifest);
+        }
+        if(typeof window !== "undefined"){
+                window.__modes__ = store;
+        }
+        const status = store.status || resolveManifestStatus(store.manifest);
+        if(store.manifest){
+                assets.modesManifest = store.manifest;
+        }else if(status){
+                assets.modesManifest = {status: status};
+        }
+        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                const payload = store.manifest || (status ? {status: status} : null);
+                if(payload){
+                        modesHelper.updateManifest(payload);
+                }
+        }
+}
+
+function buildModesCategoryIndex(manifest){
+        const index = {};
+        if(!manifest || typeof manifest !== "object"){
+                return index;
+        }
+        const modes = Array.isArray(manifest.modes) ? manifest.modes : [];
+        modes.forEach(entry => {
+                if(!entry || typeof entry !== "object"){
+                        return;
+                }
+                const rawKey = typeof entry.key === "string" ? entry.key : (typeof entry.mode === "string" ? entry.mode : "");
+                const key = rawKey.trim();
+                if(!key){
+                        return;
+                }
+                const lower = key.toLowerCase();
+                const canonical = lower === "dan" || lower === "dojo" ? "dandojo" : lower;
+                if(!canonical){
+                        return;
+                }
+                const categories = Array.isArray(entry.categories) ? entry.categories : [];
+                categories.forEach(category => {
+                        if(typeof category === "string" && category.trim()){
+                                index[category.trim().toLowerCase()] = canonical;
+                        }
+                });
+        });
+        return index;
+}
+
 class Loader{
 	constructor(...args){
 		this.init(...args)
@@ -130,17 +196,7 @@ class Loader{
 			}), url)
 		})
 		
-                this.addPromise(this.ajax("api/modes").then(response => {
-                        try{
-                                var manifest = JSON.parse(response)
-                        }catch(e){
-                                return
-                        }
-                        assets.modesManifest = manifest
-                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
-                                modesHelper.updateManifest(manifest)
-                        }
-                }).catch(() => {}), "api/modes")
+                this.addPromise(this.loadModesManifest(), "api/modes")
 
                 this.addPromise(this.ajax("api/categories").then(cats => {
                         assets.categories = JSON.parse(cats)
@@ -654,25 +710,77 @@ class Loader{
 		}
 		return css.join("\n")
 	}
-	ajax(url, customRequest, customResponse){
-		var request = new XMLHttpRequest()
-		request.open("GET", url)
-		var promise = pageEvents.load(request)
-		if(!customResponse){
-			promise = promise.then(() => {
-				if(request.status === 200){
-					return request.response
-				}else{
-					return Promise.reject(`${url} (${request.status})`)
-				}
-			})
-		}
-		if(customRequest){
-			customRequest(request)
-		}
-		request.send()
-		return promise
-	}
+        ajax(url, customRequest, customResponse){
+                var request = new XMLHttpRequest()
+                request.open("GET", url)
+                var promise = pageEvents.load(request)
+                if(!customResponse){
+                        promise = promise.then(() => {
+                                if(request.status === 200){
+                                        return request.response
+                                }else{
+                                        return Promise.reject(`${url} (${request.status})`)
+                                }
+                        })
+                }
+                if(customRequest){
+                        customRequest(request)
+                }
+                request.send()
+                return promise
+        }
+        loadModesManifest(){
+                const existingStore = typeof window !== "undefined" ? window.__modes__ : null
+                const now = Date.now()
+                if(
+                        existingStore &&
+                        typeof existingStore.cacheTtlMs === "number" &&
+                        existingStore.cacheTtlMs > 0 &&
+                        now - (existingStore.fetchedAt || 0) < existingStore.cacheTtlMs
+                ){
+                        commitModesStore(existingStore)
+                        return Promise.resolve()
+                }
+                return this.ajax("api/modes").then(response => {
+                        let manifest
+                        try{
+                                manifest = JSON.parse(response)
+                        }catch(e){
+                                const errorStore = {
+                                        manifest: null,
+                                        status: "error",
+                                        fetchedAt: Date.now(),
+                                        cacheTtlMs: DEFAULT_MODES_MANIFEST_CACHE_TTL_MS,
+                                        categoryIndex: {},
+                                }
+                                commitModesStore(errorStore)
+                                return
+                        }
+                        if(!manifest || typeof manifest !== "object"){
+                                const invalidStore = {
+                                        manifest: null,
+                                        status: "error",
+                                        fetchedAt: Date.now(),
+                                        cacheTtlMs: DEFAULT_MODES_MANIFEST_CACHE_TTL_MS,
+                                        categoryIndex: {},
+                                }
+                                commitModesStore(invalidStore)
+                                return
+                        }
+                        const status = resolveManifestStatus(manifest)
+                        const ttlSeconds = Number(manifest.cache_ttl)
+                        const cacheTtlMs = Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds * 1000 : DEFAULT_MODES_MANIFEST_CACHE_TTL_MS
+                        const isOk = status === "ok"
+                        const store = {
+                                manifest: isOk ? manifest : null,
+                                status,
+                                fetchedAt: Date.now(),
+                                cacheTtlMs,
+                                categoryIndex: isOk ? buildModesCategoryIndex(manifest) : {},
+                        }
+                        commitModesStore(store)
+                }).catch(() => {})
+        }
 	loadScript(url){
 		var script = document.createElement("script")
 		var url = url + this.queryString

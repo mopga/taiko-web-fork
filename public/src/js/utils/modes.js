@@ -60,7 +60,11 @@
         }
 
         function updateManifest(manifest){
-                if(!manifest || typeof manifest !== "object" || manifest.status === "disabled"){
+                if(
+                        !manifest ||
+                        typeof manifest !== "object" ||
+                        (manifest.status && manifest.status !== "ok")
+                ){
                         registry.manifest = null;
                         registry.modesByKey = Object.assign({}, fallbackModesByKey);
                         registry.categoryModes = {};

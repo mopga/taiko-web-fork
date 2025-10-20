@@ -38,7 +38,9 @@ class LoadSong{
 		var song = this.selectedSong
 		var id = song.folder
 		var songObj
-		this.promises = []
+                this.promises = []
+                this._legacyNotesQueued = false
+                this._legacyNotesPromise = null
 		if(id !== "calibration"){
 			assets.sounds["v_start"].play()
 			assets.songs.forEach(song => {
@@ -133,16 +135,53 @@ class LoadSong{
                         mode: this.selectedSong.mode || songObj.mode || songObj.default_mode,
                         stars: this.selectedSong.stars
                 }
-                var notePlan
+                var notesPromise
                 if(typeof loadNotesForSong === "function"){
-                        notePlan = loadNotesForSong(songObj, selection) || {type: "builtin"}
+                        try{
+                                var maybePromise = loadNotesForSong(songObj, selection)
+                                if(maybePromise && typeof maybePromise.then === "function"){
+                                        notesPromise = maybePromise
+                                }else{
+                                        notesPromise = Promise.resolve(maybePromise || null)
+                                }
+                        }catch(e){
+                                console.warn("notes-loader: call failed", e)
+                                notesPromise = Promise.resolve(null)
+                        }
                 }else{
-                        notePlan = {type: "builtin"}
+                        notesPromise = Promise.resolve(null)
                 }
-                if(notePlan.modeKey){
-                        this.selectedSong.mode = notePlan.modeKey
-                        songObj.mode = notePlan.modeKey
-                }
+
+                const notesHandling = Promise.resolve(notesPromise).then(result => {
+                        if(result && Array.isArray(result.notes) && result.notes.length){
+                                if(result.modeKey){
+                                        this.selectedSong.mode = result.modeKey
+                                        songObj.mode = result.modeKey
+                                }
+                                if(result.meta){
+                                        this.selectedSong.notesMeta = result.meta
+                                }else{
+                                        this.selectedSong.notesMeta = {
+                                                mode: result.modeKey || selection.mode || songObj.mode || "standard",
+                                                totalNotes: result.notes.length
+                                        }
+                                }
+                                if(result.durationMs && !songObj.duration_ms){
+                                        songObj.duration_ms = result.durationMs
+                                }
+                                if(result.parsedChart){
+                                        this.songData = {format: "parsed-chart", data: result.parsedChart}
+                                }else{
+                                        this.songData = {format: "note-events", data: result}
+                                }
+                                return true
+                        }
+                        return this.queueLegacyNotesLoad(song, songObj).then(() => false)
+                }).catch(error => {
+                        console.warn("notes-loader: promise rejected", error)
+                        return this.queueLegacyNotesLoad(song, songObj).then(() => false)
+                })
+                this.addPromise(notesHandling, "notes-loader")
 
                 if(songObj.sound && songObj.sound.buffer){
                         songObj.sound.gain = snd.musicGain
@@ -151,30 +190,6 @@ class LoadSong{
 				songObj.sound = sound
 			}), songObj.music.url)
 		}
-                if(notePlan.type === "rest" && notePlan.promise){
-                        this.addPromise(notePlan.promise.then(result => {
-                                this.songData = {format: "parsed-chart", data: result.chart}
-                                if(result && result.meta){
-                                        this.selectedSong.notesMeta = result.meta
-                                }
-                                if(result && result.durationMs && !songObj.duration_ms){
-                                        songObj.duration_ms = result.durationMs
-                                }
-                        }), notePlan.requestUrl || "rest-notes")
-                }else{
-                        var chart = songObj.chart
-                        if(chart && chart.separateDiff){
-                                var chartDiff = this.selectedSong.difficulty
-                                chart = chart[chartDiff]
-                        }
-                        if(chart){
-                                this.addPromise(chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
-                                        this.songData = data.replace(/\0/g, "").split("\n")
-                                }), chart.url)
-                        }else{
-                                this.songData = ""
-                        }
-                }
 		if(songObj.lyricsFile && !songObj.lyricsData && !this.multiplayer && (!this.touchEnabled || this.autoPlayEnabled) && settings.getItem("showLyrics")){
 			this.addPromise(songObj.lyricsFile.read().then(data => {
 				songObj.lyricsData = data
@@ -209,18 +224,42 @@ class LoadSong{
 		if(songObj.volume && songObj.volume !== 1){
 			this.promises.push(new Promise(resolve => setTimeout(resolve, 500)))
 		}
-		Promise.all(this.promises).then(() => {
-			if(!this.error){
-				this.setupMultiplayer()
-			}
-		})
-	}
-	addPromise(promise, url){
-		this.promises.push(promise.catch(response => {
-			this.errorMsg(response, url)
-			return Promise.resolve()
-		}))
-	}
+                Promise.all(this.promises).then(() => {
+                        if(!this.error){
+                                this.setupMultiplayer()
+                        }
+                })
+        }
+        queueLegacyNotesLoad(song, songObj){
+                if(this._legacyNotesQueued){
+                        return this._legacyNotesPromise || Promise.resolve()
+                }
+                this._legacyNotesQueued = true
+                var chart = songObj.chart
+                if(chart && chart.separateDiff){
+                        var chartDiff = this.selectedSong.difficulty
+                        chart = chart[chartDiff]
+                }
+                let legacyPromise
+                if(chart){
+                        const readPromise = chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
+                                this.songData = data.replace(/\0/g, "").split("\n")
+                        })
+                        legacyPromise = this.addPromise(readPromise, chart.url)
+                }else{
+                        this.songData = ""
+                        legacyPromise = Promise.resolve()
+                }
+                this._legacyNotesPromise = Promise.resolve(legacyPromise)
+                return this._legacyNotesPromise
+        }
+        addPromise(promise, url){
+                const wrapped = Promise.resolve(promise).catch(response => {
+                        this.errorMsg(response, url)
+                })
+                this.promises.push(wrapped)
+                return wrapped
+        }
 	errorMsg(error, url){
 		if(!this.error){
 			if(url){
