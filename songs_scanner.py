@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import traceback
+from fractions import Fraction
 from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
@@ -590,10 +591,15 @@ class _CourseParseState:
     measure_scroll: float = 1.0
     measure_ratio_for_measure: float = 1.0
     measure_start_time_ms: float = 0.0
+    current_measure_numerator: int = 4
+    current_measure_denominator: int = 4
+    measure_time_sig_numerator: int = 4
+    measure_time_sig_denominator: int = 4
     parse_failed: bool = False
     unknown_tokens_logged: Set[str] = field(default_factory=set)
     active_long: Optional[Dict[str, object]] = None
     final_metrics: Optional[ChartMetrics] = None
+    offset_applied: bool = False
 
 
 def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -667,6 +673,14 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
                 measure_copy['bpm'] = measure['bpm']
             if 'scroll' in measure:
                 measure_copy['scroll'] = measure['scroll']
+            if 'start_ms' in measure:
+                measure_copy['start_ms'] = measure['start_ms']
+            if 'duration_ms' in measure:
+                measure_copy['duration_ms'] = measure['duration_ms']
+            if 'ratio' in measure:
+                measure_copy['ratio'] = measure['ratio']
+            if 'time_sig' in measure:
+                measure_copy['time_sig'] = measure['time_sig']
             measures_payload.append(measure_copy)
     return {
         'course': course_value,
@@ -877,6 +891,12 @@ def _parse_tja_strict(
 ) -> ParsedTJA:
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
 
+    offset_seconds = parsed.offset if parsed.offset is not None else 0.0
+    try:
+        offset_ms = float(offset_seconds) * -1000.0
+    except (TypeError, ValueError):
+        offset_ms = 0.0
+
     active_course: Optional[CourseInfo] = None
     known_courses: Dict[str, CourseInfo] = {}
     current_notes_course: Optional[CourseInfo] = None
@@ -908,6 +928,8 @@ def _parse_tja_strict(
         state.measure_bpm = state.current_bpm
         state.measure_scroll = state.current_scroll
         state.measure_ratio_for_measure = state.current_measure_ratio
+        state.measure_time_sig_numerator = state.current_measure_numerator
+        state.measure_time_sig_denominator = state.current_measure_denominator
         state.active_long = None
 
     def _store_measure_entry(course: CourseInfo) -> None:
@@ -1002,6 +1024,29 @@ def _parse_tja_strict(
         entry['bpm'] = bpm_basis
         if state.measure_scroll is not None:
             entry['scroll'] = state.measure_scroll
+        start_int = int(round(state.measure_start_time_ms))
+        duration_int = int(round(duration_ms))
+        if duration_int < 0:
+            duration_int = 0
+        entry['start_ms'] = start_int
+        entry['duration_ms'] = duration_int
+        entry['ratio'] = ratio_value
+        time_sig_num = state.measure_time_sig_numerator or 4
+        time_sig_den = state.measure_time_sig_denominator or 4
+        try:
+            time_sig_num_int = int(round(time_sig_num))
+        except (TypeError, ValueError):
+            time_sig_num_int = 4
+        try:
+            time_sig_den_int = int(round(time_sig_den))
+        except (TypeError, ValueError):
+            time_sig_den_int = 4
+        if time_sig_num_int <= 0:
+            time_sig_num_int = 4
+        if time_sig_den_int <= 0:
+            time_sig_den_int = 4
+        if not (time_sig_num_int == 4 and time_sig_den_int == 4):
+            entry['time_sig'] = {'num': time_sig_num_int, 'den': time_sig_den_int}
         state.chart_measures.append(entry)
         state.measure_start_time_ms += duration_ms
         state.measure_bpm = state.current_bpm
@@ -1013,7 +1058,8 @@ def _parse_tja_strict(
         state.parse_failed = True
         state.chart_measures.clear()
         state.measure_tokens.clear()
-        state.measure_start_time_ms = 0.0
+        state.measure_start_time_ms = offset_ms
+        state.offset_applied = True
         state.pending_total_notes = 0
         state.pending_hit_notes = 0
         state.pending_has_notes = False
@@ -1343,7 +1389,9 @@ def _parse_tja_strict(
                         current_notes_course.total_notes = 0
                         current_notes_course.hit_notes = 0
                         state.chart_measures.clear()
-                        state.measure_start_time_ms = 0.0
+                    if first_block or not state.offset_applied:
+                        state.measure_start_time_ms = offset_ms
+                        state.offset_applied = True
                     state.parse_failed = False
                     if state.current_scroll is None:
                         state.current_scroll = 1.0
@@ -1431,11 +1479,32 @@ def _parse_tja_strict(
                     fraction = directive_payload or ""
                     if "/" in fraction:
                         numerator_str, denominator_str = fraction.split("/", 1)
-                        numerator = _parse_float(numerator_str.strip())
-                        denominator = _parse_float(denominator_str.strip())
-                        if numerator and denominator:
-                            state.current_measure_ratio = numerator / denominator
+                        try:
+                            numerator_fraction = Fraction(numerator_str.strip())
+                            denominator_fraction = Fraction(denominator_str.strip())
+                        except (ValueError, ZeroDivisionError):
+                            numerator_fraction = None
+                            denominator_fraction = None
+                        if (
+                            numerator_fraction is not None
+                            and denominator_fraction is not None
+                            and denominator_fraction != 0
+                        ):
+                            ratio_fraction = numerator_fraction / denominator_fraction
+                            state.current_measure_ratio = float(ratio_fraction)
                             state.measure_ratio_for_measure = state.current_measure_ratio
+                            if (
+                                numerator_fraction.denominator == 1
+                                and denominator_fraction.denominator == 1
+                            ):
+                                state.current_measure_numerator = numerator_fraction.numerator
+                                state.current_measure_denominator = denominator_fraction.numerator
+                            else:
+                                simplified = ratio_fraction.limit_denominator(4096)
+                                state.current_measure_numerator = simplified.numerator
+                                state.current_measure_denominator = simplified.denominator
+                            state.measure_time_sig_numerator = state.current_measure_numerator
+                            state.measure_time_sig_denominator = state.current_measure_denominator
                 elif directive in SAFE_NOTE_DIRECTIVES:
                     handled_directive = True
                 elif directive.startswith("#EXAM"):
@@ -1618,6 +1687,12 @@ def _parse_tja_lenient(
 ) -> ParsedTJA:
     parsed = ParsedTJA(raw_text=original_text, fingerprint=md5_text(normalised_text))
 
+    offset_seconds = parsed.offset if parsed.offset is not None else 0.0
+    try:
+        offset_ms = float(offset_seconds) * -1000.0
+    except (TypeError, ValueError):
+        offset_ms = 0.0
+
     course_token = "oni"
     course_raw = "oni"
     in_notes = False
@@ -1631,6 +1706,10 @@ def _parse_tja_lenient(
     measure_scroll: float = 1.0
     measure_ratio_for_measure: float = 1.0
     measure_start_time_ms: float = 0.0
+    current_measure_numerator: int = 4
+    current_measure_denominator: int = 4
+    measure_time_sig_numerator: int = 4
+    measure_time_sig_denominator: int = 4
     total_notes = 0
     unknown_tokens_logged: Set[str] = set()
     active_long: Optional[Dict[str, object]] = None
@@ -1639,6 +1718,7 @@ def _parse_tja_lenient(
     best_metrics: Optional[ChartMetrics] = None
     best_course_token = course_token
     best_course_raw = course_raw
+    offset_applied = False
     def _parse_float(value: str) -> Optional[float]:
         try:
             return float(value)
@@ -1710,12 +1790,21 @@ def _parse_tja_lenient(
                 entry['bpm'] = measure['bpm']
             if 'scroll' in measure:
                 entry['scroll'] = measure['scroll']
+            if 'start_ms' in measure:
+                entry['start_ms'] = measure['start_ms']
+            if 'duration_ms' in measure:
+                entry['duration_ms'] = measure['duration_ms']
+            if 'ratio' in measure:
+                entry['ratio'] = measure['ratio']
+            if 'time_sig' in measure:
+                entry['time_sig'] = measure['time_sig']
             snapshot.append(entry)
         return snapshot
 
     def _flush_measure() -> None:
         nonlocal measure_tokens, measure_bpm, measure_scroll, measure_ratio_for_measure
         nonlocal measure_start_time_ms, total_notes, active_long
+        nonlocal measure_time_sig_numerator, measure_time_sig_denominator
         if not measure_tokens:
             return
         tokens = list(measure_tokens)
@@ -1788,12 +1877,37 @@ def _parse_tja_lenient(
             measure_entry['bpm'] = bpm_to_store
         if measure_scroll is not None:
             measure_entry['scroll'] = measure_scroll
+        start_int = int(round(measure_start_time_ms))
+        duration_int = int(round(duration_ms))
+        if duration_int < 0:
+            duration_int = 0
+        measure_entry['start_ms'] = start_int
+        measure_entry['duration_ms'] = duration_int
+        measure_entry['ratio'] = measure_ratio_for_measure
+        time_sig_num = measure_time_sig_numerator or 4
+        time_sig_den = measure_time_sig_denominator or 4
+        try:
+            time_sig_num_int = int(round(time_sig_num))
+        except (TypeError, ValueError):
+            time_sig_num_int = 4
+        try:
+            time_sig_den_int = int(round(time_sig_den))
+        except (TypeError, ValueError):
+            time_sig_den_int = 4
+        if time_sig_num_int <= 0:
+            time_sig_num_int = 4
+        if time_sig_den_int <= 0:
+            time_sig_den_int = 4
+        if not (time_sig_num_int == 4 and time_sig_den_int == 4):
+            measure_entry['time_sig'] = {'num': time_sig_num_int, 'den': time_sig_den_int}
         chart_measures.append(measure_entry)
         total_notes += len(measure_notes)
         measure_start_time_ms += duration_ms
         measure_bpm = current_bpm
         measure_scroll = current_scroll
         measure_ratio_for_measure = current_measure_ratio
+        measure_time_sig_numerator = current_measure_numerator
+        measure_time_sig_denominator = current_measure_denominator
 
     for line_number, raw in enumerate(normalised_text.splitlines(), 1):
         stripped = raw.strip().lstrip("\ufeff")
@@ -1845,10 +1959,13 @@ def _parse_tja_lenient(
             in_notes = True
             measure_tokens.clear()
             chart_measures.clear()
-            measure_start_time_ms = 0.0
+            measure_start_time_ms = offset_ms
             measure_bpm = current_bpm
             measure_scroll = current_scroll
             measure_ratio_for_measure = current_measure_ratio
+            measure_time_sig_numerator = current_measure_numerator
+            measure_time_sig_denominator = current_measure_denominator
+            offset_applied = True
             active_long = None
             continue
 
@@ -1913,11 +2030,32 @@ def _parse_tja_lenient(
             fraction = payload.strip()
             if "/" in fraction:
                 numerator_str, denominator_str = fraction.split("/", 1)
-                numerator = _parse_float(numerator_str.strip())
-                denominator = _parse_float(denominator_str.strip())
-                if numerator and denominator:
-                    current_measure_ratio = numerator / denominator
+                try:
+                    numerator_fraction = Fraction(numerator_str.strip())
+                    denominator_fraction = Fraction(denominator_str.strip())
+                except (ValueError, ZeroDivisionError):
+                    numerator_fraction = None
+                    denominator_fraction = None
+                if (
+                    numerator_fraction is not None
+                    and denominator_fraction is not None
+                    and denominator_fraction != 0
+                ):
+                    ratio_fraction = numerator_fraction / denominator_fraction
+                    current_measure_ratio = float(ratio_fraction)
                     measure_ratio_for_measure = current_measure_ratio
+                    if (
+                        numerator_fraction.denominator == 1
+                        and denominator_fraction.denominator == 1
+                    ):
+                        current_measure_numerator = numerator_fraction.numerator
+                        current_measure_denominator = denominator_fraction.numerator
+                    else:
+                        simplified = ratio_fraction.limit_denominator(4096)
+                        current_measure_numerator = simplified.numerator
+                        current_measure_denominator = simplified.denominator
+                    measure_time_sig_numerator = current_measure_numerator
+                    measure_time_sig_denominator = current_measure_denominator
             continue
 
         if NOTE_LINE_RE.match(stripped):

@@ -1089,16 +1089,19 @@ class SongSelect{
 		}
 		var diff = this.difficultyId[difficulty]
 		
-		new LoadSong({
-			"title": selectedSong.title,
-			"originalTitle": selectedSong.originalTitle,
-			"folder": selectedSong.id,
-			"difficulty": diff,
-			"category": selectedSong.category,
-			"category_id":selectedSong.category_id,
-			"type": selectedSong.type,
-			"offset": selectedSong.offset,
-			"songSkin": selectedSong.songSkin,
+                new LoadSong({
+                        "title": selectedSong.title,
+                        "originalTitle": selectedSong.originalTitle,
+                        "folder": selectedSong.id,
+                        "difficulty": diff,
+                        "category": selectedSong.category,
+                        "category_id":selectedSong.category_id,
+                        "mode": selectedSong.mode,
+                        "modes": selectedSong.modes,
+                        "default_mode": selectedSong.default_mode,
+                        "type": selectedSong.type,
+                        "offset": selectedSong.offset,
+                        "songSkin": selectedSong.songSkin,
 			"stars": selectedSong.courses[diff].stars,
 			"hash": selectedSong.hash,
 			"lyrics": selectedSong.lyrics,

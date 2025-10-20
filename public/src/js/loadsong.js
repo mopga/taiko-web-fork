@@ -122,27 +122,59 @@ class LoadSong{
 				}
 			}
 		}
-		this.loadSongBg(id)
-		
-		if(songObj.sound && songObj.sound.buffer){
-			songObj.sound.gain = snd.musicGain
-		}else if(songObj.music !== "muted"){
+                this.loadSongBg(id)
+
+                var selection = {
+                        title: this.selectedSong.title,
+                        difficulty: this.selectedSong.difficulty,
+                        course: this.selectedSong.difficulty,
+                        rank: this.selectedSong.rank || this.selectedSong.difficulty,
+                        category: this.selectedSong.category,
+                        mode: this.selectedSong.mode || songObj.mode || songObj.default_mode,
+                        stars: this.selectedSong.stars
+                }
+                var notePlan
+                if(typeof loadNotesForSong === "function"){
+                        notePlan = loadNotesForSong(songObj, selection) || {type: "builtin"}
+                }else{
+                        notePlan = {type: "builtin"}
+                }
+                if(notePlan.modeKey){
+                        this.selectedSong.mode = notePlan.modeKey
+                        songObj.mode = notePlan.modeKey
+                }
+
+                if(songObj.sound && songObj.sound.buffer){
+                        songObj.sound.gain = snd.musicGain
+                }else if(songObj.music !== "muted"){
 			this.addPromise(snd.musicGain.load(songObj.music).then(sound => {
 				songObj.sound = sound
 			}), songObj.music.url)
 		}
-		var chart = songObj.chart
-		if(chart && chart.separateDiff){
-			var chartDiff = this.selectedSong.difficulty
-			chart = chart[chartDiff]
-		}
-		if(chart){
-			this.addPromise(chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
-				this.songData = data.replace(/\0/g, "").split("\n")
-			}), chart.url)
-		}else{
-			this.songData = ""
-		}
+                if(notePlan.type === "rest" && notePlan.promise){
+                        this.addPromise(notePlan.promise.then(result => {
+                                this.songData = {format: "parsed-chart", data: result.chart}
+                                if(result && result.meta){
+                                        this.selectedSong.notesMeta = result.meta
+                                }
+                                if(result && result.durationMs && !songObj.duration_ms){
+                                        songObj.duration_ms = result.durationMs
+                                }
+                        }), notePlan.requestUrl || "rest-notes")
+                }else{
+                        var chart = songObj.chart
+                        if(chart && chart.separateDiff){
+                                var chartDiff = this.selectedSong.difficulty
+                                chart = chart[chartDiff]
+                        }
+                        if(chart){
+                                this.addPromise(chart.read(song.type === "tja" ? "utf-8" : "").then(data => {
+                                        this.songData = data.replace(/\0/g, "").split("\n")
+                                }), chart.url)
+                        }else{
+                                this.songData = ""
+                        }
+                }
 		if(songObj.lyricsFile && !songObj.lyricsData && !this.multiplayer && (!this.touchEnabled || this.autoPlayEnabled) && settings.getItem("showLyrics")){
 			this.addPromise(songObj.lyricsFile.read().then(data => {
 				songObj.lyricsData = data

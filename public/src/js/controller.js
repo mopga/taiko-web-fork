@@ -37,12 +37,17 @@ class Controller{
 			loader.changePage("game", false)
 		}
 		
-		if(selectedSong.type === "tja"){
-			this.parsedSongData = new ParseTja(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
-		}else{
-			this.parsedSongData = new ParseOsu(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
-		}
-		this.offset = this.parsedSongData.soundOffset
+                if(songData && typeof songData === "object" && songData.format === "parsed-chart" && songData.data){
+                        this.parsedSongData = songData.data
+                }else if(selectedSong.type === "tja"){
+                        this.parsedSongData = new ParseTja(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
+                }else{
+                        this.parsedSongData = new ParseOsu(songData, selectedSong.difficulty, selectedSong.stars, selectedSong.offset)
+                }
+                if(!this.parsedSongData){
+                        this.parsedSongData = {circles: [], measures: [], events: [], branches: null, beatInfo: {beatInterval: 600}, soundOffset: 0}
+                }
+                this.offset = this.parsedSongData.soundOffset
 		
 		var maxCombo = this.parsedSongData.circles.filter(circle => ["don", "ka", "daiDon", "daiKa"].indexOf(circle.type) > -1 && (!circle.branch || circle.branch.name == "master")).length
 		if (maxCombo >= 50) {
