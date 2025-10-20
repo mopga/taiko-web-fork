@@ -889,7 +889,16 @@ def route_api_songs():
     manifest_collection = _get_manifest_collection()
     if manifest_collection is None:
         response = make_response(jsonify([]))
-        response.headers['Cache-Control'] = 'public, max-age=60'
+        response.headers['Cache-Control'] = 'public, max-age=86400, stale-while-revalidate=600'
+        return response
+
+    meta = _load_manifest_meta()
+    etag = meta.get('checksum') if isinstance(meta, dict) else None
+    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    if etag and request.headers.get('If-None-Match') == etag:
+        response = make_response('', 304)
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
         return response
 
     try:
@@ -935,15 +944,6 @@ def route_api_songs():
     except Exception:
         app.logger.exception('Failed to query songs manifest')
         payload = []
-
-    meta = _load_manifest_meta()
-    etag = meta.get('checksum') if isinstance(meta, dict) else None
-    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
-    if etag and request.headers.get('If-None-Match') == etag:
-        response = make_response('', 304)
-        response.headers['ETag'] = etag
-        response.headers['Cache-Control'] = cache_control
-        return response
 
     response = make_response(jsonify(payload))
     if etag:
@@ -1385,10 +1385,6 @@ def route_import_report():
 
 
 def invalidate_song_cache():
-    try:
-        app.cache.delete_memoized(route_api_songs)
-    except Exception:
-        pass
     try:
         app.cache.delete_memoized(route_api_categories)
     except Exception:

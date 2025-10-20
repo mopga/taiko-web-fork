@@ -1,4 +1,9 @@
 const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
+const songsCatalogCache = {
+        pages: Object.create(null),
+        lastResult: [],
+        details: Object.create(null),
+};
 
 function resolveManifestStatus(manifest){
         if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
@@ -744,9 +749,11 @@ class Loader{
                         promise = promise.then(() => {
                                 if(request.status === 200){
                                         return request.response
-                                }else{
-                                        return Promise.reject(`${url} (${request.status})`)
                                 }
+                                if(request.status === 304){
+                                        return ""
+                                }
+                                return Promise.reject(`${url} (${request.status})`)
                         })
                 }
                 if(customRequest){
@@ -758,9 +765,40 @@ class Loader{
         loadSongsCatalog(){
                 const limit = 200
                 const collected = []
-                const fetchPage = (page) => {
+                const loaderInstance = this
+                const pageCache = songsCatalogCache.pages || (songsCatalogCache.pages = Object.create(null))
+                const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
+
+                function pruneCacheAfter(page){
+                        Object.keys(pageCache).forEach(key => {
+                                const numericKey = parseInt(key, 10)
+                                if(Number.isFinite(numericKey) && numericKey > page){
+                                        delete pageCache[key]
+                                }
+                        })
+                }
+
+                function reuseCachedPage(page){
+                        const cachedPage = pageCache && pageCache[page]
+                        if(Array.isArray(cachedPage) && cachedPage.length){
+                                cachedPage.forEach(detail => {
+                                        if(detail && typeof detail === "object"){
+                                                collected.push(detail)
+                                        }
+                                })
+                                if(cachedPage.length === limit){
+                                        return fetchPage(page + 1)
+                                }
+                        }
+                        return null
+                }
+
+                function fetchPage(page){
                         const url = `api/songs?page=${page}&limit=${limit}`
-                        return this.ajax(url).then(response => {
+                        return loaderInstance.ajax(url).then(response => {
+                                if(response === "" || response === null || typeof response === "undefined"){
+                                        return reuseCachedPage(page)
+                                }
                                 let entries
                                 try{
                                         entries = JSON.parse(response)
@@ -768,35 +806,65 @@ class Loader{
                                         entries = []
                                 }
                                 if(!Array.isArray(entries) || entries.length === 0){
-                                        return
+                                        if(pageCache){
+                                                delete pageCache[page]
+                                                pruneCacheAfter(page)
+                                        }
+                                        return null
                                 }
                                 const detailPromises = entries.map(entry => {
                                         if(!entry || typeof entry.id !== "string" || !entry.id){
                                                 return Promise.resolve(null)
                                         }
                                         const detailUrl = `api/song/${encodeURIComponent(entry.id)}`
-                                        return this.ajax(detailUrl).then(detailResponse => {
-                                                try{
-                                                        return JSON.parse(detailResponse)
-                                                }catch(err){
-                                                        return null
+                                        return loaderInstance.ajax(detailUrl).then(detailResponse => {
+                                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
+                                                        return detailCache[entry.id] || null
                                                 }
-                                        }).catch(() => null)
+                                                try{
+                                                        const parsed = JSON.parse(detailResponse)
+                                                        if(parsed && typeof parsed === "object"){
+                                                                const detailId = typeof parsed.id === "string" && parsed.id ? parsed.id : entry.id
+                                                                if(detailId){
+                                                                        detailCache[detailId] = parsed
+                                                                }
+                                                        }
+                                                        return parsed
+                                                }catch(err){
+                                                        return detailCache[entry.id] || null
+                                                }
+                                        }).catch(() => detailCache[entry.id] || null)
                                 })
                                 return Promise.all(detailPromises).then(details => {
+                                        const pageDetails = []
                                         details.forEach(detail => {
                                                 if(detail && typeof detail === "object"){
                                                         collected.push(detail)
+                                                        pageDetails.push(detail)
                                                 }
                                         })
+                                        pageCache[page] = pageDetails
+                                        if(pageDetails.length < limit){
+                                                pruneCacheAfter(page)
+                                        }
                                         if(entries.length === limit){
                                                 return fetchPage(page + 1)
                                         }
                                         return null
                                 })
-                        }).catch(() => null)
+                        }).catch(() => reuseCachedPage(page))
                 }
-                return fetchPage(1).then(() => collected)
+
+                return fetchPage(1).then(() => {
+                        if(collected.length === 0){
+                                if(Array.isArray(songsCatalogCache.lastResult) && songsCatalogCache.lastResult.length){
+                                        return songsCatalogCache.lastResult.slice()
+                                }
+                                return []
+                        }
+                        songsCatalogCache.lastResult = collected.slice()
+                        return collected
+                })
         }
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null
