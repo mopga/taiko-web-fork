@@ -153,6 +153,31 @@ class LoadSong{
                 }
 
                 const notesHandling = Promise.resolve(notesPromise).then(result => {
+                        if(result && result.rest === true){
+                                if(Array.isArray(result.notes) && result.notes.length){
+                                        if(result.modeKey){
+                                                this.selectedSong.mode = result.modeKey
+                                                songObj.mode = result.modeKey
+                                        }
+                                        if(result.meta){
+                                                this.selectedSong.notesMeta = result.meta
+                                        }else{
+                                                this.selectedSong.notesMeta = {
+                                                        mode: result.modeKey || selection.mode || songObj.mode || "standard",
+                                                        totalNotes: result.notes.length
+                                                }
+                                        }
+                                        if(result.durationMs && !songObj.duration_ms){
+                                                songObj.duration_ms = result.durationMs
+                                        }
+                                        if(result.parsedChart){
+                                                this.songData = {format: "parsed-chart", data: result.parsedChart}
+                                        }else{
+                                                this.songData = {format: "note-events", data: result}
+                                        }
+                                }
+                                return true
+                        }
                         if(result && Array.isArray(result.notes) && result.notes.length){
                                 if(result.modeKey){
                                         this.selectedSong.mode = result.modeKey
