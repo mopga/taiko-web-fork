@@ -130,10 +130,22 @@ class Loader{
 			}), url)
 		})
 		
-		this.addPromise(this.ajax("api/categories").then(cats => {
-			assets.categories = JSON.parse(cats)
-			assets.categories.forEach(cat => {
-				if(cat.song_skin){
+                this.addPromise(this.ajax("api/modes").then(response => {
+                        try{
+                                var manifest = JSON.parse(response)
+                        }catch(e){
+                                return
+                        }
+                        assets.modesManifest = manifest
+                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.updateManifest === "function"){
+                                modesHelper.updateManifest(manifest)
+                        }
+                }).catch(() => {}), "api/modes")
+
+                this.addPromise(this.ajax("api/categories").then(cats => {
+                        assets.categories = JSON.parse(cats)
+                        assets.categories.forEach(cat => {
+                                if(cat.song_skin){
 					cat.songSkin = cat.song_skin //rename the song_skin property and add category title to categories array
 					delete cat.song_skin
 					cat.songSkin.infoFill = cat.songSkin.info_fill
@@ -141,28 +153,32 @@ class Loader{
 				}
 			})
 			
-			assets.categories.push({
-				title: "default",
-				songSkin: {
-					background: "#ececec",
-					border: ["#fbfbfb", "#8b8b8b"],
-					outline: "#656565",
-					infoFill: "#656565"
-				}
-			})
-		}), "api/categories")
+                        assets.categories.push({
+                                title: "default",
+                                songSkin: {
+                                        background: "#ececec",
+                                        border: ["#fbfbfb", "#8b8b8b"],
+                                        outline: "#656565",
+                                        infoFill: "#656565"
+                                }
+                        })
+                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.registerCategories === "function"){
+                                modesHelper.registerCategories(assets.categories)
+                        }
+                }), "api/categories")
 		
 		var url = gameConfig.assets_baseurl + "img/vectors.json" + this.queryString
 		this.addPromise(this.ajax(url).then(response => {
 			vectors = JSON.parse(response)
 		}), url)
 		
-		this.afterJSCount =
-			[
-				"api/songs",
-				"blurPerformance",
-				"categories"
-			].length +
+                this.afterJSCount =
+                        [
+                                "api/songs",
+                                "api/modes",
+                                "blurPerformance",
+                                "categories"
+                        ].length +
 			assets.audioSfx.length +
 			assets.audioMusic.length +
 			assets.audioSfxLR.length +
@@ -182,6 +198,9 @@ class Loader{
                                 songs = JSON.parse(songs);
                                 songs = songs.filter(song => song.enabled !== false);
                                 songs.forEach(song => {
+                                        if(typeof modesHelper === "object" && modesHelper && typeof modesHelper.enrichSongMetadata === "function"){
+                                                modesHelper.enrichSongMetadata(song)
+                                        }
                                         var paths = song.paths || {}
                                         if(!Array.isArray(song.import_issues)){
                                                 song.import_issues = []

@@ -13,9 +13,15 @@ def test_normalize_longs_relative_to_measure_start():
     normalized = normalize_measures_relative(measures)
 
     assert normalized[0]["start_ms"] == 1000
-    assert normalized[0]["notes"][0]["at"] == 0
-    assert normalized[0]["longs"][0]["at"] == 100
-    assert normalized[0]["longs"][0]["end_at"] == 500
+    note = normalized[0]["notes"][0]
+    assert note["at"] == 0
+    assert note["offset"] == 0
+    assert note["p"] == 0.0
+    assert note["kind"] == 1
+    long_note = normalized[0]["longs"][0]
+    assert long_note["at"] == 100
+    assert long_note["end_at"] == 500
+    assert long_note["len_ms"] == 400
 
 
 def test_normalize_longs_without_notes_uses_long_start():
@@ -31,6 +37,8 @@ def test_normalize_longs_without_notes_uses_long_start():
 
     assert normalized[0]["start_ms"] == 2400
     assert normalized[0]["duration_ms"] == int(round(4 * (60000 / 150)))
-    assert normalized[0]["longs"][0]["at"] == 0
-    assert normalized[0]["longs"][0]["end_at"] == 600
+    long_note = normalized[0]["longs"][0]
+    assert long_note["at"] == 0
+    assert long_note["end_at"] == 600
+    assert long_note["len_ms"] == 600
     assert normalized[0]["notes"] == []

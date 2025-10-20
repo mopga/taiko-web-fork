@@ -36,40 +36,51 @@ def select_best_chart(
         )
         if token
     )
-    best_chart: Optional[Mapping[str, object]] = None
-    best_priority = (float("inf"), float("inf"))
 
-    for index, chart in enumerate(charts):
-        if not isinstance(chart, Mapping):
-            continue
+    best_chart: Optional[Mapping[str, object]] = None
+    best_priority: Optional[tuple[int, int, int]] = None
+
+    prefer_mode_order = {
+        token: idx for idx, token in enumerate(prefer_mode_tokens)
+    }
+
+    def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int, int]:
+        mode_value = str(chart.get("mode") or "").strip().casefold()
+        mode_priority = prefer_mode_order.get(mode_value, len(prefer_mode_tokens))
+
+        score = 0
         if course_token:
+            display_course = str(chart.get("display_course") or "").strip().casefold()
+            canonical_course = str(chart.get("canonical_course") or "").strip().casefold()
+            if display_course == course_token:
+                score -= 3
+            if canonical_course == course_token:
+                score -= 2
+        return (mode_priority, score, index)
+
+    filtered: list[tuple[int, Mapping[str, object]]] = []
+    if course_token:
+        for index, chart in enumerate(charts):
+            if not isinstance(chart, Mapping):
+                continue
             tokens = normalise_course_tokens(chart)
             if course_token not in tokens:
                 continue
-        mode_value = str(chart.get("mode") or "").strip().casefold()
-        if prefer_mode_tokens:
-            try:
-                mode_priority = prefer_mode_tokens.index(mode_value)
-            except ValueError:
-                mode_priority = len(prefer_mode_tokens)
-        else:
-            mode_priority = 0
-        priority = (mode_priority, index)
-        if priority < best_priority:
+            filtered.append((index, chart))
+
+    candidates = filtered if filtered else [
+        (index, chart)
+        for index, chart in enumerate(charts)
+        if isinstance(chart, Mapping)
+    ]
+
+    for index, chart in candidates:
+        priority = _score_chart(index, chart)
+        if best_priority is None or priority < best_priority:
             best_priority = priority
             best_chart = chart
 
-    if best_chart is not None:
-        return best_chart
-
-    for chart in charts:
-        if not isinstance(chart, Mapping):
-            continue
-        mode_value = str(chart.get("mode") or "").strip().casefold()
-        if prefer_mode_tokens and mode_value in prefer_mode_tokens:
-            return chart
-
-    return None
+    return best_chart
 
 
 __all__ = ["normalise_course_tokens", "select_best_chart"]

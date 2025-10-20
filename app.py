@@ -38,9 +38,32 @@ from redis import Redis
 from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
+from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+_FEATURE_MODES_MANIFEST_ENV = "FEATURE_MODES_MANIFEST"
+_MODES_MANIFEST_CACHE: dict[str, object] = {"expires_at": 0.0, "payload": None}
+
+
+def _parse_bool_env(value: str) -> bool:
+    token = value.strip().lower()
+    return token not in {"0", "false", "no", "off"}
+
+
+def is_modes_manifest_enabled() -> bool:
+    env_value = os.environ.get(_FEATURE_MODES_MANIFEST_ENV)
+    if env_value is not None:
+        try:
+            return _parse_bool_env(env_value)
+        except AttributeError:
+            return bool(env_value)
+    config_value = getattr(config, "FEATURE_MODES_MANIFEST", None)
+    if config_value is not None:
+        return bool(config_value)
+    return True
 
 
 def _load_config_module():
@@ -864,6 +887,38 @@ def route_api_songs():
 
     return cache_wrap(flask.jsonify(songs), 60)
 
+
+@app.route(basedir + 'api/modes')
+def route_api_modes():
+    if not is_modes_manifest_enabled():
+        return jsonify({'status': 'disabled'})
+
+    now = time.time()
+    cached_payload = _MODES_MANIFEST_CACHE.get('payload')
+    expires_at = float(_MODES_MANIFEST_CACHE.get('expires_at', 0.0))
+    if cached_payload and expires_at > now:
+        return jsonify(cached_payload)
+
+    try:
+        categories_cursor = db.categories.find({}, {'_id': False})
+        categories = list(categories_cursor)
+    except Exception:
+        categories = []
+
+    manifest = build_modes_manifest(categories, cache_ttl=DEFAULT_CACHE_TTL)
+    ttl_value = manifest.get('cache_ttl', DEFAULT_CACHE_TTL)
+    try:
+        ttl_seconds = int(ttl_value)
+    except (TypeError, ValueError):
+        ttl_seconds = DEFAULT_CACHE_TTL
+    if ttl_seconds <= 0:
+        ttl_seconds = DEFAULT_CACHE_TTL
+    _MODES_MANIFEST_CACHE['payload'] = manifest
+    _MODES_MANIFEST_CACHE['expires_at'] = now + ttl_seconds
+    LOGGER.info('modes-manifest: count=%d', len(manifest.get('modes', [])))
+    return jsonify(manifest)
+
+
 @app.route(basedir + 'api/tower/chart')
 @app.cache.cached(timeout=15, query_string=True)
 def route_api_tower_chart():
@@ -908,7 +963,21 @@ def route_api_tower_chart():
     if duration_ms < 0:
         duration_ms = 0
     chart_data['duration_ms'] = duration_ms
-    chart_data['measures'] = normalize_measures_relative(measures)
+    normalized_measures = normalize_measures_relative(measures)
+    chart_data['measures'] = normalized_measures
+
+    total_notes = chart_data.get('total_notes')
+    if not isinstance(total_notes, int):
+        try:
+            total_notes = int(total_notes)
+        except (TypeError, ValueError):
+            total_notes = sum(len(m.get('notes', [])) for m in normalized_measures)
+    course_label = best_chart.get('display_course') or course_param
+    duration_value = chart_data.get('duration_ms')
+    try:
+        duration_int = int(duration_value)
+    except (TypeError, ValueError):
+        duration_int = duration_ms
 
     response = {
         'status': 'ok',
@@ -917,7 +986,91 @@ def route_api_tower_chart():
         'display_course': best_chart.get('display_course'),
         'chart_data': chart_data,
     }
+    LOGGER.info('tower-chart: title=%s course=%s notes=%d dur_ms=%d', title, course_label, total_notes, duration_int)
+    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song.get('title'), course_label, total_notes, duration_int)
     return jsonify(response)
+
+
+@app.route(basedir + 'api/dan/chart')
+@app.cache.cached(timeout=15, query_string=True)
+def route_api_dan_chart():
+    if not is_modes_manifest_enabled():
+        return jsonify({'status': 'disabled'}), 404
+
+    title = request.args.get('title', '').strip()
+    if not title:
+        return jsonify({'status': 'error', 'message': 'missing_title'}), 400
+    rank_raw = request.args.get('rank', '').strip()
+    if not rank_raw:
+        return jsonify({'status': 'error', 'message': 'missing_rank'}), 400
+    mode_param = request.args.get('mode', '').strip().casefold() or 'dan'
+    rank_param = rank_raw.casefold()
+
+    projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
+    song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
+    if song is None:
+        normalised_title = title.casefold()
+        song = db.songs.find_one({'titleNormalized': normalised_title}, projection)
+    if song is None:
+        return jsonify({'status': 'error', 'message': 'not_found'}), 404
+
+    charts = song.get('charts') if isinstance(song.get('charts'), list) else []
+    prefer_modes = (mode_param,) if mode_param else ('dan',)
+    best_chart = select_best_chart(charts, rank_param, prefer_modes=prefer_modes)
+
+    if best_chart is None:
+        return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
+
+    chart_data_source = best_chart.get('chart_data')
+    if isinstance(chart_data_source, dict):
+        chart_data = dict(chart_data_source)
+    else:
+        chart_data = {
+            'course': best_chart.get('canonical_course') or best_chart.get('course'),
+            'total_notes': best_chart.get('total_notes', 0),
+            'measures': best_chart.get('measures', []),
+        }
+
+    measures = chart_data.get('measures')
+    if not isinstance(measures, list):
+        measures = []
+    duration_value = chart_data.get('duration_ms')
+    try:
+        duration_ms = int(duration_value)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    if duration_ms < 0:
+        duration_ms = 0
+    chart_data['duration_ms'] = duration_ms
+    normalized_measures = normalize_measures_relative(measures)
+    chart_data['measures'] = normalized_measures
+
+    total_notes = chart_data.get('total_notes')
+    if not isinstance(total_notes, int):
+        try:
+            total_notes = int(total_notes)
+        except (TypeError, ValueError):
+            total_notes = sum(len(m.get('notes', [])) for m in normalized_measures)
+
+    rank_label = best_chart.get('display_course') or rank_param
+    duration_value = chart_data.get('duration_ms')
+    try:
+        duration_int = int(duration_value)
+    except (TypeError, ValueError):
+        duration_int = duration_ms
+
+    response = {
+        'status': 'ok',
+        'title': song.get('title'),
+        'mode': best_chart.get('mode'),
+        'display_course': best_chart.get('display_course'),
+        'chart_data': chart_data,
+    }
+
+    LOGGER.info('dan-chart: title=%s rank=%s notes=%d dur_ms=%d', title, rank_label, total_notes, duration_int)
+    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song.get('title'), rank_label, total_notes, duration_int)
+    return jsonify(response)
+
 
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)
