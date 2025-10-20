@@ -2309,77 +2309,146 @@ class SongScanner:
                     db_name or '<unknown>',
                     ok_value,
                 )
-        if self._state_collection is not None:
+        ensure_indexes_lock_collection = getattr(self.db, 'admin_locks', None)
+        ensure_indexes_owner = f"{os.getpid()}-{time.time()}"
+        ensure_indexes_lock_timeout = 300.0
+        ensure_indexes_poll_interval = 0.2
+        ensure_indexes_target = 'songs_group_key_scanner_unique'
+
+        def _index_present() -> bool:
             try:
-                self._state_collection.create_index('tja_path', unique=True)
-            except Exception:  # pragma: no cover - tolerate missing create_index
-                LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
-        try:
-            self.db.songs.drop_index('id_1')
-        except Exception:  # pragma: no cover - tolerate legacy index absence
-            pass
-        try:
-            self.db.songs.drop_index('songs_id_unique')
-        except Exception:  # pragma: no cover - tolerate missing index
-            pass
-        try:
-            id_string_partial_filter = {'id': {'$type': 'string'}}
-            self.db.songs.create_index(
-                'id',
-                name='songs_id_unique',
-                unique=True,
-                partialFilterExpression=id_string_partial_filter,
-            )
-        except Exception:  # pragma: no cover - tolerate missing create_index
-            LOGGER.debug('Failed to ensure partial unique index for songs.id')
-        try:
-            self.db.songs.drop_index('group_key_1')
-        except Exception:  # pragma: no cover - tolerate legacy index absence
-            pass
-        try:
-            self.db.songs.drop_index('songs_group_key_unique')
-        except Exception:
-            pass
-        scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
-        try:
-            self.db.songs.create_index(
-                [('group_key', 1), ('scanner_stable_id', 1)],
-                name='songs_group_key_scanner_unique',
-                unique=True,
-                partialFilterExpression=scanner_stable_string_partial_filter,
-            )
-        except Exception:  # pragma: no cover - tolerate missing create_index
-            LOGGER.debug('Failed to ensure compound unique index for songs group key')
-        try:
-            self.db.songs.drop_index('songs_scanner_stable_unique')
-        except Exception:  # pragma: no cover - tolerate legacy index absence
-            pass
-        try:
-            self.db.songs.create_index(
-                'scanner_stable_id',
-                name='songs_scanner_stable_id_unique',
-                unique=True,
-                partialFilterExpression=scanner_stable_string_partial_filter,
-            )
-        except Exception:  # pragma: no cover - tolerate missing create_index
-            LOGGER.debug('Failed to ensure unique index for scanner stable id')
-        try:
-            self.db.songs.create_index(
-                'group_key',
-                name='songs_group_key_lookup',
-            )
-        except Exception:  # pragma: no cover - tolerate missing create_index
-            LOGGER.debug('Failed to ensure non-unique index for songs group key')
-        try:
-            counters = getattr(self.db, 'counters', None)
-            if counters is not None:
-                counters.update_one(
-                    {'_id': 'songs'},
-                    {'$setOnInsert': {'seq': 0}},
-                    upsert=True,
+                return any(
+                    index.get('name') == ensure_indexes_target
+                    for index in self.db.songs.list_indexes()
                 )
-        except Exception:  # pragma: no cover - tolerate best effort counter initialisation
-            LOGGER.debug('Failed to ensure songs counter document')
+            except Exception:  # pragma: no cover - tolerate transient list indexes errors
+                LOGGER.debug('Failed to list indexes while waiting for ensure lock', exc_info=True)
+                return False
+
+        def _run_index_migration() -> None:
+            if self._state_collection is not None:
+                try:
+                    self._state_collection.create_index('tja_path', unique=True)
+                except Exception:  # pragma: no cover - tolerate missing create_index
+                    LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
+            try:
+                self.db.songs.drop_index('id_1')
+            except Exception:  # pragma: no cover - tolerate legacy index absence
+                pass
+            try:
+                self.db.songs.drop_index('songs_id_unique')
+            except Exception:  # pragma: no cover - tolerate missing index
+                pass
+            try:
+                id_string_partial_filter = {'id': {'$type': 'string'}}
+                self.db.songs.create_index(
+                    'id',
+                    name='songs_id_unique',
+                    unique=True,
+                    partialFilterExpression=id_string_partial_filter,
+                )
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure partial unique index for songs.id')
+            try:
+                self.db.songs.drop_index('group_key_1')
+            except Exception:  # pragma: no cover - tolerate legacy index absence
+                pass
+            try:
+                self.db.songs.drop_index('songs_group_key_unique')
+            except Exception:
+                pass
+            scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
+            try:
+                self.db.songs.create_index(
+                    [('group_key', 1), ('scanner_stable_id', 1)],
+                    name=ensure_indexes_target,
+                    unique=True,
+                    partialFilterExpression=scanner_stable_string_partial_filter,
+                )
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure compound unique index for songs group key')
+            try:
+                self.db.songs.drop_index('songs_scanner_stable_unique')
+            except Exception:  # pragma: no cover - tolerate legacy index absence
+                pass
+            try:
+                self.db.songs.create_index(
+                    'scanner_stable_id',
+                    name='songs_scanner_stable_id_unique',
+                    unique=True,
+                    partialFilterExpression=scanner_stable_string_partial_filter,
+                )
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure unique index for scanner stable id')
+            try:
+                self.db.songs.create_index(
+                    'group_key',
+                    name='songs_group_key_lookup',
+                )
+            except Exception:  # pragma: no cover - tolerate missing create_index
+                LOGGER.debug('Failed to ensure non-unique index for songs group key')
+            try:
+                counters = getattr(self.db, 'counters', None)
+                if counters is not None:
+                    counters.update_one(
+                        {'_id': 'songs'},
+                        {'$setOnInsert': {'seq': 0}},
+                        upsert=True,
+                    )
+            except Exception:  # pragma: no cover - tolerate best effort counter initialisation
+                LOGGER.debug('Failed to ensure songs counter document')
+
+        lock_acquired = False
+        if ensure_indexes_lock_collection is not None and hasattr(ensure_indexes_lock_collection, 'find_one_and_update'):
+            try:
+                lock_result = ensure_indexes_lock_collection.find_one_and_update(
+                    {'_id': 'ensure_indexes'},
+                    {'$setOnInsert': {'owner': ensure_indexes_owner, 'ts': time.time()}},
+                    upsert=True,
+                    return_document=ReturnDocument.BEFORE,
+                )
+            except Exception:  # pragma: no cover - tolerate lock acquisition failure
+                LOGGER.debug('Failed to acquire ensure_indexes advisory lock', exc_info=True)
+            else:
+                if lock_result is None:
+                    lock_acquired = True
+                elif _index_present():
+                    LOGGER.debug('Indexes already present; skipping ensure')
+                else:
+                    wait_started = time.time()
+                    while time.time() - wait_started < ensure_indexes_lock_timeout:
+                        if _index_present():
+                            break
+                        time.sleep(ensure_indexes_poll_interval)
+                    if not _index_present():
+                        try:
+                            takeover_result = ensure_indexes_lock_collection.find_one_and_update(
+                                {
+                                    '_id': 'ensure_indexes',
+                                    'ts': {'$lt': time.time() - ensure_indexes_lock_timeout},
+                                },
+                                {'$set': {'owner': ensure_indexes_owner, 'ts': time.time()}},
+                                return_document=ReturnDocument.BEFORE,
+                            )
+                        except Exception:  # pragma: no cover - tolerate takeover failure
+                            LOGGER.debug('Failed to steal stale ensure_indexes lock', exc_info=True)
+                        else:
+                            if takeover_result is not None:
+                                lock_acquired = True
+        if lock_acquired or ensure_indexes_lock_collection is None:
+            _run_index_migration()
+            if ensure_indexes_lock_collection is not None:
+                try:
+                    ensure_indexes_lock_collection.update_one(
+                        {'_id': 'ensure_indexes', 'owner': ensure_indexes_owner},
+                        {'$set': {'ts': time.time(), 'ready': True}},
+                    )
+                except Exception:  # pragma: no cover - tolerate failure to update lock metadata
+                    LOGGER.debug('Failed to update ensure_indexes lock metadata', exc_info=True)
+        else:
+            if not _index_present():
+                LOGGER.warning('songs_group_key_scanner_unique index still missing after waiting')
+                _run_index_migration()
         LOGGER.info('init songs indexes ok')
         self._import_issues_collection = getattr(self.db, 'import_issues', None)
         if self._import_issues_collection is not None:
