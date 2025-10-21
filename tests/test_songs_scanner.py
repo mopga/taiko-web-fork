@@ -374,6 +374,7 @@ class _DummyDB:
         self.categories = _MemoryCollection()
         self.song_scanner_state = _MemoryCollection()
         self.import_issues = _MemoryCollection()
+        self.songs_manifest = _MemoryCollection()
 
 
 class TestSongsScanner(unittest.TestCase):
@@ -3086,6 +3087,85 @@ LEVEL:7
         self.assertGreater(chart.get('total_notes', 0), 0)
         self.assertEqual(chart.get('hit_notes', 0), 0)
         self.assertNotIn('empty-chart', chart.get('issues', []))
+
+    def test_manifest_checksum_updates_on_content_change(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        chart_path = songs_dir / "song.tja"
+        chart_path.write_text("\n".join([
+            "TITLE:Checksum", "WAVE:main.ogg", "COURSE:Oni", "LEVEL:3", "#START", "1111,", "#END"
+        ]), encoding="utf-8")
+        audio_path = songs_dir / "main.ogg"
+        audio_path.write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan(full=True)
+        meta_docs = [doc for doc in db.songs_manifest._docs if isinstance(doc, dict) and doc.get('_id') == '__meta__']
+        self.assertEqual(len(meta_docs), 1)
+        first_meta = meta_docs[0]
+        first_checksum = first_meta.get('manifest_checksum') or first_meta.get('checksum')
+        self.assertIsInstance(first_checksum, str)
+        self.assertEqual(first_summary['manifest_checksum'], first_checksum)
+
+        chart_path.write_text("\n".join([
+            "TITLE:Checksum", "WAVE:main.ogg", "COURSE:Oni", "LEVEL:5", "#START", "2222,", "#END"
+        ]), encoding="utf-8")
+
+        second_summary = scanner.scan(full=True)
+        meta_docs = [doc for doc in db.songs_manifest._docs if isinstance(doc, dict) and doc.get('_id') == '__meta__']
+        second_meta = meta_docs[0]
+        second_checksum = second_meta.get('manifest_checksum') or second_meta.get('checksum')
+        self.assertNotEqual(first_checksum, second_checksum)
+        self.assertEqual(second_summary['manifest_checksum'], second_checksum)
+
+    def test_song_document_has_incremental_metadata_fields(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = song_dir / "example.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Incremental",
+            "WAVE:main.ogg",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        audio_path = song_dir / "main.ogg"
+        audio_path.write_bytes(b"audio-bytes")
+        preview_path = song_dir / "preview.ogg"
+        preview_path.write_bytes(b"preview-bytes")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+        self.assertEqual(summary['inserted'], 1)
+        inserted = db.songs.inserted[0]
+        self.assertIn('sha1', inserted)
+        self.assertIsInstance(inserted.get('sha1'), str)
+        self.assertIn('mtime', inserted)
+        self.assertIsInstance(inserted.get('mtime'), (int, type(None)))
+        self.assertIn('preview_available', inserted)
+        self.assertTrue(inserted.get('preview_available'))
+        self.assertIn('parse_failed_at', inserted)
+        self.assertIsNone(inserted.get('parse_failed_at'))
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

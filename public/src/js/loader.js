@@ -3,7 +3,142 @@ const songsCatalogCache = {
         pages: Object.create(null),
         lastResult: [],
         details: Object.create(null),
+        etag: null,
 };
+
+class CatalogDetailBatcher{
+        constructor(options){
+                this.maxConcurrency = options && options.maxConcurrency ? options.maxConcurrency : 6;
+                this.batchInterval = options && options.batchInterval ? options.batchInterval : 16;
+                this.includeNotes = !options || options.includeNotes !== false;
+                this._queue = new Map();
+                this._pending = new Set();
+                this._inFlight = 0;
+                this._timer = null;
+        }
+        load(id){
+                if(typeof id !== "string" || !id){
+                        return Promise.resolve(null);
+                }
+                return new Promise((resolve, reject) => {
+                        if(!this._queue.has(id)){
+                                this._queue.set(id, []);
+                        }
+                        this._queue.get(id).push({resolve, reject});
+                        this._schedule();
+                });
+        }
+        _schedule(){
+                if(this._timer !== null){
+                        return;
+                }
+                this._timer = setTimeout(() => {
+                        this._timer = null;
+                        this._flush();
+                }, this.batchInterval);
+        }
+        _flush(){
+                if(this._inFlight >= this.maxConcurrency){
+                        this._schedule();
+                        return;
+                }
+                const batch = [];
+                for(const [id] of this._queue){
+                        if(this._pending.has(id)){
+                                continue;
+                        }
+                        this._pending.add(id);
+                        batch.push(id);
+                        if(batch.length >= 50){
+                                break;
+                        }
+                }
+                if(batch.length === 0){
+                        return;
+                }
+                this._inFlight++;
+                const params = batch.map(id => encodeURIComponent(id)).join(",");
+                let url = `api/songs/details?ids=${params}`;
+                if(!this.includeNotes){
+                        url += "&notes=none";
+                }
+                const handleSuccess = data => {
+                        const map = {};
+                        if(Array.isArray(data)){
+                                data.forEach(item => {
+                                        if(item && typeof item === "object" && typeof item.id === "string"){
+                                                map[item.id] = item;
+                                        }
+                                });
+                        }
+                        batch.forEach(id => {
+                                const resolvers = this._queue.get(id) || [];
+                                this._queue.delete(id);
+                                this._pending.delete(id);
+                                const payload = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
+                                resolvers.forEach(entry => {
+                                        try{
+                                                entry.resolve(payload);
+                                        }catch(e){}
+                                });
+                        });
+                };
+                const handleFailure = error => {
+                        batch.forEach(id => {
+                                const resolvers = this._queue.get(id) || [];
+                                this._queue.delete(id);
+                                this._pending.delete(id);
+                                resolvers.forEach(entry => {
+                                        try{
+                                                entry.reject(error);
+                                        }catch(e){}
+                                });
+                        });
+                };
+                const finalize = () => {
+                        this._inFlight--;
+                        if(this._inFlight < 0){
+                                this._inFlight = 0;
+                        }
+                        if(this._queue.size){
+                                this._schedule();
+                        }
+                };
+                const performFetch = () => {
+                        if(typeof fetch === "function"){
+                                return fetch(url, {method: "GET", credentials: "same-origin"}).then(response => {
+                                        if(response.status === 200){
+                                                return response.json();
+                                        }
+                                        if(response.status === 304){
+                                                return [];
+                                        }
+                                        const error = new Error(`${url} (${response.status})`);
+                                        error.status = response.status;
+                                        throw error;
+                                });
+                        }
+                        if(typeof loader === "object" && loader && typeof loader.ajax === "function"){
+                                return loader.ajax(url).then(body => {
+                                        if(body && typeof body === "object" && body.__notModified){
+                                                return [];
+                                        }
+                                        if(typeof body === "string" && body){
+                                                try{
+                                                        return JSON.parse(body);
+                                                }catch(e){
+                                                        return [];
+                                                }
+                                        }
+                                        return [];
+                                });
+                        }
+                        return Promise.resolve([]);
+                };
+                performFetch().then(handleSuccess).catch(handleFailure).finally(finalize);
+        }
+}
+
 
 function resolveManifestStatus(manifest){
         if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
@@ -775,11 +910,16 @@ class Loader{
                 return promise
         }
         loadSongsCatalog(){
-                const HARD_PAGE_CAP = 200
+                const HARD_PAGE_CAP = 8
                 const LIMIT = 200
                 const collected = []
                 const loaderInstance = this
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
+                const detailBatcher = songsCatalogCache.detailBatcher || (songsCatalogCache.detailBatcher = new CatalogDetailBatcher({
+                        maxConcurrency: 6,
+                        batchInterval: 16,
+                        includeNotes: false,
+                }))
                 let pageCache = songsCatalogCache.pages
 
                 function normalisePageCache(existing){
@@ -849,28 +989,19 @@ class Loader{
                         }
                         const detailId = entry.id
                         const cachedDetail = detailCache[detailId]
-                        const url = `api/song/${encodeURIComponent(detailId)}`
-                        return loaderInstance.ajax(url).then(detailResponse => {
-                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
-                                        return cachedDetail || null
-                                }
-                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
-                                        return cachedDetail || null
-                                }
-                                try{
-                                        const parsed = JSON.parse(detailResponse)
-                                        if(parsed && typeof parsed === "object"){
-                                                const stableId = typeof parsed.id === "string" && parsed.id ? parsed.id : detailId
-                                                if(stableId){
-                                                        if(typeof parsed.preview_available === "boolean" && typeof parsed.previewAvailable !== "boolean"){
-                                                                parsed.previewAvailable = parsed.preview_available
-                                                        }
-                                                        detailCache[stableId] = parsed
-                                                }
-                                                return parsed
+                        if(cachedDetail){
+                                return Promise.resolve(cachedDetail)
+                        }
+                        return detailBatcher.load(detailId).then(detailResponse => {
+                                if(detailResponse && typeof detailResponse === "object"){
+                                        if(typeof detailResponse.preview_available === "boolean" && typeof detailResponse.previewAvailable !== "boolean"){
+                                                detailResponse.previewAvailable = detailResponse.preview_available
                                         }
-                                }catch(err){
-                                        return cachedDetail || null
+                                        const stableId = typeof detailResponse.id === "string" && detailResponse.id ? detailResponse.id : detailId
+                                        if(stableId){
+                                                detailCache[stableId] = detailResponse
+                                        }
+                                        return detailResponse
                                 }
                                 return cachedDetail || null
                         }).catch(() => cachedDetail || null)
@@ -883,31 +1014,46 @@ class Loader{
 
                         async function performRequest(url, bypassCache){
                                 if(supportsFetch){
+                                        const headers = {}
+                                        if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
+                                                headers["If-None-Match"] = songsCatalogCache.etag
+                                        }
+                                        if(bypassCache){
+                                                headers["Cache-Control"] = "no-cache"
+                                                headers["Pragma"] = "no-cache"
+                                        }
                                         const init = {
                                                 method: "GET",
                                                 credentials: "same-origin",
+                                                headers,
                                         }
                                         if(bypassCache){
                                                 init.cache = "no-store"
-                                                init.headers = {
-                                                        "Cache-Control": "no-cache",
-                                                        "Pragma": "no-cache",
-                                                }
                                         }
                                         const response = await fetch(url, init)
+                                        const responseEtag = response.headers ? response.headers.get("ETag") : null
+                                        if(responseEtag){
+                                                songsCatalogCache.etag = responseEtag
+                                        }
                                         if(response.status === 304){
-                                                return {notModified: true}
+                                                return {notModified: true, etag: responseEtag}
                                         }
                                         if(response.status === 200){
                                                 const body = await response.text()
-                                                return {body}
+                                                return {body, etag: responseEtag}
                                         }
                                         const error = new Error(`${url} (${response.status})`)
                                         error.status = response.status
                                         throw error
                                 }
+                                let responseEtag = null
                                 return loaderInstance
                                         .ajax(url, request => {
+                                                if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
+                                                        try{
+                                                                request.setRequestHeader("If-None-Match", songsCatalogCache.etag)
+                                                        }catch(e){}
+                                                }
                                                 if(bypassCache){
                                                         try{
                                                                 request.setRequestHeader("Cache-Control", "no-cache")
@@ -916,16 +1062,24 @@ class Loader{
                                                                 request.setRequestHeader("Pragma", "no-cache")
                                                         }catch(e){}
                                                 }
+                                                request.addEventListener("load", () => {
+                                                        try{
+                                                                responseEtag = request.getResponseHeader("ETag")
+                                                                if(responseEtag){
+                                                                        songsCatalogCache.etag = responseEtag
+                                                                }
+                                                        }catch(e){}
+                                                })
                                         })
                                         .then(result => {
                                                 if(result && typeof result === "object" && result.__notModified){
-                                                        return {notModified: true}
+                                                        return {notModified: true, etag: responseEtag}
                                                 }
-                                                return {body: result}
+                                                return {body: result, etag: responseEtag}
                                         })
                                         .catch(error => {
                                                 if(error && typeof error === "object" && error.__notModified){
-                                                        return {notModified: true}
+                                                        return {notModified: true, etag: responseEtag}
                                                 }
                                                 throw error
                                         })
@@ -941,7 +1095,13 @@ class Loader{
                                 if(retry.notModified){
                                         return []
                                 }
+                                if(typeof retry.etag === "string" && retry.etag){
+                                        songsCatalogCache.etag = retry.etag
+                                }
                                 return retry.body
+                        }
+                        if(typeof initial.etag === "string" && initial.etag){
+                                songsCatalogCache.etag = initial.etag
                         }
                         return initial.body
                 }

@@ -92,24 +92,24 @@ class TjaValidationController:
         with self._lock:
             stats = self._file_stats.pop(key, None)
         if self._mode == "strict" and self._log_enabled and stats and stats.counts:
-            for code in sorted(stats.counts):
-                count = stats.counts[code]
-                courses = sorted(stats.courses.get(code, set())) if stats.courses else []
-                if courses:
-                    LOGGER.error(
-                        "validation-error: file=%s code=%s count=%d courses=%s",
-                        key,
-                        code,
-                        count,
-                        ",".join(courses),
-                    )
-                else:
-                    LOGGER.error(
-                        "validation-error: file=%s code=%s count=%d",
-                        key,
-                        code,
-                        count,
-                    )
+            primary_code = next(iter(sorted(stats.counts)))
+            count = stats.counts.get(primary_code, 0)
+            courses = sorted(stats.courses.get(primary_code, set())) if stats.courses else []
+            if courses:
+                LOGGER.error(
+                    "validation-error: file=%s code=%s count=%d courses=%s",
+                    key,
+                    primary_code,
+                    count,
+                    ",".join(courses),
+                )
+            else:
+                LOGGER.error(
+                    "validation-error: file=%s code=%s count=%d",
+                    key,
+                    primary_code,
+                    count,
+                )
 
     def flush_summary(self) -> None:
         if self._mode == "off" or not self._summary_enabled or not self._log_enabled:
