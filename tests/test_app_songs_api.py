@@ -512,6 +512,47 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(entry['difficulties']['oni']['stars'], 10)
         self.assertTrue(entry['difficulties']['oni']['valid'])
 
+    def test_catalog_preserves_difficulty_objects_without_false_defaults(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'diffs', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 1,
+                'title': 'Difficulty Test',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 0,
+                'duration_ms': 1234,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-1/'},
+                'difficulties': {
+                    'easy': {'stars': 3},
+                    'normal': False,
+                    'hard': 7,
+                    'oni': True,
+                    'ura': None,
+                },
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        difficulties = entry['difficulties']
+        self.assertEqual(set(difficulties.keys()), {'easy', 'hard', 'oni'})
+        self.assertEqual(difficulties['easy']['stars'], 3)
+        self.assertTrue(difficulties['easy']['valid'])
+        self.assertEqual(difficulties['hard'], {'stars': 7, 'valid': True})
+        self.assertEqual(difficulties['oni'], {'valid': True})
+        self.assertNotIn('normal', difficulties)
+        self.assertNotIn('ura', difficulties)
+
     def test_catalog_filters_require_playable_and_not_hidden(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'filter-check', 'count': 1}

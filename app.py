@@ -86,6 +86,32 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
+def _normalize_difficulties(doc: object) -> dict[str, object]:
+    if not isinstance(doc, dict):
+        return {}
+    raw_difficulties = doc.get('difficulties')
+    if not isinstance(raw_difficulties, dict):
+        return {}
+
+    normalized: dict[str, object] = {}
+    for key, value in raw_difficulties.items():
+        level = str(key)
+        if isinstance(value, dict):
+            difficulty_payload = dict(value)
+            difficulty_payload['valid'] = True
+            normalized[level] = difficulty_payload
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            normalized[level] = {
+                'stars': _coerce_int(value, 0),
+                'valid': True,
+            }
+        elif value is True:
+            normalized[level] = {'valid': True}
+        elif value is None or value is False:
+            continue
+    return normalized
+
+
 def _apply_catalog_cache_headers(response: 'flask.Response', *, etag: Optional[str], cache_control: str, vary: str) -> None:
     if etag:
         response.headers['ETag'] = etag
@@ -1016,44 +1042,7 @@ def route_api_songs():
         sanitized.pop('scanner_stable_id', None)
         if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
             sanitized['subtitle'] = ''
-        raw_difficulties = sanitized.get('difficulties') if isinstance(sanitized.get('difficulties'), dict) else {}
-        normalized_difficulties: dict[str, object] = {diff: None for diff in ('easy', 'normal', 'hard', 'oni', 'ura')}
-        for diff in ('easy', 'normal', 'hard', 'oni', 'ura'):
-            value = raw_difficulties.get(diff) if isinstance(raw_difficulties, dict) else None
-            if isinstance(value, dict):
-                stars_value = value.get('stars') if 'stars' in value else value.get('level')
-                stars = _coerce_int(stars_value, 0)
-                level_value = value.get('level') if 'level' in value else stars
-                level = _coerce_int(level_value, stars)
-                branch = bool(value.get('branch'))
-                valid = bool(value.get('valid', True))
-                issues_raw = value.get('issues')
-                issues = [str(issue) for issue in issues_raw if isinstance(issue, str)] if isinstance(issues_raw, list) else []
-                difficulty_payload = {
-                    'stars': stars,
-                    'level': level,
-                    'branch': branch,
-                    'valid': valid,
-                }
-                if issues:
-                    difficulty_payload['issues'] = issues
-                normalized_difficulties[diff] = difficulty_payload
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                stars = _coerce_int(value, 0)
-                normalized_difficulties[diff] = {
-                    'stars': stars,
-                    'level': stars,
-                    'branch': False,
-                    'valid': True,
-                }
-            elif value is True:
-                normalized_difficulties[diff] = {
-                    'stars': 0,
-                    'level': 0,
-                    'branch': False,
-                    'valid': True,
-                }
-        sanitized['difficulties'] = normalized_difficulties
+        sanitized['difficulties'] = _normalize_difficulties(sanitized)
         preview_available = bool(sanitized.get('preview_available'))
         sanitized['preview_available'] = preview_available
         source_type_value = sanitized.get('source_type')
