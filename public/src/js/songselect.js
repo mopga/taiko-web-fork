@@ -1737,7 +1737,7 @@ class SongSelect{
                                                 ctx.font = "22px " + this.font
                                                 ctx.textAlign = "right"
                                                 ctx.fillStyle = "#ffe27d"
-                                                ctx.fillText(strings.experimentalMode, x + w - 24, y + 36)
+                                                ctx.fillText("β " + strings.experimentalMode, x + w - 24, y + 36)
                                                 ctx.restore()
                                         }
                                         if(screen === "title" || screen === "titleFadeIn" || screen === "song"){

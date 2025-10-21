@@ -73,4 +73,4 @@ ENABLE_SONG_WATCHER = True
 
 # Optimistic catalog mode (0/1). When enabled the catalog assumes songs are
 # playable unless explicitly marked otherwise.
-CATALOG_ASSUME_VALID = 1
+CATALOG_ASSUME_VALID = 0

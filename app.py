@@ -98,8 +98,7 @@ def _normalize_difficulties(doc: object, assume_valid: bool = False) -> dict[str
         level = str(key)
         if isinstance(value, dict):
             difficulty_payload = dict(value)
-            if 'valid' not in difficulty_payload:
-                difficulty_payload['valid'] = True
+            difficulty_payload['valid'] = bool(value.get('valid', True))
             normalized[level] = difficulty_payload
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             normalized[level] = {
@@ -210,7 +209,7 @@ def _resolve_catalog_assume_valid() -> bool:
             return bool(int(config_value))
         except (TypeError, ValueError):
             return bool(config_value)
-    return True
+    return False
 
 
 def is_modes_manifest_enabled() -> bool:

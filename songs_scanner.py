@@ -64,7 +64,7 @@ def _parse_bool_env(value: str) -> bool:
     return token not in {"0", "false", "no", "off"}
 
 
-CATALOG_ASSUME_VALID = _parse_bool_env(os.getenv("CATALOG_ASSUME_VALID", "1"))
+CATALOG_ASSUME_VALID = _parse_bool_env(os.getenv("CATALOG_ASSUME_VALID", "0"))
 
 
 VALIDATION_ERROR_ISSUE = "strict-validation-error"
