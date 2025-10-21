@@ -87,16 +87,17 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
 
 
 def _normalize_difficulties(entry: object, assume_valid: bool = False) -> dict[str, object]:
-    if not isinstance(entry, dict):
-        return {'oni': {'valid': True}} if assume_valid else {}
+    if isinstance(entry, dict):
+        source = entry.get('difficulties') or {}
+    else:
+        source = {}
 
-    raw_difficulties = entry.get('difficulties')
-    if not isinstance(raw_difficulties, dict):
-        raw_difficulties = {}
+    if not isinstance(source, dict):
+        source = {}
 
     normalized: dict[str, object] = {}
     for name in ('easy', 'normal', 'hard', 'oni', 'ura'):
-        value = raw_difficulties.get(name)
+        value = source.get(name)
         if isinstance(value, dict):
             payload = dict(value)
             payload['valid'] = bool(value.get('valid', True))
@@ -104,10 +105,7 @@ def _normalize_difficulties(entry: object, assume_valid: bool = False) -> dict[s
         elif value is True:
             normalized[name] = {'valid': True}
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            normalized[name] = {
-                'stars': _coerce_int(value, 0),
-                'valid': True,
-            }
+            normalized[name] = {'stars': int(value), 'valid': True}
 
     if not normalized and assume_valid:
         normalized['oni'] = {'valid': True}
