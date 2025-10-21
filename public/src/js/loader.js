@@ -276,6 +276,15 @@ class Loader{
                                         if(!song.type){
                                                 song.type = "tja";
                                         }
+                                        if(typeof song.preview_available === "boolean"){
+                                                song.previewAvailable = song.preview_available;
+                                        }else if(typeof song.previewAvailable === "boolean"){
+                                                song.previewAvailable = !!song.previewAvailable;
+                                        }else if(Object.prototype.hasOwnProperty.call(song, "previewAvailable")){
+                                                song.previewAvailable = !!song.previewAvailable;
+                                        }else{
+                                                song.previewAvailable = undefined;
+                                        }
                                 });
                                 songs = songs.filter(song => song.enabled !== false);
                                 songs.forEach(song => {
@@ -401,8 +410,11 @@ class Loader{
                                         if(song.lyrics){
                                                 song.lyricsFile = new RemoteFile(dirUrl + "main.vtt")
                                         }
-                                        if(song.preview > 0){
+                                        var previewAllowed = song.previewAvailable !== false;
+                                        if(previewAllowed && song.preview > 0){
                                                 song.previewMusic = new RemoteFile(dirUrl + "preview." + gameConfig.preview_type)
+                                        }else if(song.previewAvailable === false){
+                                                song.previewMusic = null;
                                         }
                                 })
                                 assets.songsDefault = songs
@@ -850,6 +862,9 @@ class Loader{
                                         if(parsed && typeof parsed === "object"){
                                                 const stableId = typeof parsed.id === "string" && parsed.id ? parsed.id : detailId
                                                 if(stableId){
+                                                        if(typeof parsed.preview_available === "boolean" && typeof parsed.previewAvailable !== "boolean"){
+                                                                parsed.previewAvailable = parsed.preview_available
+                                                        }
                                                         detailCache[stableId] = parsed
                                                 }
                                                 return parsed

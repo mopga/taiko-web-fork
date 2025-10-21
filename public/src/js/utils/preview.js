@@ -200,8 +200,25 @@
                 });
         }
 
+        function getPreviewAvailability(song){
+                if(!song || typeof song !== "object"){
+                        return null;
+                }
+                if(typeof song.previewAvailable === "boolean"){
+                        return song.previewAvailable;
+                }
+                if(typeof song.preview_available === "boolean"){
+                        return song.preview_available;
+                }
+                return null;
+        }
+
         function resolvePreviewSource(song, options){
                 if(!song || !song.previewMusic){
+                        return Promise.resolve(null);
+                }
+                var availabilityHint = getPreviewAvailability(song);
+                if(availabilityHint === false){
                         return Promise.resolve(null);
                 }
                 var baseUrl = toUrl(song.previewMusic);
@@ -219,6 +236,13 @@
                         var source = baseUrl === url ? song.previewMusic : url;
                         candidates.push(createCandidate(source));
                 });
+                if(!candidates.length){
+                        return Promise.resolve(null);
+                }
+                if(availabilityHint === true){
+                        var preferred = candidates.find(candidate => candidate && candidate.file);
+                        return Promise.resolve(preferred ? preferred.file : null);
+                }
                 return tryCandidates(candidates, 0, options);
         }
 

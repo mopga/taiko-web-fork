@@ -42,6 +42,7 @@ class TjaValidationController:
 
     def __init__(self) -> None:
         self._mode = _coerce_mode(os.getenv("TJA_VALIDATION_MODE"))
+        self._log_enabled = _coerce_bool(os.getenv("TJA_VALIDATION_LOG"), default=False)
         self._summary_enabled = _coerce_bool(os.getenv("TJA_VALIDATION_SUMMARY"), default=True)
         self._lock = threading.Lock()
         self._file_stats: Dict[str, _FileStats] = {}
@@ -52,6 +53,10 @@ class TjaValidationController:
     @property
     def mode(self) -> str:
         return self._mode
+
+    @property
+    def logging_enabled(self) -> bool:
+        return self._log_enabled
 
     def reset_run(self) -> None:
         with self._lock:
@@ -86,7 +91,7 @@ class TjaValidationController:
         stats: Optional[_FileStats]
         with self._lock:
             stats = self._file_stats.pop(key, None)
-        if self._mode == "strict" and stats and stats.counts:
+        if self._mode == "strict" and self._log_enabled and stats and stats.counts:
             for code in sorted(stats.counts):
                 count = stats.counts[code]
                 courses = sorted(stats.courses.get(code, set())) if stats.courses else []
@@ -107,15 +112,20 @@ class TjaValidationController:
                     )
 
     def flush_summary(self) -> None:
-        if self._mode != "warn" or not self._summary_enabled:
+        if self._mode == "off" or not self._summary_enabled or not self._log_enabled:
             return
         with self._lock:
             total_files = len(self._seen_files)
             counts_snapshot = Counter(self._global_counts)
             files_snapshot = {code: set(files) for code, files in self._files_by_code.items()}
+        summary_mode = self._mode or "warn"
         if not counts_snapshot:
             if total_files:
-                LOGGER.info("Validation summary: files=%d, no issues detected", total_files)
+                LOGGER.info(
+                    "Validation summary (mode=%s): files=%d, no issues detected",
+                    summary_mode,
+                    total_files,
+                )
             return
 
         parts = []
@@ -124,7 +134,12 @@ class TjaValidationController:
             file_count = len(files_snapshot.get(code, set()))
             parts.append(f"{code}={issue_count} ({file_count} files)")
         summary = ", ".join(parts)
-        LOGGER.info("Validation summary: files=%d, %s", total_files, summary)
+        LOGGER.info(
+            "Validation summary (mode=%s): files=%d, %s",
+            summary_mode,
+            total_files,
+            summary,
+        )
 
 
 _VALIDATOR = TjaValidationController()
@@ -132,4 +147,8 @@ _VALIDATOR = TjaValidationController()
 
 def get_tja_validator() -> TjaValidationController:
     return _VALIDATOR
+
+
+def is_validation_logging_enabled() -> bool:
+    return _VALIDATOR.logging_enabled
 

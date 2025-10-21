@@ -70,6 +70,16 @@ TJA_VALIDATOR = get_tja_validator()
 _HANG_WATCHDOG_ARMED = False
 
 
+def _validation_warning(message: str, *args, **kwargs) -> None:
+    if TJA_VALIDATOR.logging_enabled:
+        LOGGER.warning(message, *args, **kwargs)
+
+
+def _validation_info(message: str, *args, **kwargs) -> None:
+    if TJA_VALIDATOR.logging_enabled:
+        LOGGER.info(message, *args, **kwargs)
+
+
 def _dump_stacktrace(signum, frame) -> None:  # pragma: no cover - diagnostic helper
     LOGGER.error(
         "scanner hang watchdog triggered: pid=%d signal=%s",
@@ -1302,9 +1312,9 @@ def _parse_tja_strict(
                     canonical = canonical_override
                 if canonical == "Unknown":
                     if issue == "unknown_course_numeric":
-                        LOGGER.warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
+                        _validation_warning('Unknown numeric COURSE "%s" → skip chart block', raw_course_value)
                     else:
-                        LOGGER.warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
+                        _validation_warning('Unknown COURSE "%s" → skip chart block', raw_course_value)
                     parsed.skipped_charts += 1
                     parsed.skipped_unknown_course += 1
                     active_course = None
@@ -1312,7 +1322,7 @@ def _parse_tja_strict(
                     parsing_notes = False
                 else:
                     if issue == "mapped-course":
-                        LOGGER.info(
+                        _validation_info(
                             "mapped-course(parser): %s→%s",
                             raw_course_value.upper(),
                             canonical.upper(),
@@ -1356,7 +1366,7 @@ def _parse_tja_strict(
             try:
                 level_value = float(value_stripped)
             except ValueError:
-                LOGGER.warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
+                _validation_warning("Invalid LEVEL value '%s' in %s", value_stripped, path)
                 active_course.add_issue("invalid-level")
                 return
             level_int = int(round(level_value))
@@ -1364,7 +1374,7 @@ def _parse_tja_strict(
             if level_int != level_value:
                 active_course.add_issue("level-non-integer")
             if clamped != level_int:
-                LOGGER.warning(
+                _validation_warning(
                     "LEVEL value %s for course '%s' in %s out of range; clamped to %s",
                     value_stripped,
                     active_course.raw_name,
@@ -1412,7 +1422,7 @@ def _parse_tja_strict(
                     _process_metadata_line(base_header_line)
                     continue
                 current_notes_course.end_blocks += 1
-                LOGGER.warning(
+                _validation_warning(
                     'implicit-end: header "%s" inside notes; closing previous chart',
                     key_candidate,
                 )
@@ -1429,7 +1439,7 @@ def _parse_tja_strict(
             if directive == "#START":
                 if active_course:
                     course_key = active_course.canonical
-                    LOGGER.info(
+                    _validation_info(
                         "start-notes(strict): course=%s file=%s line=%d",
                         course_key,
                         path,
@@ -1460,7 +1470,7 @@ def _parse_tja_strict(
                         _start_segment(current_notes_course, _current_audio())
                     handled_directive = True
                 else:
-                    LOGGER.warning(
+                    _validation_warning(
                         "skip notes: no course before #START (line %d)",
                         line_number,
                     )
@@ -1877,7 +1887,7 @@ def _parse_tja_lenient(
                 _resolve_long_end(entry_ref, at_value)
                 active_long = None
             else:
-                LOGGER.warning('lenient-long-end-without-start: file=%s', path)
+                _validation_warning('lenient-long-end-without-start: file=%s', path)
 
         for index, token in enumerate(tokens):
             if not token:
@@ -1897,7 +1907,7 @@ def _parse_tja_lenient(
                 if note_value in LONG_NOTE_START_MAP:
                     long_spec = LONG_NOTE_START_MAP[note_value]
                     if active_long and isinstance(active_long.get('entry'), dict):
-                        LOGGER.warning(
+                        _validation_warning(
                             'lenient-long-start-overlap: file=%s token=%s',
                             path,
                             token,
@@ -1920,7 +1930,7 @@ def _parse_tja_lenient(
                     continue
                 if token not in unknown_tokens_logged:
                     unknown_tokens_logged.add(token)
-                    LOGGER.warning(
+                    _validation_warning(
                         'lenient-unknown-note-token: token=%s file=%s',
                         token,
                         path,
@@ -2006,7 +2016,7 @@ def _parse_tja_lenient(
                 continue
 
         if upper.startswith("#START"):
-            LOGGER.info(
+            _validation_info(
                 "start-notes(lenient): course=%s file=%s line=%d",
                 course_token,
                 path,
@@ -2210,14 +2220,14 @@ def parse_tja(path: Path) -> ParsedTJA:
         except Exception:
             LOGGER.error("strict-parse-crash: file=%s", path, exc_info=True)
             if TJA_LENIENT_FALLBACK:
-                LOGGER.warning("lenient-trigger: file=%s reason=strict-crash", path)
+                _validation_warning("lenient-trigger: file=%s reason=strict-crash", path)
                 result = _parse_tja_lenient(
                     path,
                     original_text=original_text,
                     normalised_text=normalised_text,
                 )
             else:
-                LOGGER.warning(
+                _validation_warning(
                     "lenient-trigger: file=%s reason=strict-crash-disabled", path
                 )
                 result = ParsedTJA(
@@ -2233,7 +2243,7 @@ def parse_tja(path: Path) -> ParsedTJA:
                 if has_valid_course or not has_courses:
                     result = parsed
                 else:
-                    LOGGER.warning("lenient-trigger: file=%s reason=no-valid-courses", path)
+                    _validation_warning("lenient-trigger: file=%s reason=no-valid-courses", path)
                     fallback = _parse_tja_lenient(
                         path,
                         original_text=original_text,
@@ -3857,15 +3867,56 @@ class SongScanner:
         base_record = self._select_base_record(records)
         file_path = base_record.relative_path if base_record.relative_path else None
 
+        preview_available = False
+        preview_candidates: List[Path] = []
+        preview_extensions = ("mp3", "ogg", "wav", "m4a", "flac", "opus")
+        preview_base: Optional[Path] = None
+        if base_record:
+            if base_record.audio_path:
+                audio_rel = Path(base_record.audio_path)
+                preview_base = audio_rel.parent
+                for ext in preview_extensions:
+                    preview_candidates.append(audio_rel.with_name(f"preview.{ext}"))
+            if preview_base is None:
+                if base_record.relative_dir:
+                    preview_base = Path(base_record.relative_dir)
+                elif base_record.relative_path:
+                    preview_base = Path(base_record.relative_path).parent
+        if preview_base is not None:
+            for ext in preview_extensions:
+                preview_candidates.append(preview_base / f"preview.{ext}")
+        for relative_candidate in preview_candidates:
+            try:
+                candidate = (self._songs_root / relative_candidate).resolve()
+                candidate.relative_to(self._songs_root)
+            except Exception:
+                continue
+            if candidate.is_file():
+                preview_available = True
+                break
+
+        raw_paths = document.get('paths') if isinstance(document.get('paths'), dict) else None
+        manifest_paths = None
+        if raw_paths:
+            manifest_paths = {
+                key: raw_paths.get(key)
+                for key in ('tja_url', 'audio_url', 'dir_url')
+                if raw_paths.get(key)
+            }
+
         manifest_entry: Dict[str, object] = {
             'id': stable_id,
             'title': title_value,
+            'subtitle': str(document.get('subtitle') or ''),
             'title_lc': title_value.casefold(),
             'category': category_value,
             'difficulties': difficulties,
-            'duration_ms': max_duration,
+            'duration_ms': int(max_duration) if max_duration else 0,
+            'preview_available': preview_available,
+            'source_type': str(document.get('source_type') or document.get('type') or 'tja'),
+            'paths': manifest_paths,
             'file_path': file_path,
-            'file_mtime': file_mtime,
+            'mtime': file_mtime,
             'sha1': sha1_combined,
         }
 
