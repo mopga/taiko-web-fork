@@ -947,9 +947,13 @@ def route_api_songs():
         '_id': 0,
         'id': 1,
         'title': 1,
+        'subtitle': 1,
         'category': 1,
         'difficulties': 1,
         'duration_ms': 1,
+        'preview_available': 1,
+        'source_type': 1,
+        'paths': 1,
     }
 
     try:
@@ -959,10 +963,45 @@ def route_api_songs():
             .skip(skip)
             .limit(limit)
         )
-        payload = list(cursor)
+        raw_payload = list(cursor)
     except Exception:
         app.logger.exception('Failed to query songs manifest')
-        payload = []
+        raw_payload = []
+
+    payload: list[dict[str, object]] = []
+    for entry in raw_payload:
+        if not isinstance(entry, dict):
+            continue
+        sanitized = dict(entry)
+        if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
+            sanitized['subtitle'] = ''
+        difficulties = sanitized.get('difficulties')
+        if not isinstance(difficulties, dict):
+            sanitized['difficulties'] = {
+                'easy': False,
+                'normal': False,
+                'hard': False,
+                'oni': False,
+                'ura': False,
+            }
+        preview_available = bool(sanitized.get('preview_available'))
+        sanitized['preview_available'] = preview_available
+        source_type_value = sanitized.get('source_type')
+        if not isinstance(source_type_value, str) or not source_type_value:
+            sanitized['source_type'] = 'tja'
+        duration_value = sanitized.get('duration_ms')
+        try:
+            sanitized['duration_ms'] = int(duration_value) if duration_value is not None else 0
+        except (TypeError, ValueError):
+            sanitized['duration_ms'] = 0
+        paths_value = sanitized.get('paths')
+        if isinstance(paths_value, dict):
+            sanitized['paths'] = {
+                key: paths_value.get(key)
+                for key in ('tja_url', 'audio_url', 'dir_url')
+                if paths_value.get(key)
+            }
+        payload.append(sanitized)
 
     response = make_response(jsonify(payload))
     if etag:
@@ -979,6 +1018,19 @@ def route_api_song_detail(song_id: str):
     stable_id = song_id.strip()
     if not stable_id:
         abort(400)
+
+    meta_only = False
+    meta_param = request.args.get('meta')
+    if isinstance(meta_param, str) and meta_param.strip():
+        token = meta_param.strip().lower()
+        meta_only = token not in {'0', 'false', 'no', 'off'}
+    notes_param = request.args.get('notes')
+    if isinstance(notes_param, str) and notes_param.strip():
+        token = notes_param.strip().lower()
+        if token in {'none', '0', 'false', 'no'}:
+            meta_only = True
+        elif token in {'full', 'all', 'yes', 'true', '1'}:
+            meta_only = False
 
     projection = {
         '_id': False,
@@ -997,6 +1049,8 @@ def route_api_song_detail(song_id: str):
         'import_issues': True,
         'valid_chart_count': True,
         'charts': True,
+        'hash': True,
+        'fingerprint': True,
     }
 
     try:
@@ -1014,8 +1068,12 @@ def route_api_song_detail(song_id: str):
     for entry in charts_payload:
         if not isinstance(entry, dict):
             continue
-        chart_data = entry.get('chart_data') if isinstance(entry.get('chart_data'), dict) else {}
-        duration_val = chart_data.get('duration_ms') if isinstance(chart_data, dict) else None
+        chart_data = entry.get('chart_data') if isinstance(entry.get('chart_data'), dict) else None
+        if isinstance(chart_data, dict):
+            _ensure_chart_duration(chart_data)
+            duration_val = chart_data.get('duration_ms')
+        else:
+            duration_val = entry.get('duration_ms')
         try:
             duration_int = int(duration_val) if duration_val is not None else 0
         except (TypeError, ValueError):
@@ -1036,6 +1094,8 @@ def route_api_song_detail(song_id: str):
             'rank': entry.get('rank'),
             'tja_url': entry.get('tja_url'),
         }
+        if not meta_only and isinstance(chart_data, dict):
+            sanitized_entry['chart_data'] = chart_data
         sanitized_charts.append(sanitized_entry)
 
     courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
@@ -1045,13 +1105,29 @@ def route_api_song_detail(song_id: str):
     manifest_entry = None
     if manifest_meta is not None:
         try:
-            manifest_entry = manifest_meta.find_one({'_id': stable_id}, {'duration_ms': 1, '_id': False})
+            manifest_entry = manifest_meta.find_one(
+                {'_id': stable_id},
+                {
+                    '_id': False,
+                    'duration_ms': 1,
+                    'sha1': 1,
+                    'preview_available': 1,
+                    'paths': 1,
+                },
+            )
         except Exception:
             manifest_entry = None
+    manifest_duration = None
+    manifest_sha1 = None
+    manifest_preview_available = None
+    manifest_paths = None
     if isinstance(manifest_entry, dict):
-        duration_override = manifest_entry.get('duration_ms')
+        manifest_duration = manifest_entry.get('duration_ms')
+        manifest_sha1 = manifest_entry.get('sha1')
+        manifest_preview_available = manifest_entry.get('preview_available')
+        manifest_paths = manifest_entry.get('paths') if isinstance(manifest_entry.get('paths'), dict) else None
         try:
-            duration_candidate = int(duration_override)
+            duration_candidate = int(manifest_duration)
         except (TypeError, ValueError):
             duration_candidate = None
         if duration_candidate:
@@ -1077,7 +1153,46 @@ def route_api_song_detail(song_id: str):
         'duration_ms': max_duration,
     }
 
-    return jsonify(payload)
+    if manifest_paths and isinstance(payload.get('paths'), dict):
+        merged_paths = dict(payload['paths'])
+        merged_paths.update(manifest_paths)
+        payload['paths'] = merged_paths
+    elif manifest_paths:
+        payload['paths'] = manifest_paths
+
+    if manifest_preview_available is not None:
+        payload['preview_available'] = bool(manifest_preview_available)
+    else:
+        payload['preview_available'] = bool(payload.get('preview'))
+
+    source_type_value = song_doc.get('source_type') or song_doc.get('type')
+    payload['source_type'] = source_type_value or 'tja'
+
+    etag_source = None
+    if isinstance(manifest_sha1, str) and manifest_sha1:
+        etag_source = manifest_sha1
+    elif isinstance(song_doc.get('hash'), str) and song_doc.get('hash'):
+        etag_source = song_doc['hash']
+    elif isinstance(song_doc.get('fingerprint'), str) and song_doc.get('fingerprint'):
+        etag_source = song_doc['fingerprint']
+    else:
+        etag_source = hashlib.sha1(stable_id.encode('utf-8')).hexdigest()
+
+    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    vary_header = 'If-None-Match, Accept-Encoding'
+
+    if etag_source and request.headers.get('If-None-Match') == etag_source:
+        response = make_response('', 304)
+        response.headers['ETag'] = etag_source
+        response.headers['Cache-Control'] = cache_control
+        response.headers['Vary'] = vary_header
+        return response
+
+    response = make_response(jsonify(payload))
+    response.headers['ETag'] = etag_source
+    response.headers['Cache-Control'] = cache_control
+    response.headers['Vary'] = vary_header
+    return response
 
 
 @app.route(basedir + 'api/modes')
