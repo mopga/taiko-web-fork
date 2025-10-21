@@ -86,6 +86,31 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
+def _apply_catalog_cache_headers(response: 'flask.Response', *, etag: Optional[str], cache_control: str, vary: str) -> None:
+    if etag:
+        response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = cache_control
+    vary_tokens = []
+    existing_vary = response.headers.get('Vary')
+    if existing_vary:
+        vary_tokens.extend(token.strip() for token in existing_vary.split(',') if token.strip())
+    vary_tokens.extend(token.strip() for token in vary.split(',') if token.strip())
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for token in vary_tokens:
+        lowered = token.lower()
+        if lowered == 'cookie':
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalised.append(token)
+    if normalised:
+        response.headers['Vary'] = ', '.join(normalised)
+    elif 'Vary' in response.headers:
+        del response.headers['Vary']
+
+
 def _ensure_chart_duration(chart_data: dict) -> None:
     if not isinstance(chart_data, dict):
         return
@@ -914,19 +939,13 @@ def route_api_songs():
     request_etag = _normalize_if_none_match(request.headers.get('If-None-Match'))
     if etag and request_etag == etag:
         response = make_response('', 304)
-        response.headers['Cache-Control'] = cache_control
-        response.headers['Vary'] = vary_header
-        if quoted_etag:
-            response.headers['ETag'] = quoted_etag
+        _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
         return response
 
     songs_collection = getattr(db, 'songs', None)
     if songs_collection is None:
         response = make_response(jsonify([]))
-        response.headers['Cache-Control'] = cache_control
-        response.headers['Vary'] = vary_header
-        if quoted_etag:
-            response.headers['ETag'] = quoted_etag
+        _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
         return response
 
     limit_param = request.args.get('limit', type=int)
@@ -1025,10 +1044,7 @@ def route_api_songs():
         payload.append(sanitized)
 
     response = make_response(jsonify(payload))
-    if quoted_etag:
-        response.headers['ETag'] = quoted_etag
-    response.headers['Cache-Control'] = cache_control
-    response.headers['Vary'] = vary_header
+    _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
     return response
 
 
@@ -1140,28 +1156,37 @@ def route_api_song_details() -> 'flask.Response':
 
     try:
         cursor = db.songs.find({'scanner_stable_id': {'$in': ordered_ids}}, projection)
-    except Exception:
+        docs = [dict(raw_doc) for raw_doc in cursor if isinstance(raw_doc, dict)]
+    except Exception as exc:
         app.logger.exception('Failed to load batch song details')
-        abort(500)
+        reason = getattr(exc, 'details', None)
+        if not isinstance(reason, str) or not reason:
+            reason = str(exc) or 'database query failed'
+        payload = {'error': 'songs_details_failed', 'reason': reason}
+        response = make_response(jsonify(payload), 400)
+        return response
 
-    song_docs: dict[str, dict] = {}
-    for doc in cursor:
-        if isinstance(doc, dict):
-            stable = doc.get('scanner_stable_id') or doc.get('id')
-            if isinstance(stable, str) and stable:
-                if not include_notes:
-                    charts_payload = doc.get('charts')
-                    if isinstance(charts_payload, list):
-                        for chart_doc in charts_payload:
-                            if isinstance(chart_doc, dict):
-                                chart_doc.pop('chart_data', None)
-                song_docs[stable] = doc
+    if not include_notes:
+        for doc in docs:
+            charts_payload = doc.get('charts')
+            if not isinstance(charts_payload, list):
+                continue
+            for chart_doc in charts_payload:
+                if isinstance(chart_doc, dict):
+                    chart_doc.pop('chart_data', None)
+
+    found_docs: dict[str, dict] = {}
+    for doc in docs:
+        stable = doc.get('scanner_stable_id') or doc.get('id')
+        if not isinstance(stable, str) or not stable:
+            continue
+        found_docs[stable] = doc
 
     manifest_map = _load_manifest_entries_for_ids(ordered_ids)
 
     results: list[dict] = []
     for stable_id in ordered_ids:
-        song_doc = song_docs.get(stable_id)
+        song_doc = found_docs.get(stable_id)
         if not isinstance(song_doc, dict):
             continue
         payload = _serialize_song_detail(song_doc, include_notes=include_notes, manifest_entry=manifest_map.get(stable_id))

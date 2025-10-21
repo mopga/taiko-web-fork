@@ -3126,6 +3126,55 @@ LEVEL:7
         self.assertNotEqual(first_checksum, second_checksum)
         self.assertEqual(second_summary['manifest_checksum'], second_checksum)
 
+    def test_manifest_checksum_stability(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        base_entry_a = {
+            'id': 'alpha',
+            'title': 'Alpha',
+            'subtitle': 'A',
+            'category': 'General',
+            'difficulties': {'easy': True, 'normal': False, 'hard': True, 'oni': False, 'ura': False},
+            'duration_ms': 1200,
+            'preview_available': True,
+            'source_type': 'tja',
+            'paths': {'audio_url': '/songs/alpha/main.ogg'},
+            'sha1': 'sha1-alpha',
+        }
+        base_entry_b = {
+            'id': 'bravo',
+            'title': 'Bravo',
+            'subtitle': 'B',
+            'category': 'General',
+            'difficulties': {'easy': False, 'normal': True, 'hard': False, 'oni': True, 'ura': False},
+            'duration_ms': 980,
+            'preview_available': False,
+            'source_type': 'tja',
+            'paths': {'audio_url': '/songs/bravo/main.ogg', 'tja_url': '/songs/bravo/main.tja'},
+            'sha1': 'sha1-bravo',
+        }
+
+        checksum_first = scanner._compute_manifest_checksum({
+            'alpha': dict(base_entry_a),
+            'bravo': dict(base_entry_b),
+        })
+        checksum_second = scanner._compute_manifest_checksum({
+            'bravo': dict(base_entry_b),
+            'alpha': dict(base_entry_a),
+        })
+
+        self.assertEqual(checksum_first, checksum_second)
+
     def test_song_document_has_incremental_metadata_fields(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
