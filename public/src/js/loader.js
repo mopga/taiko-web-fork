@@ -2,197 +2,8 @@ const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
 const USE_DETAILS_IN_CATALOG = 0;
 const songsCatalogCache = {
         lastResult: [],
-        details: Object.create(null),
         etag: null,
-        detailBatcher: null,
 };
-
-class CatalogDetailBatcher{
-        constructor(options){
-                this.maxConcurrency = options && options.maxConcurrency ? options.maxConcurrency : 6;
-                this.batchInterval = options && options.batchInterval ? options.batchInterval : 16;
-                this.includeNotes = !options || options.includeNotes !== false;
-                const rawRetries = options && typeof options.maxRetries === "number" ? options.maxRetries : null;
-                this.maxRetries = rawRetries !== null && rawRetries >= 0 ? Math.floor(rawRetries) : 3;
-                this._queue = new Map();
-                this._pending = new Set();
-                this._inFlight = 0;
-                this._timer = null;
-        }
-        load(id){
-                if(typeof id !== "string" || !id){
-                        return Promise.resolve(null);
-                }
-                return new Promise((resolve, reject) => {
-                        if(!this._queue.has(id)){
-                                this._queue.set(id, []);
-                        }
-                        this._queue.get(id).push({resolve, reject, attempts: 0});
-                        this._schedule();
-                });
-        }
-        _schedule(){
-                if(this._timer !== null){
-                        return;
-                }
-                this._timer = setTimeout(() => {
-                        this._timer = null;
-                        this._flush();
-                }, this.batchInterval);
-        }
-        _flush(){
-                if(this._inFlight >= this.maxConcurrency){
-                        this._schedule();
-                        return;
-                }
-                const batch = [];
-                for(const [id] of this._queue){
-                        if(this._pending.has(id)){
-                                continue;
-                        }
-                        this._pending.add(id);
-                        batch.push(id);
-                        if(batch.length >= 50){
-                                break;
-                        }
-                }
-                if(batch.length === 0){
-                        return;
-                }
-                if(!USE_DETAILS_IN_CATALOG){
-                        console.warn("details-batcher disabled for catalog");
-                        batch.forEach(id => {
-                                const resolvers = this._queue.get(id) || [];
-                                this._queue.delete(id);
-                                this._pending.delete(id);
-                                resolvers.forEach(entry => {
-                                        try{
-                                                entry.resolve(null);
-                                        }catch(e){}
-                                });
-                        });
-                        return;
-                }
-                this._inFlight++;
-                const params = batch.map(id => encodeURIComponent(id)).join(",");
-                let url = `api/songs/details?ids=${params}`;
-                if(!this.includeNotes){
-                        url += "&notes=none";
-                }
-                const handleSuccess = data => {
-                        const map = {};
-                        if(Array.isArray(data)){
-                                data.forEach(item => {
-                                        if(item && typeof item === "object" && typeof item.id === "string"){
-                                                map[item.id] = item;
-                                        }
-                                });
-                        }
-                        batch.forEach(id => {
-                                const resolvers = this._queue.get(id) || [];
-                                this._queue.delete(id);
-                                this._pending.delete(id);
-                                const payload = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
-                                resolvers.forEach(entry => {
-                                        try{
-                                                entry.resolve(payload);
-                                        }catch(e){}
-                                });
-                        });
-                };
-                const handleFailure = error => {
-                        const retryableStatus = error && typeof error.status === "number" ? error.status : 0;
-                        const shouldRetry = !retryableStatus || (retryableStatus >= 400 && retryableStatus < 600);
-                        const retryMap = new Map();
-                        batch.forEach(id => {
-                                const resolvers = this._queue.get(id) || [];
-                                this._queue.delete(id);
-                                this._pending.delete(id);
-                                if(!resolvers.length){
-                                        return;
-                                }
-                                if(!shouldRetry){
-                                        resolvers.forEach(entry => {
-                                                try{
-                                                        entry.reject(error);
-                                                }catch(e){}
-                                        });
-                                        return;
-                                }
-                                const retryEntries = [];
-                                resolvers.forEach(entry => {
-                                        const attempts = typeof entry.attempts === "number" ? entry.attempts : 0;
-                                        if(attempts < this.maxRetries){
-                                                entry.attempts = attempts + 1;
-                                                retryEntries.push(entry);
-                                        }else{
-                                                try{
-                                                        entry.reject(error);
-                                                }catch(e){}
-                                        }
-                                });
-                                if(retryEntries.length){
-                                        retryMap.set(id, retryEntries);
-                                }
-                        });
-                        if(retryMap.size){
-                                setTimeout(() => {
-                                        retryMap.forEach((entries, id) => {
-                                                const existing = this._queue.get(id);
-                                                if(Array.isArray(existing) && existing.length){
-                                                        this._queue.set(id, entries.concat(existing));
-                                                }else{
-                                                        this._queue.set(id, entries.slice());
-                                                }
-                                        });
-                                        retryMap.clear();
-                                        this._schedule();
-                                }, this.batchInterval);
-                        }
-                };
-                const finalize = () => {
-                        this._inFlight--;
-                        if(this._inFlight < 0){
-                                this._inFlight = 0;
-                        }
-                        if(this._queue.size){
-                                this._schedule();
-                        }
-                };
-                const performFetch = () => {
-                        if(typeof fetch === "function"){
-                                return fetch(url, {method: "GET", credentials: "same-origin"}).then(response => {
-                                        if(response.status === 200){
-                                                return response.json();
-                                        }
-                                        if(response.status === 304){
-                                                return [];
-                                        }
-                                        const error = new Error(`${url} (${response.status})`);
-                                        error.status = response.status;
-                                        throw error;
-                                });
-                        }
-                        if(typeof loader === "object" && loader && typeof loader.ajax === "function"){
-                                return loader.ajax(url).then(body => {
-                                        if(body && typeof body === "object" && body.__notModified){
-                                                return [];
-                                        }
-                                        if(typeof body === "string" && body){
-                                                try{
-                                                        return JSON.parse(body);
-                                                }catch(e){
-                                                        return [];
-                                                }
-                                        }
-                                        return [];
-                                });
-                        }
-                        return Promise.resolve([]);
-                };
-                performFetch().then(handleSuccess).catch(handleFailure).finally(finalize);
-        }
-}
 
 
 function resolveManifestStatus(manifest){
@@ -946,50 +757,16 @@ class Loader{
                 request.send()
                 return promise
         }
+
         loadSongsCatalog(){
+                if(USE_DETAILS_IN_CATALOG){
+                        console.warn("details-batcher disabled for catalog")
+                }
+
                 const loaderInstance = this
-                const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
-                const detailBatcher = USE_DETAILS_IN_CATALOG
-                        ? songsCatalogCache.detailBatcher || (songsCatalogCache.detailBatcher = new CatalogDetailBatcher({
-                                maxConcurrency: 6,
-                                batchInterval: 16,
-                                includeNotes: false,
-                        }))
-                        : null
                 const supportsFetch = typeof fetch === "function"
                 const catalogUrl = "api/songs"
-                const cachedDetails = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null
-
-                function loadDetail(entry){
-                        if(!USE_DETAILS_IN_CATALOG){
-                                console.warn("details-batcher disabled for catalog")
-                                return Promise.resolve(null)
-                        }
-                        if(!entry || typeof entry.id !== "string" || !entry.id){
-                                return Promise.resolve(null)
-                        }
-                        const detailId = entry.id
-                        const cachedDetail = detailCache[detailId]
-                        if(cachedDetail){
-                                return Promise.resolve(cachedDetail)
-                        }
-                        if(!detailBatcher){
-                                return Promise.resolve(null)
-                        }
-                        return detailBatcher.load(detailId).then(detailResponse => {
-                                if(detailResponse && typeof detailResponse === "object"){
-                                        if(typeof detailResponse.preview_available === "boolean" && typeof detailResponse.previewAvailable !== "boolean"){
-                                                detailResponse.previewAvailable = detailResponse.preview_available
-                                        }
-                                        const stableId = typeof detailResponse.id === "string" && detailResponse.id ? detailResponse.id : detailId
-                                        if(stableId){
-                                                detailCache[stableId] = detailResponse
-                                        }
-                                        return detailResponse
-                                }
-                                return cachedDetail || null
-                        }).catch(() => cachedDetail || null)
-                }
+                const cachedList = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null
 
                 function normaliseEntries(payload){
                         if(Array.isArray(payload)){
@@ -1088,78 +865,45 @@ class Loader{
                         try{
                                 response = await performRequest(catalogUrl, false)
                         }catch(error){
-                                if(cachedDetails){
-                                        return {details: cachedDetails}
+                                if(Array.isArray(cachedList)){
+                                        return {entries: cachedList, fromCache: true}
                                 }
                                 throw error
                         }
 
                         if(response.notModified){
-                                if(cachedDetails){
-                                        return {details: cachedDetails}
+                                if(Array.isArray(cachedList)){
+                                        return {entries: cachedList, fromCache: true}
                                 }
                                 const bypassUrl = `${catalogUrl}${catalogUrl.indexOf("?") === -1 ? "?" : "&"}_=${Date.now()}`
                                 const retry = await performRequest(bypassUrl, true)
                                 if(retry.notModified){
                                         return {entries: []}
                                 }
-                                return {entries: normaliseEntries(retry.body)}
+                                return {entries: normaliseEntries(retry.body), fromCache: false}
                         }
 
-                        return {entries: normaliseEntries(response.body)}
-                }
-
-                async function hydrateDetails(entries){
-                        if(!USE_DETAILS_IN_CATALOG){
-                                console.warn("details-batcher disabled for catalog")
-                                return []
-                        }
-                        if(!Array.isArray(entries) || entries.length === 0){
-                                return []
-                        }
-                        const results = []
-                        const CHUNK_SIZE = 48
-                        for(let index = 0; index < entries.length; index += CHUNK_SIZE){
-                                const chunk = entries.slice(index, index + CHUNK_SIZE)
-                                const chunkDetails = await Promise.all(chunk.map(loadDetail))
-                                chunkDetails.forEach(detail => {
-                                        if(detail && typeof detail === "object"){
-                                                results.push(detail)
-                                        }
-                                })
-                        }
-                        return results
+                        return {entries: normaliseEntries(response.body), fromCache: false}
                 }
 
                 return fetchEntries()
-                        .then(async payload => {
-                                if(Array.isArray(payload.details)){
-                                        const cachedList = payload.details.slice()
-                                        songsCatalogCache.lastResult = cachedList
-                                        return cachedList.slice()
+                        .then(result => {
+                                const entries = Array.isArray(result.entries) ? result.entries : []
+                                if(result.fromCache){
+                                        return entries.slice()
                                 }
-                                const entries = Array.isArray(payload.entries) ? payload.entries : []
-                                if(entries.length === 0){
-                                        songsCatalogCache.lastResult = []
-                                        return []
-                                }
-                                if(!USE_DETAILS_IN_CATALOG){
-                                        const normalized = entries.map(entry => {
-                                                if(entry && typeof entry === "object"){
-                                                        return Object.assign({}, entry)
-                                                }
-                                                return entry
-                                        })
-                                        songsCatalogCache.lastResult = normalized
-                                        return normalized.slice()
-                                }
-                                const details = await hydrateDetails(entries)
-                                songsCatalogCache.lastResult = details.slice()
-                                return details
+                                const normalized = entries.map(entry => {
+                                        if(entry && typeof entry === "object"){
+                                                return Object.assign({}, entry)
+                                        }
+                                        return entry
+                                })
+                                songsCatalogCache.lastResult = normalized
+                                return normalized.slice()
                         })
                         .catch(() => {
-                                if(Array.isArray(cachedDetails)){
-                                        return cachedDetails.slice()
+                                if(Array.isArray(cachedList)){
+                                        return cachedList.slice()
                                 }
                                 return []
                         })

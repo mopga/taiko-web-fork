@@ -2583,7 +2583,13 @@ class SongScanner:
         if songs_collection is not None:
             try:
                 songs_collection.update_many(
-                    {'source_type': 'dan_dojo', 'valid_charts': {'$gt': 0}},
+                    {
+                        'source_type': 'dan_dojo',
+                        '$or': [
+                            {'valid_charts': {'$gt': 0}},
+                            {'valid_chart_count': {'$gt': 0}},
+                        ],
+                    },
                     {'$set': {'is_playable': True}},
                 )
             except Exception:  # pragma: no cover - tolerate transient issues

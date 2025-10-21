@@ -126,6 +126,8 @@ class _ManifestCollection:
 class _SongsCollection:
     def __init__(self, docs):
         self._docs = {doc.get('scanner_stable_id'): dict(doc) for doc in docs}
+        self.last_filter = None
+        self.last_projection = None
 
     class _Cursor:
         def __init__(self, docs):
@@ -186,6 +188,8 @@ class _SongsCollection:
         return projected
 
     def find(self, filter_, projection=None):
+        self.last_filter = filter_
+        self.last_projection = projection
         results = []
         if isinstance(filter_, dict) and 'scanner_stable_id' in filter_ and isinstance(filter_['scanner_stable_id'], dict):
             ids = filter_['scanner_stable_id'].get('$in', [])
@@ -507,4 +511,34 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertIsInstance(entry['difficulties']['oni'], dict)
         self.assertEqual(entry['difficulties']['oni']['stars'], 10)
         self.assertTrue(entry['difficulties']['oni']['valid'])
+
+    def test_catalog_filters_require_playable_and_not_hidden(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'filter-check', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 'song-1',
+                'title': 'Filter Check',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 1,
+                'difficulties': {},
+                'duration_ms': 0,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-1/'},
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+            self.assertEqual(response.status_code, 200)
+            songs_collection = taiko_app.db.songs
+            captured_filter = songs_collection.last_filter
+
+        self.assertEqual(
+            captured_filter,
+            {'is_hidden': {'$ne': True}, 'is_playable': True},
+        )
 
