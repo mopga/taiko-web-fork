@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import fnmatch
 import hashlib
@@ -71,13 +72,15 @@ _HANG_WATCHDOG_ARMED = False
 
 
 def _validation_warning(message: str, *args, **kwargs) -> None:
-    if TJA_VALIDATOR.logging_enabled:
-        LOGGER.warning(message, *args, **kwargs)
+    if TJA_VALIDATOR.mode == "off":
+        return
+    LOGGER.warning(message, *args, **kwargs)
 
 
 def _validation_info(message: str, *args, **kwargs) -> None:
-    if TJA_VALIDATOR.logging_enabled:
-        LOGGER.info(message, *args, **kwargs)
+    if TJA_VALIDATOR.mode == "off":
+        return
+    LOGGER.info(message, *args, **kwargs)
 
 
 def _dump_stacktrace(signum, frame) -> None:  # pragma: no cover - diagnostic helper
@@ -3840,6 +3843,7 @@ class SongScanner:
 
         sha1_values: List[str] = []
         mtime_values: List[int] = []
+        parse_failures: List[datetime] = []
         for record in records:
             meta = record_meta.get(record.relative_path)
             if not isinstance(meta, dict):
@@ -3855,7 +3859,10 @@ class SongScanner:
                     mtime_values.append(int(mtime_value))
                 except (TypeError, ValueError):
                     continue
-
+            failure_value = meta.get('parse_failed_at')
+            if isinstance(failure_value, datetime):
+                parse_failures.append(failure_value)
+        
         if sha1_values:
             sha1_payload = '|'.join(sorted(sha1_values))
             sha1_combined = hashlib.sha1(sha1_payload.encode('utf-8')).hexdigest()
@@ -3863,6 +3870,7 @@ class SongScanner:
             sha1_combined = hashlib.sha1(stable_id.encode('utf-8')).hexdigest()
 
         file_mtime = max(mtime_values) if mtime_values else None
+        parse_failed_at = max(parse_failures) if parse_failures else None
 
         base_record = self._select_base_record(records)
         file_path = base_record.relative_path if base_record.relative_path else None
@@ -3918,9 +3926,28 @@ class SongScanner:
             'file_path': file_path,
             'mtime': file_mtime,
             'sha1': sha1_combined,
+            'parse_failed_at': parse_failed_at,
         }
 
         return manifest_entry
+
+    def _compute_manifest_checksum(self, entries: Dict[str, Dict[str, object]]) -> str:
+        checksum_inputs: List[str] = []
+        for entry_id in sorted(entries):
+            entry = entries[entry_id]
+            difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
+            difficulty_tuple = tuple(bool(difficulties.get(level)) for level in ('easy', 'normal', 'hard', 'oni', 'ura'))
+            payload = {
+                'id': entry_id,
+                'sha1': entry.get('sha1') or '',
+                'duration_ms': int(entry.get('duration_ms') or 0),
+                'preview_available': bool(entry.get('preview_available')),
+                'difficulties': difficulty_tuple,
+                'source_type': entry.get('source_type') or '',
+            }
+            checksum_inputs.append(json.dumps(payload, sort_keys=True, separators=(',', ':')))
+        checksum_source = '|'.join(checksum_inputs)
+        return hashlib.sha1(checksum_source.encode('utf-8')).hexdigest() if checksum_inputs else hashlib.sha1(b'').hexdigest()
 
     def _sync_manifest_entries(self, entries: Dict[str, Dict[str, object]]) -> Optional[str]:
         collection = self._manifest_collection
@@ -3967,12 +3994,7 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate bulk write failures
                 LOGGER.debug('Failed to bulk write songs manifest final chunk', exc_info=True)
 
-        checksum_inputs = [
-            f"{entry_id}:{entries[entry_id].get('sha1', '')}"
-            for entry_id in sorted(entries)
-        ]
-        checksum_source = '|'.join(checksum_inputs)
-        checksum = hashlib.sha1(checksum_source.encode('utf-8')).hexdigest() if checksum_inputs else hashlib.sha1(b'').hexdigest()
+        checksum = self._compute_manifest_checksum(entries)
         try:
             collection.update_one(
                 {'_id': '__meta__'},
@@ -3981,6 +4003,8 @@ class SongScanner:
                         'checksum': checksum,
                         'updated_at': now,
                         'count': len(entries),
+                        'manifest_checksum': checksum,
+                        'manifestChecksum': checksum,
                     }
                 },
                 upsert=True,
@@ -4280,8 +4304,11 @@ class SongScanner:
             summary = self._scan_impl(full=full)
         summary['duration_seconds'] = round(time.perf_counter() - start_time, 3)
         TJA_VALIDATOR.flush_summary()
-        LOGGER.info(
-            "scan-summary: found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs",
+        checksum = summary.get('manifest_checksum')
+        log_template = (
+            "scan-summary: found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs"
+        )
+        base_args = (
             summary.get('found', 0),
             summary.get('inserted', 0),
             summary.get('updated', 0),
@@ -4290,6 +4317,10 @@ class SongScanner:
             summary.get('skipped', 0),
             summary.get('duration_seconds', 0.0),
         )
+        if checksum:
+            LOGGER.info(log_template + " checksum=%s", *base_args, checksum)
+        else:
+            LOGGER.info(log_template, *base_args)
         return summary
 
     def _scan_impl(self, *, full: bool) -> Dict[str, int]:
@@ -4595,6 +4626,23 @@ class SongScanner:
             records = aggregated_records[key]
             document = self._build_song_document(key, records)
             charts_payload: List[Dict[str, object]] = list(document.get('charts', []))
+            manifest_entry = self._build_manifest_entry(
+                document,
+                records,
+                record_meta,
+            )
+            if manifest_entry:
+                document['preview_available'] = bool(manifest_entry.get('preview_available'))
+                if manifest_entry.get('sha1'):
+                    document['sha1'] = manifest_entry.get('sha1')
+                if manifest_entry.get('mtime') is not None:
+                    document['mtime'] = manifest_entry.get('mtime')
+                document['parse_failed_at'] = manifest_entry.get('parse_failed_at')
+            else:
+                document['preview_available'] = False
+                document.pop('sha1', None)
+                document.pop('mtime', None)
+                document['parse_failed_at'] = None
             try:
                 song_id = self._upsert_song_document(
                     key,
@@ -4614,11 +4662,6 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
             if song_id is not None:
-                manifest_entry = self._build_manifest_entry(
-                    document,
-                    records,
-                    record_meta,
-                )
                 if manifest_entry:
                     manifest_entries_by_id[manifest_entry['id']] = manifest_entry
                 for chart_entry in charts_payload:
@@ -4710,6 +4753,7 @@ class SongScanner:
                 checksum = self._sync_manifest_entries(manifest_entries_by_id)
                 if checksum:
                     summary['manifest_checksum'] = checksum
+                summary['manifest_documents'] = len(manifest_entries_by_id)
             except Exception:
                 LOGGER.debug('Failed to synchronise songs manifest entries', exc_info=True)
 

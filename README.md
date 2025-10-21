@@ -41,3 +41,17 @@ in repo directory run the file
 ```bash
 start_taiko_edge.hta
 ```
+
+## Environment
+
+The song scanner and validator can be controlled via environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TJA_VALIDATION_MODE` | `warn` | Validation mode: `off`, `warn`, or `strict`. `strict` turns validation errors into scanner errors. |
+| `TJA_VALIDATION_LOG` | `0` | Enable verbose validation logging when set to `1`. |
+| `TJA_VALIDATION_SUMMARY` | `1` | Emit aggregated validation summaries when logging is enabled. |
+
+When running in production the scanner persists a songs manifest with a deterministic `manifest_checksum`. The `/api/songs` endpoint exposes this checksum as an HTTP `ETag` header and accepts `If-None-Match` requests to serve `304 Not Modified` responses when the catalog has not changed.
+
+The new `/api/songs/details` endpoint accepts up to 50 comma-separated song identifiers and returns the detailed payloads in the same order. Pass `notes=none` to fetch metadata without full chart data.
