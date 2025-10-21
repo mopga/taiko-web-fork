@@ -2875,15 +2875,6 @@ class SongSelect{
                                var promise
                                var previewController = null
                                var loadFallback = () => {
-                                       var fallbacks = Array.isArray(currentSong.__previewFallbacks) ? currentSong.__previewFallbacks : null
-                                       while(fallbacks && fallbacks.length){
-                                               var candidate = fallbacks.shift()
-                                               if(!candidate){
-                                                       continue
-                                               }
-                                               songObj.preview_time = 0
-                                               return snd.previewGain.load(candidate).catch(() => loadFallback())
-                                       }
                                        songObj.preview_time = prvTime
                                        return this.loadSongPreviewAudio(songObj, currentSong, prvTime, currentId)
                                }
