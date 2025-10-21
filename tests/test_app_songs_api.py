@@ -561,7 +561,7 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertNotIn('normal', difficulties)
         self.assertNotIn('ura', difficulties)
 
-    def test_catalog_preserve_valid_false_in_difficulties(self):
+    def test_preserve_valid_false(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'preserve-valid', 'count': 1}
         songs_docs = [
@@ -599,7 +599,7 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(difficulties['oni']['stars'], 10)
         self.assertIn('test-issue', difficulties['oni'].get('issues', []))
 
-    def test_catalog_no_false_defaults_in_catalog(self):
+    def test_no_false_defaults_in_catalog(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'no-defaults', 'count': 1}
         songs_docs = [
