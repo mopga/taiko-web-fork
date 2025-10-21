@@ -213,24 +213,45 @@
                         var cachedPage = _this.pageCache.get(pageNumber);
                         var usedCached = false;
                         var url = "api/songs?page=" + pageNumber + "&limit=" + _this.pageSize;
-                        return fetch(url, {
-                                method: "GET",
-                                credentials: "same-origin",
-                        }).then(function(response){
-                                _this.updateTotalCountFromHeaders(response.headers);
-                                if(response.status === 304){
-                                        usedCached = true;
-                                        return cachedPage ? cachedPage.slice() : [];
+                        var retryAttempted = false;
+
+                        function appendBypassParameter(baseUrl){
+                                return baseUrl + (baseUrl.indexOf("?") === -1 ? "?" : "&") + "_bypass=" + Date.now();
+                        }
+
+                        function fetchPage(currentUrl, bypass){
+                                var options = {
+                                        method: "GET",
+                                        credentials: "same-origin",
+                                };
+                                if(bypass){
+                                        options.cache = "no-store";
                                 }
-                                if(!response.ok){
-                                        var error = new Error(url + " (" + response.status + ")");
-                                        error.status = response.status;
-                                        throw error;
-                                }
-                                return response.json().catch(function(){
-                                        return [];
+                                return fetch(currentUrl, options).then(function(response){
+                                        _this.updateTotalCountFromHeaders(response.headers);
+                                        if(response.status === 304){
+                                                if(!_this.pageCache.has(pageNumber)){
+                                                        if(!retryAttempted){
+                                                                retryAttempted = true;
+                                                                return fetchPage(appendBypassParameter(url), true);
+                                                        }
+                                                        return [];
+                                                }
+                                                usedCached = true;
+                                                return cachedPage ? cachedPage.slice() : [];
+                                        }
+                                        if(!response.ok){
+                                                var error = new Error(currentUrl + " (" + response.status + ")");
+                                                error.status = response.status;
+                                                throw error;
+                                        }
+                                        return response.json().catch(function(){
+                                                return [];
+                                        });
                                 });
-                        }).then(function(data){
+                        }
+
+                        return fetchPage(url, false).then(function(data){
                                 if(!Array.isArray(data)){
                                         data = [];
                                 }

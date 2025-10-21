@@ -990,47 +990,7 @@ def route_api_songs():
 
 
 def _build_song_detail_payload(song_doc: dict, manifest_entry: Optional[dict] = None) -> dict:
-    charts_payload = song_doc.get('charts') if isinstance(song_doc.get('charts'), list) else []
-    sanitized_charts: list[dict[str, object]] = []
-    max_duration = 0
-    for entry in charts_payload:
-        if not isinstance(entry, dict):
-            continue
-        chart_data = entry.get('chart_data') if isinstance(entry.get('chart_data'), dict) else {}
-        duration_val = chart_data.get('duration_ms') if isinstance(chart_data, dict) else None
-        try:
-            duration_int = int(duration_val) if duration_val is not None else 0
-        except (TypeError, ValueError):
-            duration_int = 0
-        if duration_int > max_duration:
-            max_duration = duration_int
-        sanitized_entry = {
-            'course': entry.get('course'),
-            'canonical_course': entry.get('canonical_course'),
-            'mode': entry.get('mode'),
-            'display_course': entry.get('display_course'),
-            'level': entry.get('level'),
-            'branch': entry.get('branch'),
-            'valid': entry.get('valid'),
-            'issues': entry.get('issues'),
-            'total_notes': entry.get('total_notes'),
-            'tja_path': entry.get('tja_path'),
-            'rank': entry.get('rank'),
-            'tja_url': entry.get('tja_url'),
-        }
-        sanitized_charts.append(sanitized_entry)
-
-    courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
-    difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
-
-    if isinstance(manifest_entry, dict):
-        duration_override = manifest_entry.get('duration_ms')
-        try:
-            duration_candidate = int(duration_override)
-        except (TypeError, ValueError):
-            duration_candidate = None
-        if duration_candidate:
-            max_duration = max(max_duration, duration_candidate)
+    manifest_data = manifest_entry if isinstance(manifest_entry, dict) else {}
 
     stable_id_value = song_doc.get('scanner_stable_id') if isinstance(song_doc.get('scanner_stable_id'), str) else None
     stable_id = stable_id_value or song_doc.get('id')
@@ -1038,15 +998,44 @@ def _build_song_detail_payload(song_doc: dict, manifest_entry: Optional[dict] = 
         stable_id = str(stable_id) if stable_id is not None else ''
 
     preview_available = song_doc.get('preview_available')
-    if not isinstance(preview_available, bool) and isinstance(manifest_entry, dict):
-        preview_available = manifest_entry.get('preview_available')
+    if not isinstance(preview_available, bool):
+        preview_available = manifest_data.get('preview_available')
+
+    manifest_difficulties = manifest_data.get('difficulties') if isinstance(manifest_data.get('difficulties'), dict) else None
+    if isinstance(manifest_difficulties, dict):
+        difficulties = {key: bool(manifest_difficulties.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
+    else:
+        courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
+        difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
+
+    duration_ms = manifest_data.get('duration_ms')
+    try:
+        duration_int = int(duration_ms)
+    except (TypeError, ValueError):
+        duration_int = 0
+    if duration_int <= 0:
+        duration_fallback = song_doc.get('duration_ms')
+        try:
+            duration_int = int(duration_fallback)
+        except (TypeError, ValueError):
+            duration_int = 0
+    duration_int = max(duration_int, 0)
 
     payload_paths = {}
     paths_doc = song_doc.get('paths')
     if isinstance(paths_doc, dict):
         payload_paths = dict(paths_doc)
 
-    payload = {
+    import_issues = song_doc.get('import_issues')
+    if not isinstance(import_issues, list):
+        import_issues = []
+
+    valid_chart_count = _coerce_int(song_doc.get('valid_chart_count'), 0)
+
+    preview_value = song_doc.get('preview')
+    preview_filename = song_doc.get('preview_filename')
+
+    payload: dict[str, object] = {
         'id': stable_id,
         'legacy_id': song_doc.get('id'),
         'title': song_doc.get('title'),
@@ -1054,20 +1043,18 @@ def _build_song_detail_payload(song_doc: dict, manifest_entry: Optional[dict] = 
         'subtitle': song_doc.get('subtitle'),
         'subtitleJa': song_doc.get('subtitleJa'),
         'category': song_doc.get('category'),
-        'preview': song_doc.get('preview'),
         'music_type': song_doc.get('music_type'),
         'type': song_doc.get('type') or 'tja',
         'paths': payload_paths,
-        'courses': courses_doc,
         'difficulties': difficulties,
-        'charts': sanitized_charts,
-        'import_issues': song_doc.get('import_issues', []),
-        'valid_chart_count': song_doc.get('valid_chart_count', 0),
-        'duration_ms': max_duration,
+        'import_issues': import_issues,
+        'valid_chart_count': valid_chart_count,
+        'duration_ms': duration_int,
         'preview_available': bool(preview_available),
     }
 
-    preview_filename = song_doc.get('preview_filename')
+    if isinstance(preview_value, str) and preview_value:
+        payload['preview'] = preview_value
     if isinstance(preview_filename, str) and preview_filename:
         payload['preview_filename'] = preview_filename
 
@@ -1082,8 +1069,11 @@ def route_api_songs_details():
     tokens = [token.strip() for token in ids_param.split(',')]
     seen: set[str] = set()
     requested_ids: list[str] = []
+    id_pattern = re.compile(r'[A-Za-z0-9_\-\.]{1,128}')
     for token in tokens:
         if not token:
+            continue
+        if not id_pattern.fullmatch(token):
             continue
         if token in seen:
             continue
@@ -1107,12 +1097,12 @@ def route_api_songs_details():
         'preview_available': True,
         'preview_filename': True,
         'paths': True,
+        'duration_ms': True,
         'music_type': True,
         'type': True,
         'courses': True,
         'import_issues': True,
         'valid_chart_count': True,
-        'charts': True,
     }
 
     try:
@@ -1132,7 +1122,7 @@ def route_api_songs_details():
         try:
             manifest_cursor = manifest_collection.find(
                 {'_id': {'$in': requested_ids}},
-                {'duration_ms': 1, 'preview_available': 1},
+                {'duration_ms': 1, 'preview_available': 1, 'difficulties': 1},
             )
             for entry in manifest_cursor:
                 if not isinstance(entry, dict):
@@ -1175,12 +1165,12 @@ def route_api_song_detail(song_id: str):
         'preview_available': True,
         'preview_filename': True,
         'paths': True,
+        'duration_ms': True,
         'music_type': True,
         'type': True,
         'courses': True,
         'import_issues': True,
         'valid_chart_count': True,
-        'charts': True,
     }
 
     try:
@@ -1198,7 +1188,7 @@ def route_api_song_detail(song_id: str):
         try:
             manifest_entry = manifest_collection.find_one(
                 {'_id': stable_id},
-                {'duration_ms': 1, 'preview_available': 1, '_id': False},
+                {'duration_ms': 1, 'preview_available': 1, 'difficulties': 1, '_id': False},
             )
         except Exception:
             manifest_entry = None
