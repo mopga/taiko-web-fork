@@ -1156,6 +1156,7 @@ def route_api_song_details() -> 'flask.Response':
 
     try:
         cursor = db.songs.find({'scanner_stable_id': {'$in': ordered_ids}}, projection)
+        docs = [dict(raw_doc) for raw_doc in cursor if isinstance(raw_doc, dict)]
     except Exception as exc:
         app.logger.exception('Failed to load batch song details')
         reason = getattr(exc, 'details', None)
@@ -1165,20 +1166,20 @@ def route_api_song_details() -> 'flask.Response':
         response = make_response(jsonify(payload), 400)
         return response
 
+    if not include_notes:
+        for doc in docs:
+            charts_payload = doc.get('charts')
+            if not isinstance(charts_payload, list):
+                continue
+            for chart_doc in charts_payload:
+                if isinstance(chart_doc, dict):
+                    chart_doc.pop('chart_data', None)
+
     found_docs: dict[str, dict] = {}
-    for raw_doc in cursor:
-        if not isinstance(raw_doc, dict):
-            continue
-        doc = dict(raw_doc)
+    for doc in docs:
         stable = doc.get('scanner_stable_id') or doc.get('id')
         if not isinstance(stable, str) or not stable:
             continue
-        if not include_notes:
-            charts_payload = doc.get('charts')
-            if isinstance(charts_payload, list):
-                for chart_doc in charts_payload:
-                    if isinstance(chart_doc, dict):
-                        chart_doc.pop('chart_data', None)
         found_docs[stable] = doc
 
     manifest_map = _load_manifest_entries_for_ids(ordered_ids)
