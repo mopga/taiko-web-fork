@@ -18,7 +18,7 @@ import unicodedata
 from typing import Optional
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 # -- カスタム --
 from datetime import datetime
@@ -36,7 +36,6 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from pymongo import MongoClient, ReturnDocument
 from redis import Redis
-from werkzeug.exceptions import NotFound
 
 from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
@@ -539,12 +538,6 @@ def route_index():
     return render_template('index.html', version=version, config=get_config(), year=year, month=month, day=day)
 
 
-@app.route(basedir + 'catalog')
-def route_catalog_page():
-    version = get_version()
-    return render_template('catalog.html', version=version, config=get_config())
-
-
 @app.route(basedir + 'api/csrftoken')
 def route_csrftoken():
     return jsonify({'status': 'ok', 'token': generate_csrf()})
@@ -903,7 +896,7 @@ def route_api_songs():
         return response
 
     meta = _load_manifest_meta()
-    manifest_checksum = meta.get('checksum') if isinstance(meta, dict) else None
+    etag = meta.get('checksum') if isinstance(meta, dict) else None
     total_count = meta.get('count') if isinstance(meta, dict) else None
 
     try:
@@ -923,17 +916,18 @@ def route_api_songs():
     skip = (page - 1) * limit
 
     if isinstance(total_count, int) and total_count >= 0 and skip >= total_count:
-        payload: list[dict] = []
-        etag = _compute_catalog_etag(manifest_checksum, page, limit, payload)
-        if etag and request.headers.get('If-None-Match') == etag:
-            response = make_response('', 304)
-        else:
-            response = make_response(jsonify(payload))
+        response = make_response(jsonify([]))
         if etag:
             response.headers['ETag'] = etag
         response.headers['Cache-Control'] = cache_control
         response.headers['Vary'] = vary_header
-        response.headers['X-Total-Count'] = str(total_count)
+        return response
+
+    if etag and request.headers.get('If-None-Match') == etag:
+        response = make_response('', 304)
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        response.headers['Vary'] = vary_header
         return response
 
     filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
@@ -955,8 +949,7 @@ def route_api_songs():
         'title': 1,
         'category': 1,
         'difficulties': 1,
-        'preview_available': 1,
-        'file_path': 1,
+        'duration_ms': 1,
     }
 
     try:
@@ -966,462 +959,17 @@ def route_api_songs():
             .skip(skip)
             .limit(limit)
         )
-        manifest_entries = list(cursor)
+        payload = list(cursor)
     except Exception:
         app.logger.exception('Failed to query songs manifest')
-        manifest_entries = []
+        payload = []
 
-    stable_ids: list[str] = []
-    for entry in manifest_entries:
-        if not isinstance(entry, dict):
-            continue
-        identifier = entry.get('id')
-        if isinstance(identifier, str) and identifier:
-            stable_ids.append(identifier)
-
-    song_docs: dict[str, dict] = {}
-    if stable_ids:
-        try:
-            songs_cursor = db.songs.find(
-                {'scanner_stable_id': {'$in': stable_ids}},
-                {
-                    '_id': False,
-                    'scanner_stable_id': True,
-                    'id': True,
-                    'title': True,
-                    'subtitle': True,
-                    'category': True,
-                    'paths': True,
-                    'type': True,
-                    'music_type': True,
-                    'courses': True,
-                    'preview_available': True,
-                },
-            )
-            for doc in songs_cursor:
-                if not isinstance(doc, dict):
-                    continue
-                stable_id_value = doc.get('scanner_stable_id')
-                if isinstance(stable_id_value, str) and stable_id_value:
-                    song_docs[stable_id_value] = doc
-        except Exception:
-            app.logger.exception('Failed to load song metadata for manifest page')
-
-    payload: list[dict] = []
-    for entry in manifest_entries:
-        if not isinstance(entry, dict):
-            continue
-        stable_id = entry.get('id')
-        song_doc = song_docs.get(stable_id) if isinstance(stable_id, str) else None
-        catalog_entry = _build_catalog_entry(entry, song_doc)
-        if catalog_entry:
-            payload.append(catalog_entry)
-
-    etag = _compute_catalog_etag(manifest_checksum, page, limit, payload)
-    if etag and request.headers.get('If-None-Match') == etag:
-        response = make_response('', 304)
-    else:
-        response = make_response(jsonify(payload))
+    response = make_response(jsonify(payload))
     if etag:
         response.headers['ETag'] = etag
     response.headers['Cache-Control'] = cache_control
     response.headers['Vary'] = vary_header
-    if isinstance(total_count, int):
-        response.headers['X-Total-Count'] = str(total_count)
     return response
-
-
-def _build_song_detail_payload(song_doc: dict, manifest_entry: Optional[dict] = None) -> dict:
-    manifest_data = manifest_entry if isinstance(manifest_entry, dict) else {}
-
-    stable_id_value = song_doc.get('scanner_stable_id') if isinstance(song_doc.get('scanner_stable_id'), str) else None
-    stable_id = stable_id_value or song_doc.get('id')
-    if not isinstance(stable_id, str):
-        stable_id = str(stable_id) if stable_id is not None else ''
-
-    preview_available = song_doc.get('preview_available')
-    if not isinstance(preview_available, bool):
-        preview_available = manifest_data.get('preview_available')
-
-    manifest_difficulties = manifest_data.get('difficulties') if isinstance(manifest_data.get('difficulties'), dict) else None
-    if isinstance(manifest_difficulties, dict):
-        difficulties = {key: bool(manifest_difficulties.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
-    else:
-        courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
-        difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
-
-    duration_ms = manifest_data.get('duration_ms')
-    try:
-        duration_int = int(duration_ms)
-    except (TypeError, ValueError):
-        duration_int = 0
-    if duration_int <= 0:
-        duration_fallback = song_doc.get('duration_ms')
-        try:
-            duration_int = int(duration_fallback)
-        except (TypeError, ValueError):
-            duration_int = 0
-    duration_int = max(duration_int, 0)
-
-    payload_paths = {}
-    paths_doc = song_doc.get('paths')
-    if isinstance(paths_doc, dict):
-        payload_paths = dict(paths_doc)
-
-    import_issues = song_doc.get('import_issues')
-    if not isinstance(import_issues, list):
-        import_issues = []
-
-    valid_chart_count = _coerce_int(song_doc.get('valid_chart_count'), 0)
-
-    preview_value = song_doc.get('preview')
-    preview_filename = song_doc.get('preview_filename')
-
-    payload: dict[str, object] = {
-        'id': stable_id,
-        'legacy_id': song_doc.get('id'),
-        'title': song_doc.get('title'),
-        'titleJa': song_doc.get('titleJa'),
-        'subtitle': song_doc.get('subtitle'),
-        'subtitleJa': song_doc.get('subtitleJa'),
-        'category': song_doc.get('category'),
-        'music_type': song_doc.get('music_type'),
-        'type': song_doc.get('type') or 'tja',
-        'paths': payload_paths,
-        'difficulties': difficulties,
-        'import_issues': import_issues,
-        'valid_chart_count': valid_chart_count,
-        'duration_ms': duration_int,
-        'preview_available': bool(preview_available),
-    }
-
-    if isinstance(preview_value, str) and preview_value:
-        payload['preview'] = preview_value
-    if isinstance(preview_filename, str) and preview_filename:
-        payload['preview_filename'] = preview_filename
-
-    return payload
-
-
-def _normalise_difficulties(source: Optional[dict]) -> dict:
-    difficulties: dict[str, bool] = {key: False for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
-    if isinstance(source, dict):
-        for key in difficulties:
-            difficulties[key] = bool(source.get(key))
-    return difficulties
-
-
-def _extract_course_difficulties(song_doc: Optional[dict]) -> dict:
-    courses_doc = song_doc.get('courses') if isinstance(song_doc, dict) else None
-    if not isinstance(courses_doc, dict):
-        return _normalise_difficulties(None)
-    return {
-        key: bool(courses_doc.get(key))
-        for key in ('easy', 'normal', 'hard', 'oni', 'ura')
-    }
-
-
-def _determine_source_type(song_doc: Optional[dict], manifest_entry: Optional[dict]) -> str:
-    type_value = None
-    if isinstance(song_doc, dict):
-        type_value = song_doc.get('type') or song_doc.get('music_type')
-    if isinstance(type_value, str) and type_value.strip():
-        token = type_value.strip().casefold()
-        if token in {'rest', 'tja', 'osu'}:
-            return token
-    if isinstance(song_doc, dict):
-        mode_token_source = song_doc.get('mode') or song_doc.get('default_mode')
-        if isinstance(mode_token_source, str):
-            mode_token = mode_token_source.strip().casefold()
-            if mode_token in {'tower', 'dandojo'}:
-                return 'rest'
-        modes_list = song_doc.get('modes')
-        if isinstance(modes_list, (list, tuple)):
-            for raw in modes_list:
-                if isinstance(raw, str) and raw.strip().casefold() in {'tower', 'dandojo'}:
-                    return 'rest'
-    if isinstance(manifest_entry, dict):
-        file_path = manifest_entry.get('file_path')
-        if isinstance(file_path, str):
-            lowered = file_path.lower()
-            if lowered.endswith('.osu'):
-                return 'osu'
-        category_value = manifest_entry.get('category')
-        if isinstance(category_value, str):
-            lowered_category = category_value.strip().casefold()
-            if 'tower' in lowered_category or 'dojo' in lowered_category:
-                return 'rest'
-    return 'tja'
-
-
-def _normalise_url(value: object) -> Optional[str]:
-    if isinstance(value, str):
-        token = value.strip()
-        if token:
-            return token
-    return None
-
-
-def _url_join(base: str, relative: str) -> str:
-    if not base:
-        base = '/'
-    trimmed_base = base.rstrip('/')
-    if not relative:
-        return trimmed_base
-    return f"{trimmed_base}/{relative.lstrip('/')}"
-
-
-def _build_paths_payload(
-    source_type: str,
-    stable_id: str,
-    song_doc: Optional[dict],
-    manifest_entry: Optional[dict],
-) -> Optional[dict]:
-    if source_type == 'rest':
-        return None
-
-    paths_doc = song_doc.get('paths') if isinstance(song_doc, dict) else None
-    base_candidate = None
-    if isinstance(paths_doc, dict):
-        base_candidate = _normalise_url(
-            paths_doc.get('base')
-            or paths_doc.get('dir_url')
-            or paths_doc.get('dir')
-            or paths_doc.get('base_url')
-        )
-    if not base_candidate and isinstance(manifest_entry, dict):
-        file_path = manifest_entry.get('file_path')
-        if isinstance(file_path, str) and file_path.strip():
-            file_path_obj = PurePosixPath(file_path.strip())
-            parent = file_path_obj.parent.as_posix()
-            relative_dir = '' if parent == '.' else parent
-            base_candidate = _url_join(SONGS_BASEURL_VALUE, relative_dir)
-    if not base_candidate:
-        base_candidate = _url_join(SONGS_BASEURL_VALUE, stable_id)
-    base_path = base_candidate.rstrip('/') or '/'
-
-    payload: dict[str, str] = {'base': base_path}
-
-    if source_type == 'tja':
-        tja_url = None
-        if isinstance(paths_doc, dict):
-            tja_url = _normalise_url(paths_doc.get('tja') or paths_doc.get('tja_url'))
-        if not tja_url and isinstance(manifest_entry, dict):
-            manifest_path = manifest_entry.get('file_path')
-            if isinstance(manifest_path, str) and manifest_path.strip():
-                tja_url = _url_join(SONGS_BASEURL_VALUE, manifest_path.strip())
-        if not tja_url:
-            tja_url = f"{base_path}/main.tja"
-        payload['tja'] = tja_url
-    elif source_type == 'osu':
-        osu_url = None
-        if isinstance(paths_doc, dict):
-            for key in ('osu', 'osu_url', 'osu_main'):
-                osu_url = _normalise_url(paths_doc.get(key))
-                if osu_url:
-                    break
-        if not osu_url:
-            osu_url = f"{base_path}/oni.osu"
-        payload['osu'] = osu_url
-
-    return payload
-
-
-def _build_mode_meta(mode_key: str, difficulties: dict) -> Optional[dict]:
-    available = [key for key in ('easy', 'normal', 'hard', 'oni', 'ura') if difficulties.get(key)]
-    if not available:
-        return {'modeKey': mode_key}
-    return {'modeKey': mode_key, 'availableRanks': available}
-
-
-def _compute_catalog_etag(
-    manifest_checksum: Optional[str],
-    page: int,
-    limit: int,
-    payload: list[dict],
-) -> Optional[str]:
-    try:
-        etag_source = {
-            'checksum': manifest_checksum or '',
-            'page': int(page),
-            'limit': int(limit),
-            'payload': payload,
-        }
-    except (TypeError, ValueError):
-        return None
-
-    try:
-        serialized = json.dumps(
-            etag_source,
-            sort_keys=True,
-            separators=(',', ':'),
-            ensure_ascii=False,
-            default=str,
-        )
-    except TypeError:
-        return None
-
-    digest = hashlib.sha1(serialized.encode('utf-8')).hexdigest()
-    return digest
-
-
-def _build_catalog_entry(
-    manifest_entry: Optional[dict],
-    song_doc: Optional[dict],
-) -> Optional[dict]:
-    manifest_data = manifest_entry if isinstance(manifest_entry, dict) else {}
-    song_data = song_doc if isinstance(song_doc, dict) else {}
-
-    stable_id = None
-    for candidate in (
-        manifest_data.get('id'),
-        manifest_data.get('_id'),
-        song_data.get('scanner_stable_id'),
-        song_data.get('id'),
-    ):
-        if isinstance(candidate, str) and candidate.strip():
-            stable_id = candidate.strip()
-            break
-        if stable_id is None and candidate is not None:
-            stable_id = str(candidate)
-    if not stable_id:
-        return None
-
-    title_value = song_data.get('title')
-    if not isinstance(title_value, str) or not title_value.strip():
-        title_value = manifest_data.get('title')
-    if not isinstance(title_value, str) or not title_value.strip():
-        title_value = stable_id
-    title = title_value.strip()
-
-    subtitle_value = song_data.get('subtitle')
-    subtitle = subtitle_value.strip() if isinstance(subtitle_value, str) and subtitle_value.strip() else None
-
-    category_value = song_data.get('category')
-    if not isinstance(category_value, str) or not category_value.strip():
-        category_value = manifest_data.get('category')
-    category = category_value.strip() if isinstance(category_value, str) and category_value.strip() else 'Unsorted'
-
-    manifest_difficulties = manifest_data.get('difficulties') if isinstance(manifest_data.get('difficulties'), dict) else None
-    if isinstance(manifest_difficulties, dict):
-        difficulties = _normalise_difficulties(manifest_difficulties)
-    else:
-        difficulties = _extract_course_difficulties(song_data)
-
-    preview_value = manifest_data.get('preview_available')
-    if not isinstance(preview_value, bool):
-        preview_value = song_data.get('preview_available')
-    preview_available = bool(preview_value)
-
-    source_type = _determine_source_type(song_data, manifest_data)
-    paths_payload = _build_paths_payload(source_type, stable_id, song_data, manifest_data)
-
-    entry: dict[str, object] = {
-        'id': stable_id,
-        'title': title,
-        'subtitle': subtitle,
-        'category': category,
-        'difficulties': difficulties,
-        'source_type': source_type,
-        'preview_available': preview_available,
-    }
-    if paths_payload:
-        entry['paths'] = paths_payload
-
-    lowered_category = category.casefold()
-    if 'dojo' in lowered_category:
-        meta = _build_mode_meta('dandojo', difficulties)
-        if meta:
-            entry['dojo_meta'] = meta
-    elif 'tower' in lowered_category:
-        meta = _build_mode_meta('tower', difficulties)
-        if meta:
-            entry['tower_meta'] = meta
-
-    return entry
-
-
-@app.route(basedir + 'api/songs/details')
-def route_api_songs_details():
-    ids_param = request.args.get('ids', '')
-    if not isinstance(ids_param, str):
-        abort(400)
-    tokens = [token.strip() for token in ids_param.split(',')]
-    seen: set[str] = set()
-    requested_ids: list[str] = []
-    id_pattern = re.compile(r'[A-Za-z0-9_\-\.]{1,128}')
-    for token in tokens:
-        if not token:
-            continue
-        if not id_pattern.fullmatch(token):
-            continue
-        if token in seen:
-            continue
-        seen.add(token)
-        requested_ids.append(token)
-        if len(requested_ids) >= 50:
-            break
-    if not requested_ids:
-        return jsonify([])
-
-    projection = {
-        '_id': False,
-        'id': True,
-        'scanner_stable_id': True,
-        'title': True,
-        'titleJa': True,
-        'subtitle': True,
-        'subtitleJa': True,
-        'category': True,
-        'preview': True,
-        'preview_available': True,
-        'preview_filename': True,
-        'paths': True,
-        'duration_ms': True,
-        'music_type': True,
-        'type': True,
-        'courses': True,
-        'import_issues': True,
-        'valid_chart_count': True,
-    }
-
-    try:
-        cursor = db.songs.find({'scanner_stable_id': {'$in': requested_ids}}, projection)
-        song_docs = {
-            doc.get('scanner_stable_id'): doc
-            for doc in cursor
-            if isinstance(doc, dict) and isinstance(doc.get('scanner_stable_id'), str)
-        }
-    except Exception:
-        app.logger.exception('Failed to load song detail batch for %s', requested_ids)
-        abort(500)
-
-    manifest_entries: dict[str, dict] = {}
-    manifest_collection = _get_manifest_collection()
-    if manifest_collection is not None:
-        try:
-            manifest_cursor = manifest_collection.find(
-                {'_id': {'$in': requested_ids}},
-                {'duration_ms': 1, 'preview_available': 1, 'difficulties': 1},
-            )
-            for entry in manifest_cursor:
-                if not isinstance(entry, dict):
-                    continue
-                identifier = entry.get('_id')
-                if isinstance(identifier, str):
-                    manifest_entries[identifier] = entry
-        except Exception:
-            manifest_entries = {}
-
-    payload = []
-    for stable_id in requested_ids:
-        song_doc = song_docs.get(stable_id)
-        if not isinstance(song_doc, dict):
-            continue
-        manifest_entry = manifest_entries.get(stable_id)
-        payload.append(_build_song_detail_payload(song_doc, manifest_entry=manifest_entry))
-
-    return jsonify(payload)
 
 
 @app.route(basedir + 'api/song/<song_id>')
@@ -1442,15 +990,13 @@ def route_api_song_detail(song_id: str):
         'subtitleJa': True,
         'category': True,
         'preview': True,
-        'preview_available': True,
-        'preview_filename': True,
         'paths': True,
-        'duration_ms': True,
         'music_type': True,
         'type': True,
         'courses': True,
         'import_issues': True,
         'valid_chart_count': True,
+        'charts': True,
     }
 
     try:
@@ -1462,32 +1008,76 @@ def route_api_song_detail(song_id: str):
     if not isinstance(song_doc, dict):
         abort(404)
 
-    manifest_collection = _get_manifest_collection()
-    manifest_entry = None
-    if manifest_collection is not None:
+    charts_payload = song_doc.get('charts') if isinstance(song_doc.get('charts'), list) else []
+    sanitized_charts: list[dict[str, object]] = []
+    max_duration = 0
+    for entry in charts_payload:
+        if not isinstance(entry, dict):
+            continue
+        chart_data = entry.get('chart_data') if isinstance(entry.get('chart_data'), dict) else {}
+        duration_val = chart_data.get('duration_ms') if isinstance(chart_data, dict) else None
         try:
-            manifest_entry = manifest_collection.find_one(
-                {'_id': stable_id},
-                {
-                    '_id': False,
-                    'id': True,
-                    'title': True,
-                    'category': True,
-                    'difficulties': True,
-                    'preview_available': True,
-                    'file_path': True,
-                },
-            )
+            duration_int = int(duration_val) if duration_val is not None else 0
+        except (TypeError, ValueError):
+            duration_int = 0
+        if duration_int > max_duration:
+            max_duration = duration_int
+        sanitized_entry = {
+            'course': entry.get('course'),
+            'canonical_course': entry.get('canonical_course'),
+            'mode': entry.get('mode'),
+            'display_course': entry.get('display_course'),
+            'level': entry.get('level'),
+            'branch': entry.get('branch'),
+            'valid': entry.get('valid'),
+            'issues': entry.get('issues'),
+            'total_notes': entry.get('total_notes'),
+            'tja_path': entry.get('tja_path'),
+            'rank': entry.get('rank'),
+            'tja_url': entry.get('tja_url'),
+        }
+        sanitized_charts.append(sanitized_entry)
+
+    courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
+    difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
+
+    manifest_meta = _get_manifest_collection()
+    manifest_entry = None
+    if manifest_meta is not None:
+        try:
+            manifest_entry = manifest_meta.find_one({'_id': stable_id}, {'duration_ms': 1, '_id': False})
         except Exception:
             manifest_entry = None
-    if isinstance(manifest_entry, dict) and 'id' not in manifest_entry:
-        manifest_entry = dict(manifest_entry)
-        manifest_entry['id'] = stable_id
+    if isinstance(manifest_entry, dict):
+        duration_override = manifest_entry.get('duration_ms')
+        try:
+            duration_candidate = int(duration_override)
+        except (TypeError, ValueError):
+            duration_candidate = None
+        if duration_candidate:
+            max_duration = max(max_duration, duration_candidate)
 
-    catalog_entry = _build_catalog_entry(manifest_entry, song_doc)
-    if not catalog_entry:
-        abort(404)
-    return jsonify(catalog_entry)
+    payload = {
+        'id': stable_id,
+        'legacy_id': song_doc.get('id'),
+        'title': song_doc.get('title'),
+        'titleJa': song_doc.get('titleJa'),
+        'subtitle': song_doc.get('subtitle'),
+        'subtitleJa': song_doc.get('subtitleJa'),
+        'category': song_doc.get('category'),
+        'preview': song_doc.get('preview'),
+        'music_type': song_doc.get('music_type'),
+        'type': song_doc.get('type') or 'tja',
+        'paths': song_doc.get('paths'),
+        'courses': courses_doc,
+        'difficulties': difficulties,
+        'charts': sanitized_charts,
+        'import_issues': song_doc.get('import_issues', []),
+        'valid_chart_count': song_doc.get('valid_chart_count', 0),
+        'duration_ms': max_duration,
+    }
+
+    return jsonify(payload)
 
 
 @app.route(basedir + 'api/modes')
@@ -2148,19 +1738,7 @@ def send_assets(ref):
 
 @app.route(basedir + "songs/<path:ref>")
 def send_songs(ref):
-    try:
-        return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
-    except NotFound:
-        filename = ref.rsplit('/', 1)[-1].lower()
-        if (
-            os.environ.get('FLASK_ENV') == 'production'
-            and filename.startswith('preview.')
-            and (filename.endswith('.mp3') or filename.endswith('.ogg'))
-        ):
-            response = make_response('', 404)
-            response.headers['Cache-Control'] = 'no-cache'
-            return response
-        raise
+    return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
 
 @app.route(basedir + "manifest.json")
 def send_manifest():
