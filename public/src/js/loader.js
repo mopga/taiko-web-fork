@@ -1,4 +1,5 @@
 const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
+const USE_DETAILS_IN_CATALOG = 0;
 const songsCatalogCache = {
         lastResult: [],
         details: Object.create(null),
@@ -56,6 +57,20 @@ class CatalogDetailBatcher{
                         }
                 }
                 if(batch.length === 0){
+                        return;
+                }
+                if(!USE_DETAILS_IN_CATALOG){
+                        console.warn("details-batcher disabled for catalog");
+                        batch.forEach(id => {
+                                const resolvers = this._queue.get(id) || [];
+                                this._queue.delete(id);
+                                this._pending.delete(id);
+                                resolvers.forEach(entry => {
+                                        try{
+                                                entry.resolve(null);
+                                        }catch(e){}
+                                });
+                        });
                         return;
                 }
                 this._inFlight++;
@@ -486,110 +501,92 @@ class Loader{
                                                 song.music = new RemoteFile(paths.audio_url)
                                         }
 
-                                        if(song.type === "tja"){
-                                                var charts = Array.isArray(song.charts) ? song.charts : []
-                                                var canonicalMap = {
-                                                        "Easy": "easy",
-                                                        "Normal": "normal",
-                                                        "Hard": "hard",
-                                                        "Oni": "oni",
-                                                        "UraOni": "ura"
-                                                }
-                                                var courseOrder = ["easy", "normal", "hard", "oni", "ura"]
-                                                var courseInfo = {}
-                                                var chartDetails = {}
-                                                courseOrder.forEach(diff => courseInfo[diff] = null)
-                                                var coursesByDiff = {}
-                                                charts.forEach(chart => {
-                                                        var canonical = chart.canonical_course
-                                                        var courseKey = null
-                                                        if(canonical && canonicalMap[canonical]){
-                                                                courseKey = canonicalMap[canonical]
-                                                        }else if(typeof chart.course === "string"){
-                                                                var lowered = chart.course.toLowerCase()
-                                                                var matched = null
-                                                                for(var name in canonicalMap){
-                                                                        if(canonicalMap[name] === lowered){
-                                                                                matched = canonicalMap[name]
-                                                                                break
-                                                                        }
+                                        var difficultyOrder = ["easy", "normal", "hard", "oni", "ura"]
+                                        var difficultyDetails = {}
+                                        var courseInfo = {}
+                                        difficultyOrder.forEach(diff => {
+                                                courseInfo[diff] = null
+                                                difficultyDetails[diff] = null
+                                        })
+                                        var rawDifficulties = song.difficulties && typeof song.difficulties === "object" ? song.difficulties : {}
+                                        var validCourses = 0
+                                        difficultyOrder.forEach(diff => {
+                                                var entry = rawDifficulties[diff]
+                                                if(entry && typeof entry === "object"){
+                                                        var issues = Array.isArray(entry.issues) ? entry.issues.filter(issue => typeof issue === "string") : []
+                                                        var stars = 0
+                                                        if(typeof entry.stars === "number" && isFinite(entry.stars)){
+                                                                stars = entry.stars
+                                                        }else if(typeof entry.level === "number" && isFinite(entry.level)){
+                                                                stars = entry.level
+                                                        }else if(typeof entry.stars === "string" || typeof entry.level === "string"){
+                                                                var parsedStars = parseInt(entry.stars || entry.level, 10)
+                                                                if(!isNaN(parsedStars)){
+                                                                        stars = parsedStars
                                                                 }
-                                                                courseKey = matched || lowered
                                                         }
-                                                        if(!courseKey || courseOrder.indexOf(courseKey) === -1){
-                                                                return
-                                                        }
-                                                        if(!coursesByDiff[courseKey] || (chart.valid && !coursesByDiff[courseKey].valid)){
-                                                                coursesByDiff[courseKey] = chart
-                                                        }
-                                                })
-                                                song.courses = courseInfo
-                                                Object.keys(coursesByDiff).forEach(diff => {
-                                                        var chart = coursesByDiff[diff]
-                                                        var sourceUrl = chart.tja_url || null
+                                                        var branch = entry.branch === true
+                                                        var valid = entry.valid !== false
                                                         var info = {
-                                                                stars: chart.level || 0,
-                                                                branch: !!chart.branch,
-                                                                valid: !!chart.valid,
-                                                                issues: chart.issues || [],
-                                                                tja_url: sourceUrl
+                                                                stars: stars,
+                                                                branch: branch,
+                                                                valid: valid,
+                                                                issues: issues
                                                         }
-                                                        chartDetails[diff] = info
-                                                        song.courses[diff] = info.valid ? info : null
-                                                })
-                                                song.chartDetails = chartDetails
-                                                var validCount = song.valid_chart_count
-                                                if(typeof validCount !== "number"){
-                                                        validCount = Object.values(song.courses).filter(info => info && info.valid).length
+                                                        difficultyDetails[diff] = info
+                                                        if(valid){
+                                                                courseInfo[diff] = info
+                                                                validCourses++
+                                                        }
+                                                }else if(entry === true || typeof entry === "number"){
+                                                        var starsValue = typeof entry === "number" && isFinite(entry) ? entry : 0
+                                                        var info = {
+                                                                stars: starsValue,
+                                                                branch: false,
+                                                                valid: true,
+                                                                issues: []
+                                                        }
+                                                        difficultyDetails[diff] = info
+                                                        courseInfo[diff] = info
+                                                        validCourses++
                                                 }
-                                                song.hasValidCharts = validCount > 0
-                                                if(!song.hasValidCharts){
-                                                        song.courses = null
-                                                }
+                                        })
+                                        song.chartDetails = difficultyDetails
+                                        var declaredValid = 0
+                                        if(typeof song.valid_charts === "number" && isFinite(song.valid_charts)){
+                                                declaredValid = song.valid_charts
+                                        }else if(typeof song.valid_chart_count === "number" && isFinite(song.valid_chart_count)){
+                                                declaredValid = song.valid_chart_count
+                                        }
+                                        if(!declaredValid){
+                                                declaredValid = validCourses
+                                        }
+                                        song.valid_charts = declaredValid
+                                        song.valid_chart_count = declaredValid
+                                        song.hasValidCharts = declaredValid > 0
+                                        song.courses = song.hasValidCharts ? courseInfo : null
 
-                                                var uniqueUrls = new Set()
-                                                Object.values(song.chartDetails).forEach(info => {
-                                                        if(info && info.tja_url){
-                                                                uniqueUrls.add(info.tja_url)
-                                                        }
-                                                })
-
-                                                if(uniqueUrls.size === 0){
-                                                        var fallbackUrl = paths.tja_url || (dirUrl + "main.tja")
-                                                        song.chart = fallbackUrl ? new RemoteFile(fallbackUrl) : null
-                                                }else if(uniqueUrls.size === 1){
-                                                        var singleUrl = uniqueUrls.values().next().value
-                                                        song.chart = new RemoteFile(singleUrl)
-                                                }else{
-                                                        song.chart = {separateDiff: true}
-                                                        Object.entries(song.chartDetails).forEach(([diff, info]) => {
-                                                                if(info && info.tja_url){
-                                                                        song.chart[diff] = new RemoteFile(info.tja_url)
-                                                                }
-                                                        })
-                                                }
-                                                Object.values(song.chartDetails).forEach(info => {
-                                                        if(info){
-                                                                delete info.tja_url
-                                                        }
-                                                })
-                                        }else{
+                                        if(song.type === "tja"){
+                                                var fallbackUrl = paths.tja_url || (dirUrl + "main.tja")
+                                                song.chart = fallbackUrl ? new RemoteFile(fallbackUrl) : null
+                                        }else if(song.courses){
                                                 song.chart = {separateDiff: true}
                                                 for(var diff in song.courses){
                                                         if(song.courses[diff]){
                                                                 song.chart[diff] = new RemoteFile(dirUrl + diff + ".osu")
                                                         }
                                                 }
+                                        }else{
+                                                song.chart = null
                                         }
 
                                         if(song.lyrics){
                                                 song.lyricsFile = new RemoteFile(dirUrl + "main.vtt")
                                         }
-                                        var previewAllowed = song.previewAvailable !== false;
-                                        if(previewAllowed && song.preview > 0){
+                                        if(song.previewAvailable === true){
                                                 song.previewMusic = new RemoteFile(dirUrl + "preview." + gameConfig.preview_type)
                                         }else if(song.previewAvailable === false){
-                                                song.previewMusic = null;
+                                                song.previewMusic = null
                                         }
                                 })
                                 assets.songsDefault = songs
@@ -952,16 +949,22 @@ class Loader{
         loadSongsCatalog(){
                 const loaderInstance = this
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
-                const detailBatcher = songsCatalogCache.detailBatcher || (songsCatalogCache.detailBatcher = new CatalogDetailBatcher({
-                        maxConcurrency: 6,
-                        batchInterval: 16,
-                        includeNotes: false,
-                }))
+                const detailBatcher = USE_DETAILS_IN_CATALOG
+                        ? songsCatalogCache.detailBatcher || (songsCatalogCache.detailBatcher = new CatalogDetailBatcher({
+                                maxConcurrency: 6,
+                                batchInterval: 16,
+                                includeNotes: false,
+                        }))
+                        : null
                 const supportsFetch = typeof fetch === "function"
                 const catalogUrl = "api/songs"
                 const cachedDetails = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null
 
                 function loadDetail(entry){
+                        if(!USE_DETAILS_IN_CATALOG){
+                                console.warn("details-batcher disabled for catalog")
+                                return Promise.resolve(null)
+                        }
                         if(!entry || typeof entry.id !== "string" || !entry.id){
                                 return Promise.resolve(null)
                         }
@@ -969,6 +972,9 @@ class Loader{
                         const cachedDetail = detailCache[detailId]
                         if(cachedDetail){
                                 return Promise.resolve(cachedDetail)
+                        }
+                        if(!detailBatcher){
+                                return Promise.resolve(null)
                         }
                         return detailBatcher.load(detailId).then(detailResponse => {
                                 if(detailResponse && typeof detailResponse === "object"){
@@ -1104,6 +1110,10 @@ class Loader{
                 }
 
                 async function hydrateDetails(entries){
+                        if(!USE_DETAILS_IN_CATALOG){
+                                console.warn("details-batcher disabled for catalog")
+                                return []
+                        }
                         if(!Array.isArray(entries) || entries.length === 0){
                                 return []
                         }
@@ -1132,6 +1142,16 @@ class Loader{
                                 if(entries.length === 0){
                                         songsCatalogCache.lastResult = []
                                         return []
+                                }
+                                if(!USE_DETAILS_IN_CATALOG){
+                                        const normalized = entries.map(entry => {
+                                                if(entry && typeof entry === "object"){
+                                                        return Object.assign({}, entry)
+                                                }
+                                                return entry
+                                        })
+                                        songsCatalogCache.lastResult = normalized
+                                        return normalized.slice()
                                 }
                                 const details = await hydrateDetails(entries)
                                 songsCatalogCache.lastResult = details.slice()

@@ -113,6 +113,20 @@ class _MemoryCollection:
         if isinstance(target, dict):
             target[parts[-1]] = value
 
+    def update_many(self, filter_, update):
+        matched = 0
+        with self._lock:
+            for doc in self._docs:
+                if self._matches(doc, filter_ or {}):
+                    matched += 1
+                    if '$set' in update:
+                        for key, value in update['$set'].items():
+                            if '.' in key:
+                                self._set_path(doc, key, self._clone(value))
+                            else:
+                                doc[key] = self._clone(value)
+        return _DummyUpdateResult(matched, matched, None)
+
     def _parse_array_filters(self, array_filters):
         mapping = {}
         for filter_doc in array_filters or []:
@@ -2202,6 +2216,12 @@ LEVEL:7
         self.assertIn('easy', courses)
         self.assertIn('oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
+        self.assertEqual(inserted.get('valid_charts'), 2)
+        self.assertTrue(inserted.get('is_playable'))
+        difficulties = inserted.get('difficulties')
+        self.assertIsInstance(difficulties, dict)
+        self.assertIsInstance(difficulties.get('oni'), dict)
+        self.assertTrue(difficulties['oni'].get('valid'))
         self.assertEqual(inserted.get('genre'), 'Unsorted')
         self.assertTrue(all(chart.get('total_notes', 0) > 0 for chart in inserted['charts']))
 
