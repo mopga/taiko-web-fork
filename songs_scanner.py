@@ -3995,22 +3995,42 @@ class SongScanner:
                 LOGGER.debug('Failed to bulk write songs manifest final chunk', exc_info=True)
 
         checksum = self._compute_manifest_checksum(entries)
-        try:
-            collection.update_one(
-                {'_id': '__meta__'},
-                {
-                    '$set': {
-                        'checksum': checksum,
-                        'updated_at': now,
-                        'count': len(entries),
-                        'manifest_checksum': checksum,
-                        'manifestChecksum': checksum,
-                    }
-                },
-                upsert=True,
-            )
-        except Exception:  # pragma: no cover - tolerate meta update failures
-            LOGGER.debug('Failed to update songs manifest meta', exc_info=True)
+
+        previous_checksum = self._manifest_checksum
+        if previous_checksum is None:
+            try:
+                meta_doc = collection.find_one(
+                    {'_id': '__meta__'},
+                    {'manifestChecksum': 1, 'manifest_checksum': 1, 'checksum': 1},
+                )
+            except Exception:  # pragma: no cover - tolerate lookup issues
+                LOGGER.debug('Failed to load existing songs manifest meta', exc_info=True)
+                meta_doc = None
+            if isinstance(meta_doc, dict):
+                for key in ('manifestChecksum', 'manifest_checksum', 'checksum'):
+                    candidate = meta_doc.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        previous_checksum = candidate.strip()
+                        break
+
+        if previous_checksum != checksum:
+            try:
+                collection.update_one(
+                    {'_id': '__meta__'},
+                    {
+                        '$set': {
+                            'checksum': checksum,
+                            'updated_at': now,
+                            'count': len(entries),
+                            'manifest_checksum': checksum,
+                            'manifestChecksum': checksum,
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception:  # pragma: no cover - tolerate meta update failures
+                LOGGER.debug('Failed to update songs manifest meta', exc_info=True)
+
         self._manifest_checksum = checksum
         return checksum
 

@@ -897,45 +897,17 @@ def route_api_preview():
 
 @app.route(basedir + 'api/songs')
 def route_api_songs():
-    manifest_collection = _get_manifest_collection()
     cache_control = 'public, max-age=86400, stale-while-revalidate=600'
     vary_header = 'If-None-Match, Accept-Encoding'
-    if manifest_collection is None:
-        response = make_response(jsonify([]))
-        response.headers['Cache-Control'] = cache_control
-        response.headers['Vary'] = vary_header
-        return response
 
     meta = _load_manifest_meta()
     etag: Optional[str] = None
-    total_count: Optional[int] = None
     if isinstance(meta, dict):
         for key in ('manifestChecksum', 'manifest_checksum', 'checksum'):
             candidate = meta.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 etag = candidate.strip()
                 break
-        count_value = meta.get('count')
-        try:
-            total_count = int(count_value)
-        except (TypeError, ValueError):
-            total_count = None
-
-    try:
-        limit_value = request.args.get('limit', 200)
-        limit = int(limit_value)
-    except (TypeError, ValueError):
-        limit = 200
-    limit = max(1, min(limit, 200))
-
-    try:
-        page_value = request.args.get('page', 1)
-        page = int(page_value)
-    except (TypeError, ValueError):
-        page = 1
-    page = max(page, 1)
-
-    skip = (page - 1) * limit
 
     quoted_etag = f'"{etag}"' if etag else None
 
@@ -948,7 +920,8 @@ def route_api_songs():
             response.headers['ETag'] = quoted_etag
         return response
 
-    if isinstance(total_count, int) and total_count >= 0 and skip >= total_count:
+    songs_collection = getattr(db, 'songs', None)
+    if songs_collection is None:
         response = make_response(jsonify([]))
         response.headers['Cache-Control'] = cache_control
         response.headers['Vary'] = vary_header
@@ -956,7 +929,21 @@ def route_api_songs():
             response.headers['ETag'] = quoted_etag
         return response
 
-    filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
+    limit_param = request.args.get('limit', type=int)
+    page_param = request.args.get('page', type=int)
+    use_pagination = limit_param is not None or page_param is not None
+
+    if use_pagination:
+        limit = limit_param if isinstance(limit_param, int) else 200
+        limit = max(1, min(limit, 200))
+        page = page_param if isinstance(page_param, int) else 1
+        page = max(page, 1)
+        skip = (page - 1) * limit
+    else:
+        limit = None
+        skip = 0
+
+    filters: dict[str, object] = {'enabled': {'$ne': False}}
     category_param = request.args.get('category', '')
     if isinstance(category_param, str):
         category_value = category_param.strip()
@@ -972,6 +959,7 @@ def route_api_songs():
     projection = {
         '_id': 0,
         'id': 1,
+        'scanner_stable_id': 1,
         'title': 1,
         'subtitle': 1,
         'category': 1,
@@ -983,15 +971,18 @@ def route_api_songs():
     }
 
     try:
-        cursor = (
-            manifest_collection.find(filters, projection)
-            .sort('title_lc', 1)
-            .skip(skip)
-            .limit(limit)
-        )
+        cursor = songs_collection.find(filters, projection).sort([
+            ('title', 1),
+            ('scanner_stable_id', 1),
+            ('id', 1),
+        ])
+        if skip:
+            cursor = cursor.skip(skip)
+        if isinstance(limit, int):
+            cursor = cursor.limit(limit)
         raw_payload = list(cursor)
     except Exception:
-        app.logger.exception('Failed to query songs manifest')
+        app.logger.exception('Failed to query songs catalog')
         raw_payload = []
 
     payload: list[dict[str, object]] = []
@@ -999,6 +990,10 @@ def route_api_songs():
         if not isinstance(entry, dict):
             continue
         sanitized = dict(entry)
+        stable_id = sanitized.get('scanner_stable_id')
+        if isinstance(stable_id, str) and stable_id:
+            sanitized['id'] = stable_id
+        sanitized.pop('scanner_stable_id', None)
         if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
             sanitized['subtitle'] = ''
         difficulties = sanitized.get('difficulties')
@@ -1142,8 +1137,6 @@ def route_api_song_details() -> 'flask.Response':
             include_notes = True
 
     projection = dict(_SONG_DETAIL_PROJECTION)
-    if not include_notes:
-        projection['charts.chart_data'] = False
 
     try:
         cursor = db.songs.find({'scanner_stable_id': {'$in': ordered_ids}}, projection)
@@ -1156,6 +1149,12 @@ def route_api_song_details() -> 'flask.Response':
         if isinstance(doc, dict):
             stable = doc.get('scanner_stable_id') or doc.get('id')
             if isinstance(stable, str) and stable:
+                if not include_notes:
+                    charts_payload = doc.get('charts')
+                    if isinstance(charts_payload, list):
+                        for chart_doc in charts_payload:
+                            if isinstance(chart_doc, dict):
+                                chart_doc.pop('chart_data', None)
                 song_docs[stable] = doc
 
     manifest_map = _load_manifest_entries_for_ids(ordered_ids)
