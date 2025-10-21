@@ -1187,14 +1187,43 @@ class Loader{
                 }
 
                 async function loadAllPages(){
+                        const PAGE_SIZE = LIMIT
+                        const SOFT_PAGE_STEP = 8
+                        const ABSOLUTE_PAGE_LIMIT = 200
                         let page = 1
-                        while(page <= HARD_PAGE_CAP){
-                                const shouldContinue = await processPage(page)
-                                if(!shouldContinue){
-                                        break
+                        let hasMore = true
+                        let totalPagesFetched = 0
+                        let reachedAbsoluteCap = false
+
+                        async function fetchChunk(maxPages){
+                                let processed = 0
+                                while(hasMore && processed < maxPages){
+                                        if(totalPagesFetched >= ABSOLUTE_PAGE_LIMIT){
+                                                hasMore = false
+                                                reachedAbsoluteCap = true
+                                                break
+                                        }
+                                        const shouldContinue = await processPage(page)
+                                        totalPagesFetched += 1
+                                        processed += 1
+                                        if(!shouldContinue){
+                                                hasMore = false
+                                                break
+                                        }
+                                        page += 1
                                 }
-                                page += 1
                         }
+
+                        await fetchChunk(HARD_PAGE_CAP)
+                        while(hasMore){
+                                await fetchChunk(SOFT_PAGE_STEP)
+                        }
+
+                        songsCatalogCache.catalogHasMore = hasMore || reachedAbsoluteCap
+                        songsCatalogCache.catalogReachedCap = reachedAbsoluteCap
+                        songsCatalogCache.totalCatalogPages = totalPagesFetched
+                        songsCatalogCache.pageSize = PAGE_SIZE
+                        songsCatalogCache.nextCatalogPage = hasMore ? page : (reachedAbsoluteCap ? page : null)
                 }
 
                 return loadAllPages().then(() => {
