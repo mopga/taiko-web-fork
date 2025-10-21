@@ -910,8 +910,10 @@ class Loader{
                 return promise
         }
         loadSongsCatalog(){
+                const PAGE_SIZE = 200
                 const HARD_PAGE_CAP = 8
-                const LIMIT = 200
+                const SOFT_PAGE_STEP = 8
+                const ABSOLUTE_PAGE_LIMIT = 200
                 const collected = []
                 const loaderInstance = this
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
@@ -1109,12 +1111,12 @@ class Loader{
                 async function processPage(pageNumber){
                         let response
                         try{
-                                response = await fetchPage(pageNumber, LIMIT)
+                                response = await fetchPage(pageNumber, PAGE_SIZE)
                         }catch(err){
                                 const cached = getCachedPage(pageNumber)
                                 if(cached && cached.length){
                                         appendItems(cached)
-                                        if(cached.length < LIMIT){
+                                        if(cached.length < PAGE_SIZE){
                                                 pruneCacheAfter(pageNumber)
                                                 return false
                                         }
@@ -1127,7 +1129,7 @@ class Loader{
                                 const cached = getCachedPage(pageNumber)
                                 if(Array.isArray(cached) && cached.length){
                                         appendItems(cached)
-                                        if(cached.length < LIMIT){
+                                        if(cached.length < PAGE_SIZE){
                                                 pruneCacheAfter(pageNumber)
                                                 return false
                                         }
@@ -1150,7 +1152,7 @@ class Loader{
                                 const cached = getCachedPage(pageNumber)
                                 if(Array.isArray(cached) && cached.length){
                                         appendItems(cached)
-                                        if(cached.length < LIMIT){
+                                        if(cached.length < PAGE_SIZE){
                                                 pruneCacheAfter(pageNumber)
                                                 return false
                                         }
@@ -1179,7 +1181,7 @@ class Loader{
 
                         cachePage(pageNumber, pageDetails)
                         appendItems(pageDetails)
-                        if(entries.length < LIMIT || pageDetails.length < LIMIT){
+                        if(entries.length < PAGE_SIZE || pageDetails.length < PAGE_SIZE){
                                 pruneCacheAfter(pageNumber)
                                 return false
                         }
@@ -1187,13 +1189,21 @@ class Loader{
                 }
 
                 async function loadAllPages(){
-                        const PAGE_SIZE = LIMIT
-                        const SOFT_PAGE_STEP = 8
-                        const ABSOLUTE_PAGE_LIMIT = 200
                         let page = 1
                         let hasMore = true
                         let totalPagesFetched = 0
                         let reachedAbsoluteCap = false
+                        let chunkInFlight = null
+
+                        function updateCatalogState(){
+                                songsCatalogCache.catalogHasMore = hasMore
+                                songsCatalogCache.catalogReachedCap = reachedAbsoluteCap
+                                songsCatalogCache.pageSize = PAGE_SIZE
+                                songsCatalogCache.nextCatalogPage = hasMore ? page : null
+                                songsCatalogCache.loadedCatalogPages = totalPagesFetched
+                                songsCatalogCache.totalCatalogPages = hasMore ? ABSOLUTE_PAGE_LIMIT : totalPagesFetched
+                                songsCatalogCache.absoluteCatalogPageLimit = ABSOLUTE_PAGE_LIMIT
+                        }
 
                         async function fetchChunk(maxPages){
                                 let processed = 0
@@ -1212,18 +1222,54 @@ class Loader{
                                         }
                                         page += 1
                                 }
+                                songsCatalogCache.lastResult = collected.slice()
+                                updateCatalogState()
                         }
+
+                        function normaliseStep(step){
+                                const numeric = Number(step)
+                                if(!Number.isFinite(numeric) || numeric <= 0){
+                                        return SOFT_PAGE_STEP
+                                }
+                                return Math.max(1, Math.min(Math.floor(numeric), ABSOLUTE_PAGE_LIMIT - totalPagesFetched))
+                        }
+
+                        async function requestMoreCatalog(step = SOFT_PAGE_STEP){
+                                if(chunkInFlight){
+                                        return chunkInFlight
+                                }
+                                if(!hasMore){
+                                        updateCatalogState()
+                                        return Promise.resolve([])
+                                }
+                                const pagesToFetch = normaliseStep(step)
+                                if(pagesToFetch <= 0){
+                                        hasMore = false
+                                        reachedAbsoluteCap = totalPagesFetched >= ABSOLUTE_PAGE_LIMIT
+                                        updateCatalogState()
+                                        return Promise.resolve([])
+                                }
+                                const previousCount = collected.length
+                                chunkInFlight = fetchChunk(pagesToFetch).then(() => {
+                                        const newCount = collected.length
+                                        if(newCount > previousCount){
+                                                return collected.slice(previousCount, newCount)
+                                        }
+                                        return []
+                                }).finally(() => {
+                                        chunkInFlight = null
+                                })
+                                return chunkInFlight
+                        }
+
+                        songsCatalogCache.requestMoreCatalog = requestMoreCatalog
+                        loaderInstance.requestMoreCatalog = requestMoreCatalog
 
                         await fetchChunk(HARD_PAGE_CAP)
-                        while(hasMore){
-                                await fetchChunk(SOFT_PAGE_STEP)
-                        }
 
-                        songsCatalogCache.catalogHasMore = hasMore || reachedAbsoluteCap
-                        songsCatalogCache.catalogReachedCap = reachedAbsoluteCap
-                        songsCatalogCache.totalCatalogPages = totalPagesFetched
-                        songsCatalogCache.pageSize = PAGE_SIZE
-                        songsCatalogCache.nextCatalogPage = hasMore ? page : (reachedAbsoluteCap ? page : null)
+                        while(hasMore){
+                                await requestMoreCatalog(SOFT_PAGE_STEP)
+                        }
                 }
 
                 return loadAllPages().then(() => {
