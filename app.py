@@ -903,7 +903,7 @@ def route_api_songs():
         return response
 
     meta = _load_manifest_meta()
-    etag = meta.get('checksum') if isinstance(meta, dict) else None
+    manifest_checksum = meta.get('checksum') if isinstance(meta, dict) else None
     total_count = meta.get('count') if isinstance(meta, dict) else None
 
     try:
@@ -923,21 +923,17 @@ def route_api_songs():
     skip = (page - 1) * limit
 
     if isinstance(total_count, int) and total_count >= 0 and skip >= total_count:
-        response = make_response(jsonify([]))
+        payload: list[dict] = []
+        etag = _compute_catalog_etag(manifest_checksum, page, limit, payload)
+        if etag and request.headers.get('If-None-Match') == etag:
+            response = make_response('', 304)
+        else:
+            response = make_response(jsonify(payload))
         if etag:
             response.headers['ETag'] = etag
         response.headers['Cache-Control'] = cache_control
         response.headers['Vary'] = vary_header
         response.headers['X-Total-Count'] = str(total_count)
-        return response
-
-    if etag and request.headers.get('If-None-Match') == etag:
-        response = make_response('', 304)
-        response.headers['ETag'] = etag
-        response.headers['Cache-Control'] = cache_control
-        response.headers['Vary'] = vary_header
-        if isinstance(total_count, int):
-            response.headers['X-Total-Count'] = str(total_count)
         return response
 
     filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
@@ -1021,7 +1017,11 @@ def route_api_songs():
         if catalog_entry:
             payload.append(catalog_entry)
 
-    response = make_response(jsonify(payload))
+    etag = _compute_catalog_etag(manifest_checksum, page, limit, payload)
+    if etag and request.headers.get('If-None-Match') == etag:
+        response = make_response('', 304)
+    else:
+        response = make_response(jsonify(payload))
     if etag:
         response.headers['ETag'] = etag
     response.headers['Cache-Control'] = cache_control
@@ -1232,6 +1232,37 @@ def _build_mode_meta(mode_key: str, difficulties: dict) -> Optional[dict]:
     if not available:
         return {'modeKey': mode_key}
     return {'modeKey': mode_key, 'availableRanks': available}
+
+
+def _compute_catalog_etag(
+    manifest_checksum: Optional[str],
+    page: int,
+    limit: int,
+    payload: list[dict],
+) -> Optional[str]:
+    try:
+        etag_source = {
+            'checksum': manifest_checksum or '',
+            'page': int(page),
+            'limit': int(limit),
+            'payload': payload,
+        }
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        serialized = json.dumps(
+            etag_source,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=False,
+            default=str,
+        )
+    except TypeError:
+        return None
+
+    digest = hashlib.sha1(serialized.encode('utf-8')).hexdigest()
+    return digest
 
 
 def _build_catalog_entry(
