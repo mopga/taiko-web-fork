@@ -36,6 +36,7 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from pymongo import MongoClient, ReturnDocument
 from redis import Redis
+from werkzeug.exceptions import NotFound
 
 from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
@@ -538,6 +539,12 @@ def route_index():
     return render_template('index.html', version=version, config=get_config(), year=year, month=month, day=day)
 
 
+@app.route(basedir + 'catalog')
+def route_catalog_page():
+    version = get_version()
+    return render_template('catalog.html', version=version, config=get_config())
+
+
 @app.route(basedir + 'api/csrftoken')
 def route_csrftoken():
     return jsonify({'status': 'ok', 'token': generate_csrf()})
@@ -921,6 +928,7 @@ def route_api_songs():
             response.headers['ETag'] = etag
         response.headers['Cache-Control'] = cache_control
         response.headers['Vary'] = vary_header
+        response.headers['X-Total-Count'] = str(total_count)
         return response
 
     if etag and request.headers.get('If-None-Match') == etag:
@@ -928,6 +936,8 @@ def route_api_songs():
         response.headers['ETag'] = etag
         response.headers['Cache-Control'] = cache_control
         response.headers['Vary'] = vary_header
+        if isinstance(total_count, int):
+            response.headers['X-Total-Count'] = str(total_count)
         return response
 
     filters: dict[str, object] = {'_id': {'$ne': '__meta__'}}
@@ -950,6 +960,7 @@ def route_api_songs():
         'category': 1,
         'difficulties': 1,
         'duration_ms': 1,
+        'preview_available': 1,
     }
 
     try:
@@ -964,50 +975,21 @@ def route_api_songs():
         app.logger.exception('Failed to query songs manifest')
         payload = []
 
+    for entry in payload:
+        if isinstance(entry, dict):
+            entry['preview_available'] = bool(entry.get('preview_available'))
+
     response = make_response(jsonify(payload))
     if etag:
         response.headers['ETag'] = etag
     response.headers['Cache-Control'] = cache_control
     response.headers['Vary'] = vary_header
+    if isinstance(total_count, int):
+        response.headers['X-Total-Count'] = str(total_count)
     return response
 
 
-@app.route(basedir + 'api/song/<song_id>')
-def route_api_song_detail(song_id: str):
-    if not isinstance(song_id, str):
-        abort(400)
-    stable_id = song_id.strip()
-    if not stable_id:
-        abort(400)
-
-    projection = {
-        '_id': False,
-        'id': True,
-        'scanner_stable_id': True,
-        'title': True,
-        'titleJa': True,
-        'subtitle': True,
-        'subtitleJa': True,
-        'category': True,
-        'preview': True,
-        'paths': True,
-        'music_type': True,
-        'type': True,
-        'courses': True,
-        'import_issues': True,
-        'valid_chart_count': True,
-        'charts': True,
-    }
-
-    try:
-        song_doc = db.songs.find_one({'scanner_stable_id': stable_id}, projection)
-    except Exception:
-        app.logger.exception('Failed to load song detail for %s', stable_id)
-        abort(500)
-
-    if not isinstance(song_doc, dict):
-        abort(404)
-
+def _build_song_detail_payload(song_doc: dict, manifest_entry: Optional[dict] = None) -> dict:
     charts_payload = song_doc.get('charts') if isinstance(song_doc.get('charts'), list) else []
     sanitized_charts: list[dict[str, object]] = []
     max_duration = 0
@@ -1041,13 +1023,6 @@ def route_api_song_detail(song_id: str):
     courses_doc = song_doc.get('courses') if isinstance(song_doc.get('courses'), dict) else {}
     difficulties = {key: bool(courses_doc.get(key)) for key in ('easy', 'normal', 'hard', 'oni', 'ura')}
 
-    manifest_meta = _get_manifest_collection()
-    manifest_entry = None
-    if manifest_meta is not None:
-        try:
-            manifest_entry = manifest_meta.find_one({'_id': stable_id}, {'duration_ms': 1, '_id': False})
-        except Exception:
-            manifest_entry = None
     if isinstance(manifest_entry, dict):
         duration_override = manifest_entry.get('duration_ms')
         try:
@@ -1056,6 +1031,20 @@ def route_api_song_detail(song_id: str):
             duration_candidate = None
         if duration_candidate:
             max_duration = max(max_duration, duration_candidate)
+
+    stable_id_value = song_doc.get('scanner_stable_id') if isinstance(song_doc.get('scanner_stable_id'), str) else None
+    stable_id = stable_id_value or song_doc.get('id')
+    if not isinstance(stable_id, str):
+        stable_id = str(stable_id) if stable_id is not None else ''
+
+    preview_available = song_doc.get('preview_available')
+    if not isinstance(preview_available, bool) and isinstance(manifest_entry, dict):
+        preview_available = manifest_entry.get('preview_available')
+
+    payload_paths = {}
+    paths_doc = song_doc.get('paths')
+    if isinstance(paths_doc, dict):
+        payload_paths = dict(paths_doc)
 
     payload = {
         'id': stable_id,
@@ -1068,15 +1057,153 @@ def route_api_song_detail(song_id: str):
         'preview': song_doc.get('preview'),
         'music_type': song_doc.get('music_type'),
         'type': song_doc.get('type') or 'tja',
-        'paths': song_doc.get('paths'),
+        'paths': payload_paths,
         'courses': courses_doc,
         'difficulties': difficulties,
         'charts': sanitized_charts,
         'import_issues': song_doc.get('import_issues', []),
         'valid_chart_count': song_doc.get('valid_chart_count', 0),
         'duration_ms': max_duration,
+        'preview_available': bool(preview_available),
     }
 
+    preview_filename = song_doc.get('preview_filename')
+    if isinstance(preview_filename, str) and preview_filename:
+        payload['preview_filename'] = preview_filename
+
+    return payload
+
+
+@app.route(basedir + 'api/songs/details')
+def route_api_songs_details():
+    ids_param = request.args.get('ids', '')
+    if not isinstance(ids_param, str):
+        abort(400)
+    tokens = [token.strip() for token in ids_param.split(',')]
+    seen: set[str] = set()
+    requested_ids: list[str] = []
+    for token in tokens:
+        if not token:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        requested_ids.append(token)
+        if len(requested_ids) >= 50:
+            break
+    if not requested_ids:
+        return jsonify([])
+
+    projection = {
+        '_id': False,
+        'id': True,
+        'scanner_stable_id': True,
+        'title': True,
+        'titleJa': True,
+        'subtitle': True,
+        'subtitleJa': True,
+        'category': True,
+        'preview': True,
+        'preview_available': True,
+        'preview_filename': True,
+        'paths': True,
+        'music_type': True,
+        'type': True,
+        'courses': True,
+        'import_issues': True,
+        'valid_chart_count': True,
+        'charts': True,
+    }
+
+    try:
+        cursor = db.songs.find({'scanner_stable_id': {'$in': requested_ids}}, projection)
+        song_docs = {
+            doc.get('scanner_stable_id'): doc
+            for doc in cursor
+            if isinstance(doc, dict) and isinstance(doc.get('scanner_stable_id'), str)
+        }
+    except Exception:
+        app.logger.exception('Failed to load song detail batch for %s', requested_ids)
+        abort(500)
+
+    manifest_entries: dict[str, dict] = {}
+    manifest_collection = _get_manifest_collection()
+    if manifest_collection is not None:
+        try:
+            manifest_cursor = manifest_collection.find(
+                {'_id': {'$in': requested_ids}},
+                {'duration_ms': 1, 'preview_available': 1},
+            )
+            for entry in manifest_cursor:
+                if not isinstance(entry, dict):
+                    continue
+                identifier = entry.get('_id')
+                if isinstance(identifier, str):
+                    manifest_entries[identifier] = entry
+        except Exception:
+            manifest_entries = {}
+
+    payload = []
+    for stable_id in requested_ids:
+        song_doc = song_docs.get(stable_id)
+        if not isinstance(song_doc, dict):
+            continue
+        manifest_entry = manifest_entries.get(stable_id)
+        payload.append(_build_song_detail_payload(song_doc, manifest_entry=manifest_entry))
+
+    return jsonify(payload)
+
+
+@app.route(basedir + 'api/song/<song_id>')
+def route_api_song_detail(song_id: str):
+    if not isinstance(song_id, str):
+        abort(400)
+    stable_id = song_id.strip()
+    if not stable_id:
+        abort(400)
+
+    projection = {
+        '_id': False,
+        'id': True,
+        'scanner_stable_id': True,
+        'title': True,
+        'titleJa': True,
+        'subtitle': True,
+        'subtitleJa': True,
+        'category': True,
+        'preview': True,
+        'preview_available': True,
+        'preview_filename': True,
+        'paths': True,
+        'music_type': True,
+        'type': True,
+        'courses': True,
+        'import_issues': True,
+        'valid_chart_count': True,
+        'charts': True,
+    }
+
+    try:
+        song_doc = db.songs.find_one({'scanner_stable_id': stable_id}, projection)
+    except Exception:
+        app.logger.exception('Failed to load song detail for %s', stable_id)
+        abort(500)
+
+    if not isinstance(song_doc, dict):
+        abort(404)
+
+    manifest_collection = _get_manifest_collection()
+    manifest_entry = None
+    if manifest_collection is not None:
+        try:
+            manifest_entry = manifest_collection.find_one(
+                {'_id': stable_id},
+                {'duration_ms': 1, 'preview_available': 1, '_id': False},
+            )
+        except Exception:
+            manifest_entry = None
+
+    payload = _build_song_detail_payload(song_doc, manifest_entry=manifest_entry)
     return jsonify(payload)
 
 
@@ -1738,7 +1865,19 @@ def send_assets(ref):
 
 @app.route(basedir + "songs/<path:ref>")
 def send_songs(ref):
-    return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+    try:
+        return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+    except NotFound:
+        filename = ref.rsplit('/', 1)[-1].lower()
+        if (
+            os.environ.get('FLASK_ENV') == 'production'
+            and filename.startswith('preview.')
+            and (filename.endswith('.mp3') or filename.endswith('.ogg'))
+        ):
+            response = make_response('', 404)
+            response.headers['Cache-Control'] = 'no-cache'
+            return response
+        raise
 
 @app.route(basedir + "manifest.json")
 def send_manifest():

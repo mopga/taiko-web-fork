@@ -3767,6 +3767,12 @@ class SongScanner:
             'scanner_primary_course': primary_course,
             'scanner_primary_difficulty': primary_difficulty,
         }
+        preview_available, preview_url, preview_filename = self._resolve_preview_media(records)
+        document['preview_available'] = bool(preview_available)
+        if preview_url:
+            document['paths']['preview_url'] = preview_url
+        if preview_filename:
+            document['preview_filename'] = preview_filename
         if base.pack:
             document['pack'] = base.pack
         if audio_hash is not None:
@@ -3774,6 +3780,44 @@ class SongScanner:
         if source_song_id is not None:
             document['scanner_source_song_id'] = source_song_id
         return document
+
+    def _resolve_preview_media(
+        self,
+        records: List[TjaImportRecord],
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        seen_dirs: Set[str] = set()
+        for record in records:
+            if not isinstance(record, TjaImportRecord):
+                continue
+            relative_dir = getattr(record, 'relative_dir', None)
+            if not isinstance(relative_dir, str) or not relative_dir:
+                continue
+            if relative_dir in seen_dirs:
+                continue
+            seen_dirs.add(relative_dir)
+            try:
+                candidate_base = (self._songs_root / relative_dir).resolve()
+            except Exception:
+                continue
+            for extension in ('ogg', 'mp3'):
+                candidate = candidate_base / f'preview.{extension}'
+                try:
+                    resolved = candidate.resolve()
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+                if not resolved.is_file():
+                    continue
+                try:
+                    relative_path = resolved.relative_to(self._songs_root)
+                except ValueError:
+                    relative_path = None
+                if relative_path is None:
+                    continue
+                preview_url = self._build_url(relative_path)
+                return True, preview_url, f'preview.{extension}'
+        return False, None, None
 
     def _build_manifest_entry(
         self,
@@ -3857,6 +3901,10 @@ class SongScanner:
         base_record = self._select_base_record(records)
         file_path = base_record.relative_path if base_record.relative_path else None
 
+        preview_available = document.get('preview_available')
+        if not isinstance(preview_available, bool):
+            preview_available = self._resolve_preview_media(records)[0]
+
         manifest_entry: Dict[str, object] = {
             'id': stable_id,
             'title': title_value,
@@ -3867,6 +3915,7 @@ class SongScanner:
             'file_path': file_path,
             'file_mtime': file_mtime,
             'sha1': sha1_combined,
+            'preview_available': bool(preview_available),
         }
 
         return manifest_entry
