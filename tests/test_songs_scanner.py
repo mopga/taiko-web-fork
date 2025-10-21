@@ -474,6 +474,33 @@ class TestSongsScanner(unittest.TestCase):
             {'$set': {'is_playable': True}},
         )
 
+    def test_run_index_migration_backfills_legacy_dan_dojo(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        legacy_doc = {
+            '_id': 'legacy-dojo',
+            'source_type': 'dan_dojo',
+            'valid_chart_count': 1,
+            'valid_charts': 0,
+            'is_playable': False,
+        }
+        db.songs._docs.append(legacy_doc)
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        db.songs._docs[0]['is_playable'] = False
+        scanner._run_index_migration()
+
+        self.assertTrue(db.songs._docs[0]['is_playable'])
+
     def test_parse_tja_extracts_metadata(self):
         tmp_dir = Path(self._tmp_dir())
         tja_path = tmp_dir / "chart.tja"

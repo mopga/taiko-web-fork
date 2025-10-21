@@ -2515,6 +2515,27 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate best effort counter initialisation
                 LOGGER.debug('Failed to ensure songs counter document')
 
+            songs_collection = getattr(self.db, 'songs', None)
+            if songs_collection is not None:
+                try:
+                    songs_collection.update_many(
+                        {
+                            'source_type': 'dan_dojo',
+                            '$or': [
+                                {'valid_charts': {'$gt': 0}},
+                                {'valid_chart_count': {'$gt': 0}},
+                            ],
+                        },
+                        {'$set': {'is_playable': True}},
+                    )
+                except Exception:  # pragma: no cover - tolerate transient issues
+                    LOGGER.debug(
+                        'Failed to backfill dan dojo songs is_playable flag',
+                        exc_info=True,
+                    )
+
+        self._run_index_migration = _run_index_migration
+
         lock_acquired = False
         if ensure_indexes_lock_collection is not None and hasattr(ensure_indexes_lock_collection, 'find_one_and_update'):
             try:
@@ -2579,21 +2600,6 @@ class SongScanner:
         self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
         self._metrics = _ScanMetrics()
         self._seed_legacy_scanner_ids()
-        songs_collection = getattr(self.db, 'songs', None)
-        if songs_collection is not None:
-            try:
-                songs_collection.update_many(
-                    {
-                        'source_type': 'dan_dojo',
-                        '$or': [
-                            {'valid_charts': {'$gt': 0}},
-                            {'valid_chart_count': {'$gt': 0}},
-                        ],
-                    },
-                    {'$set': {'is_playable': True}},
-                )
-            except Exception:  # pragma: no cover - tolerate transient issues
-                LOGGER.debug('Failed to backfill dan dojo songs is_playable flag', exc_info=True)
 
     def _build_chart_records(
         self,

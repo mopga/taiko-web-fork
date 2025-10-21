@@ -759,7 +759,7 @@ class Loader{
         }
 
         loadSongsCatalog(){
-                if(USE_DETAILS_IN_CATALOG){
+                if(!USE_DETAILS_IN_CATALOG){
                         console.warn("details-batcher disabled for catalog")
                 }
 
