@@ -95,11 +95,16 @@ class Loader{
 		
 		Promise.all(promises).then(this.run.bind(this))
 	}
-	run(){
-		this.promises = []
-		this.loaderDiv = document.querySelector("#loader")
-		this.loaderPercentage = document.querySelector("#loader .percentage")
-		this.loaderProgress = document.querySelector("#loader .progress")
+        run(){
+                this.promises = []
+                this.loaderDiv = document.querySelector("#loader")
+                this.loaderPercentage = document.querySelector("#loader .percentage")
+                this.loaderProgress = document.querySelector("#loader .progress")
+
+                const resolvedCatalogFlag = Number(gameConfig.catalog_assume_valid) === 1 ? 1 : 0
+                if(typeof window !== "undefined"){
+                        window.CATALOG_ASSUME_VALID = resolvedCatalogFlag
+                }
 		
 		this.queryString = gameConfig._version.commit_short ? "?" + gameConfig._version.commit_short : ""
 		
@@ -363,18 +368,17 @@ class Loader{
                                                 }
                                         })
                                         song.chartDetails = difficultyDetails
-                                        var declaredValid = 0
-                                        if(typeof song.valid_charts === "number" && isFinite(song.valid_charts)){
-                                                declaredValid = song.valid_charts
-                                        }else if(typeof song.valid_chart_count === "number" && isFinite(song.valid_chart_count)){
-                                                declaredValid = song.valid_chart_count
-                                        }
+                                        const rawValidChartsLegacy = typeof song.valid_charts === "number" && isFinite(song.valid_charts) ? song.valid_charts : null
+                                        const rawValidChartCount = typeof song.valid_chart_count === "number" && isFinite(song.valid_chart_count) ? song.valid_chart_count : null
+                                        var declaredValid = rawValidChartsLegacy !== null ? rawValidChartsLegacy : (rawValidChartCount !== null ? rawValidChartCount : 0)
                                         if(!declaredValid){
                                                 declaredValid = validCourses
                                         }
                                         song.valid_charts = declaredValid
                                         song.valid_chart_count = declaredValid
                                         song.hasValidCharts = declaredValid > 0
+                                        const assumedViaCatalog = catalogAssumeValid && song.is_playable && validCourses > 0 && (!rawValidChartsLegacy || rawValidChartsLegacy <= 0) && (!rawValidChartCount || rawValidChartCount <= 0)
+                                        song.catalogAssumeValid = assumedViaCatalog
                                         song.courses = song.hasValidCharts ? courseInfo : null
 
                                         if(song.type === "tja"){
@@ -764,6 +768,7 @@ class Loader{
                 }
 
                 const loaderInstance = this
+                const catalogAssumeValid = typeof window !== "undefined" && window.CATALOG_ASSUME_VALID === 1
                 const supportsFetch = typeof fetch === "function"
                 const catalogUrl = "api/songs"
                 const cachedList = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null

@@ -553,6 +553,35 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertNotIn('normal', difficulties)
         self.assertNotIn('ura', difficulties)
 
+    def test_catalog_assume_valid_injects_default_difficulty(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'optimistic', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-optimistic',
+                'id': 42,
+                'title': 'Optimistic Song',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 1,
+                'difficulties': {},
+                'duration_ms': 0,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-optimistic/'},
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        self.assertEqual(entry['difficulties'], {'oni': {'valid': True}})
+        self.assertTrue(entry['is_playable'])
+
     def test_catalog_filters_require_playable_and_not_hidden(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'filter-check', 'count': 1}

@@ -248,6 +248,20 @@ var translations = {
                 tw: "沒有有效的COURSE",
                 ko: "유효한 COURSE가 없습니다"
         },
+        experimentalMode: {
+                ja: "実験モード",
+                en: "Experimental mode",
+                cn: "实验模式",
+                tw: "實驗模式",
+                ko: "실험 모드"
+        },
+        catalogStartError: {
+                ja: "譜面を読み込めませんでした。別の曲を試してください。\n\n理由: %s",
+                en: "Could not load this chart. Please try another song.\n\nReason: %s",
+                cn: "无法载入谱面，请尝试其他乐曲。\n\n原因：%s",
+                tw: "無法載入譜面，請嘗試其他樂曲。\n\n原因：%s",
+                ko: "채보를 불러오지 못했습니다. 다른 곡을 시도해 주세요.\n\n이유: %s"
+        },
         cancel: {
 		ja: "キャンセル",
 		en: "Cancel",

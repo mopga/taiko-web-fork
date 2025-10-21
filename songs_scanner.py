@@ -59,6 +59,14 @@ LOGGER = logging.getLogger(__name__)
 TJA_LENIENT_FALLBACK = os.getenv("TJA_LENIENT_FALLBACK", "1") == "1"
 
 
+def _parse_bool_env(value: str) -> bool:
+    token = value.strip().lower()
+    return token not in {"0", "false", "no", "off"}
+
+
+CATALOG_ASSUME_VALID = _parse_bool_env(os.getenv("CATALOG_ASSUME_VALID", "1"))
+
+
 VALIDATION_ERROR_ISSUE = "strict-validation-error"
 
 
@@ -3829,6 +3837,23 @@ class SongScanner:
             document['audioHash'] = audio_hash
         if source_song_id is not None:
             document['scanner_source_song_id'] = source_song_id
+
+        if CATALOG_ASSUME_VALID:
+            paths_dict = document.get('paths') if isinstance(document.get('paths'), dict) else {}
+            tja_path = paths_dict.get('tja_url') if isinstance(paths_dict, dict) else None
+            if tja_path:
+                document['is_playable'] = True
+                difficulties_value = document.get('difficulties')
+                difficulties_empty = True
+                if isinstance(difficulties_value, dict):
+                    for difficulty_entry in difficulties_value.values():
+                        if difficulty_entry:
+                            difficulties_empty = False
+                            break
+                else:
+                    difficulties_value = {}
+                if difficulties_empty:
+                    document['difficulties'] = {'oni': {'valid': True}}
         return document
 
     def _build_manifest_entry(

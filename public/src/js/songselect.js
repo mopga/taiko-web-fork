@@ -2,8 +2,9 @@ class SongSelect{
 	constructor(...args){
 		this.init(...args)
 	}
-	init(fromTutorial, fadeIn, touchEnabled, songId, showWarning){
-		this.touchEnabled = touchEnabled
+        init(fromTutorial, fadeIn, touchEnabled, songId, showWarning){
+                this.touchEnabled = touchEnabled
+                this.catalogAssumeValid = typeof window !== "undefined" && window.CATALOG_ASSUME_VALID === 1
 		
 		loader.changePage("songselect", false)
 		this.canvas = document.getElementById("song-sel-canvas")
@@ -1087,8 +1088,11 @@ class SongSelect{
 		}else if(p2.socket && p2.socket.readyState === 1 && !assets.customSongs){
 			multiplayer = ctrl
 		}
-		var diff = this.difficultyId[difficulty]
-		
+                var diff = this.difficultyId[difficulty]
+
+                var courseMeta = selectedSong.courses && selectedSong.courses[diff] ? selectedSong.courses[diff] : null
+                var stars = courseMeta && typeof courseMeta.stars === "number" && isFinite(courseMeta.stars) ? courseMeta.stars : 0
+
                 new LoadSong({
                         "title": selectedSong.title,
                         "originalTitle": selectedSong.originalTitle,
@@ -1102,11 +1106,12 @@ class SongSelect{
                         "type": selectedSong.type,
                         "offset": selectedSong.offset,
                         "songSkin": selectedSong.songSkin,
-			"stars": selectedSong.courses[diff].stars,
-			"hash": selectedSong.hash,
-			"lyrics": selectedSong.lyrics,
-			"video": selectedSong.video,
-		}, autoplay, multiplayer, touch)
+                        "stars": stars,
+                        "hash": selectedSong.hash,
+                        "lyrics": selectedSong.lyrics,
+                        "video": selectedSong.video,
+                        "catalogAssumeValid": !!selectedSong.catalogAssumeValid,
+                }, autoplay, multiplayer, touch)
 	}
 	toOptions(moveBy){
 		if(!p2.session){
@@ -1725,6 +1730,14 @@ class SongSelect{
                                                 ctx.textAlign = "left"
                                                 ctx.fillStyle = "#ffffff"
                                                 ctx.fillText(warningText, x + 20, y + h - 20)
+                                                ctx.restore()
+                                        }
+                                        if(this.catalogAssumeValid && currentSong.catalogAssumeValid){
+                                                ctx.save()
+                                                ctx.font = "22px " + this.font
+                                                ctx.textAlign = "right"
+                                                ctx.fillStyle = "#ffe27d"
+                                                ctx.fillText(strings.experimentalMode, x + w - 24, y + 36)
                                                 ctx.restore()
                                         }
                                         if(screen === "title" || screen === "titleFadeIn" || screen === "song"){
@@ -2615,21 +2628,32 @@ class SongSelect{
 				dx: 68,
 				dy: 11
 			})
-			if(this.showWarning.name === "scoreSaveFailed"){
-				var text = strings.scoreSaveFailed
-			}else if(this.showWarning.name === "loadSongError"){
-				var text = []
-				var textIndex = 0
-				var subText = [this.showWarning.title, this.showWarning.id, this.showWarning.error]
-				var textParts = strings.loadSongError.split("%s")
-				textParts.forEach((textPart, i) => {
-					if(i !== 0){
-						text.push(subText[textIndex++])
-					}
-					text.push(textPart)
-				})
-				text = text.join("")
-			}
+                        if(this.showWarning.name === "scoreSaveFailed"){
+                                var text = strings.scoreSaveFailed
+                        }else if(this.showWarning.name === "loadSongError"){
+                                var text = []
+                                var textIndex = 0
+                                var subText = [this.showWarning.title, this.showWarning.id, this.showWarning.error]
+                                var textParts = strings.loadSongError.split("%s")
+                                textParts.forEach((textPart, i) => {
+                                        if(i !== 0){
+                                                text.push(subText[textIndex++])
+                                        }
+                                        text.push(textPart)
+                                })
+                                text = text.join("")
+                        }else if(this.showWarning.name === "catalogStartError"){
+                                var reason = this.showWarning.reason || "unknown_error"
+                                var textParts = strings.catalogStartError.split("%s")
+                                var textSegments = []
+                                textParts.forEach((textPart, i) => {
+                                        if(i !== 0){
+                                                textSegments.push(reason)
+                                        }
+                                        textSegments.push(textPart)
+                                })
+                                text = textSegments.join("")
+                        }
 			this.draw.wrappingText({
 				ctx: ctx,
 				text: text,
