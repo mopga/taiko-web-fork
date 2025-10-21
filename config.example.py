@@ -70,3 +70,8 @@ SCAN_ON_START = True
 SCAN_IGNORE_GLOBS = ['**/.DS_Store', '**/Thumbs.db']
 ADMIN_SCAN_TOKEN = 'change-me'
 ENABLE_SONG_WATCHER = True
+
+# Optimistic catalog mode (0/1). When enabled the catalog assumes songs are
+# playable unless explicitly marked otherwise. Override here or export
+# CATALOG_ASSUME_VALID=1 in the environment to opt in.
+CATALOG_ASSUME_VALID = 0

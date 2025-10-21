@@ -274,8 +274,10 @@ class LoadSong{
 		}
                 Promise.all(this.promises).then(() => {
                         if(!this.error){
-                                this.setupMultiplayer()
+                                return this.setupMultiplayer()
                         }
+                }).catch(error => {
+                        this.handleGameStartError(error)
                 })
         }
         queueLegacyNotesLoad(song, songObj){
@@ -429,13 +431,20 @@ class LoadSong{
 	randInt(min, max){
 		return Math.floor(Math.random() * (max - min + 1)) + min
 	}
-	setupMultiplayer(){
-		var song = this.selectedSong
-		
-		if(this.multiplayer){
-			var loadingText = document.getElementsByClassName("loading-text")[0]
-			loadingText.firstChild.data = strings.waitingForP2
-			loadingText.setAttribute("alt", strings.waitingForP2)
+        async setupMultiplayer(){
+                var song = this.selectedSong
+
+                try{
+                        await this.ensureSongPlayable(song)
+                }catch(error){
+                        this.handleGameStartError(error)
+                        return
+                }
+
+                if(this.multiplayer){
+                        var loadingText = document.getElementsByClassName("loading-text")[0]
+                        loadingText.firstChild.data = strings.waitingForP2
+                        loadingText.setAttribute("alt", strings.waitingForP2)
 			
 			this.cancelButton = document.getElementById("p2-cancel-button")
 			this.cancelButton.style.display = "inline-block"
@@ -467,35 +476,119 @@ class LoadSong{
 							})
 						}
 					}
-				}else if(event.type === "gamestart"){
-					this.clean()
-					p2.clearMessage("songsel")
-					var taikoGame1 = new Controller(song, this.songData, false, 1, this.touchEnabled)
-					var taikoGame2 = new Controller(this.selectedSong2, this.song2Data, true, 2, this.touchEnabled)
-					taikoGame1.run(taikoGame2)
-					pageEvents.send("load-song-player2", this.selectedSong2)
-				}else if(event.type === "left" || event.type === "gameend"){
-					this.clean()
-					new SongSelect(false, false, this.touchEnabled)
-				}
-			})
+                                }else if(event.type === "gamestart"){
+                                        this.clean()
+                                        p2.clearMessage("songsel")
+                                        try{
+                                                var taikoGame1 = new Controller(song, this.songData, false, 1, this.touchEnabled)
+                                                var taikoGame2 = new Controller(this.selectedSong2, this.song2Data, true, 2, this.touchEnabled)
+                                                taikoGame1.run(taikoGame2)
+                                                pageEvents.send("load-song-player2", this.selectedSong2)
+                                        }catch(error){
+                                                this.handleGameStartError(error)
+                                        }
+                                }else if(event.type === "left" || event.type === "gameend"){
+                                        this.clean()
+                                        new SongSelect(false, false, this.touchEnabled)
+                                }
+                        })
 			p2.send("join", {
 				id: song.folder,
 				diff: song.difficulty,
 				name: account.loggedIn ? account.displayName : null,
 				don: account.loggedIn ? account.don : null
 			})
-		}else{
-			this.clean()
-			var taikoGame = new Controller(song, this.songData, this.autoPlayEnabled, false, this.touchEnabled)
-			taikoGame.run()
-		}
-	}
-	startMultiplayer(repeat){
-		if(document.hasFocus()){
-			p2.send("gamestart")
-		}else{
-			if(!repeat){
+                }else{
+                        this.clean()
+                        try{
+                                var taikoGame = new Controller(song, this.songData, this.autoPlayEnabled, false, this.touchEnabled)
+                                taikoGame.run()
+                        }catch(error){
+                                this.handleGameStartError(error)
+                        }
+                }
+        }
+        async ensureSongPlayable(song){
+                const catalogFlag = typeof window !== "undefined" && window.CATALOG_ASSUME_VALID === 1
+                if(!catalogFlag){
+                        return
+                }
+                if(!song || !song.catalogAssumeValid){
+                        return
+                }
+                const songId = song.folder || song.id
+                if(!songId){
+                        return
+                }
+                const encodedId = encodeURIComponent(songId)
+                const url = "api/song/" + encodedId + "?notes=none"
+                let response
+                try{
+                        response = await fetch(url, {method: "GET", credentials: "same-origin"})
+                }catch(fetchError){
+                        const error = new Error("network_error")
+                        error.code = "network_error"
+                        error.cause = fetchError
+                        throw error
+                }
+                if(response.status === 404){
+                        let payload = null
+                        try{
+                                payload = await response.json()
+                        }catch(e){}
+                        const errorCode = payload && payload.error ? payload.error : "chart_not_found"
+                        const error = new Error(errorCode)
+                        error.code = errorCode
+                        error.status = response.status
+                        throw error
+                }
+                if(!response.ok){
+                        const error = new Error("song_request_failed")
+                        error.code = "song_request_failed"
+                        error.status = response.status
+                        throw error
+                }
+                try{
+                        await response.json()
+                }catch(e){}
+        }
+        handleGameStartError(error){
+                if(this.error){
+                        return
+                }
+                this.error = true
+                const code = error && error.code ? String(error.code) : (error && error.message ? String(error.message) : "unknown_error")
+                const status = error && error.status ? error.status : null
+                const detail = status ? code + " (" + status + ")" : code
+                try{
+                        assets.sounds["v_start"].stop()
+                }catch(e){}
+                try{
+                        pageEvents.send("load-song-error", detail)
+                }catch(e){}
+                try{
+                        errorMessage(new Error(detail).stack)
+                }catch(e){}
+                this.clean()
+                var title = this.selectedSong && this.selectedSong.title ? this.selectedSong.title : ""
+                if(this.selectedSong && this.selectedSong.originalTitle && this.selectedSong.originalTitle !== title){
+                        title += " (" + this.selectedSong.originalTitle + ")"
+                }
+                const warning = {
+                        name: "catalogStartError",
+                        title: title,
+                        id: this.selectedSong && this.selectedSong.folder ? this.selectedSong.folder : "",
+                        reason: detail
+                }
+                setTimeout(() => {
+                        new SongSelect(false, false, this.touchEnabled, null, warning)
+                }, 500)
+        }
+        startMultiplayer(repeat){
+                if(document.hasFocus()){
+                        p2.send("gamestart")
+                }else{
+                        if(!repeat){
 				assets.sounds["v_sanka"].play()
 				pageEvents.send("load-song-unfocused")
 			}

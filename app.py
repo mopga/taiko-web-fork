@@ -86,6 +86,35 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
+def _normalize_difficulties(doc: object, assume_valid: bool = False) -> dict[str, object]:
+    if not isinstance(doc, dict):
+        return {'oni': {'valid': True}} if assume_valid else {}
+    raw_difficulties = doc.get('difficulties')
+    if not isinstance(raw_difficulties, dict) or not raw_difficulties:
+        return {'oni': {'valid': True}} if assume_valid else {}
+
+    normalized: dict[str, object] = {}
+    for key, value in raw_difficulties.items():
+        level = str(key)
+        if isinstance(value, dict):
+            difficulty_payload = dict(value)
+            difficulty_payload['valid'] = bool(value.get('valid', True))
+            normalized[level] = difficulty_payload
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            normalized[level] = {
+                'stars': _coerce_int(value, 0),
+                'valid': True,
+            }
+        elif value is True:
+            normalized[level] = {'valid': True}
+        else:
+            continue
+
+    if not normalized and assume_valid:
+        normalized['oni'] = {'valid': True}
+    return normalized
+
+
 def _apply_catalog_cache_headers(response: 'flask.Response', *, etag: Optional[str], cache_control: str, vary: str) -> None:
     if etag:
         response.headers['ETag'] = etag
@@ -162,6 +191,27 @@ def _parse_bool_env(value: str) -> bool:
     return token not in {"0", "false", "no", "off"}
 
 
+def _resolve_catalog_assume_valid() -> bool:
+    env_value = os.environ.get("CATALOG_ASSUME_VALID")
+    if env_value is not None:
+        try:
+            return _parse_bool_env(str(env_value))
+        except AttributeError:
+            return bool(env_value)
+    config_value = getattr(config, "CATALOG_ASSUME_VALID", None)
+    if config_value is not None:
+        if isinstance(config_value, str):
+            try:
+                return _parse_bool_env(config_value)
+            except AttributeError:
+                return bool(config_value)
+        try:
+            return bool(int(config_value))
+        except (TypeError, ValueError):
+            return bool(config_value)
+    return False
+
+
 def is_modes_manifest_enabled() -> bool:
     env_value = os.environ.get(_FEATURE_MODES_MANIFEST_ENV)
     if env_value is not None:
@@ -207,6 +257,9 @@ def _load_config_module():
 
 
 config = _load_config_module()
+
+CATALOG_ASSUME_VALID = _resolve_catalog_assume_valid()
+CATALOG_ASSUME_VALID_INT = 1 if CATALOG_ASSUME_VALID else 0
 
 mimetypes.add_type("audio/ogg", ".ogg")
 mimetypes.add_type("audio/mpeg", ".mp3")
@@ -494,7 +547,8 @@ def get_config(credentials=False):
         'custom_js': take_config('CUSTOM_JS'),
         'plugins': take_config('PLUGINS') and [x for x in take_config('PLUGINS') if x['url']],
         'preview_type': take_config('PREVIEW_TYPE') or 'mp3',
-        'multiplayer_url': take_config('MULTIPLAYER_URL')
+        'multiplayer_url': take_config('MULTIPLAYER_URL'),
+        'catalog_assume_valid': CATALOG_ASSUME_VALID_INT,
     }
     relative_urls = ['songs_baseurl', 'assets_baseurl']
     for name in relative_urls:
@@ -987,6 +1041,7 @@ def route_api_songs():
         'duration_ms': 1,
         'preview_available': 1,
         'source_type': 1,
+        'is_playable': 1,
         'paths': 1,
     }
 
@@ -1016,44 +1071,10 @@ def route_api_songs():
         sanitized.pop('scanner_stable_id', None)
         if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
             sanitized['subtitle'] = ''
-        raw_difficulties = sanitized.get('difficulties') if isinstance(sanitized.get('difficulties'), dict) else {}
-        normalized_difficulties: dict[str, object] = {diff: None for diff in ('easy', 'normal', 'hard', 'oni', 'ura')}
-        for diff in ('easy', 'normal', 'hard', 'oni', 'ura'):
-            value = raw_difficulties.get(diff) if isinstance(raw_difficulties, dict) else None
-            if isinstance(value, dict):
-                stars_value = value.get('stars') if 'stars' in value else value.get('level')
-                stars = _coerce_int(stars_value, 0)
-                level_value = value.get('level') if 'level' in value else stars
-                level = _coerce_int(level_value, stars)
-                branch = bool(value.get('branch'))
-                valid = bool(value.get('valid', True))
-                issues_raw = value.get('issues')
-                issues = [str(issue) for issue in issues_raw if isinstance(issue, str)] if isinstance(issues_raw, list) else []
-                difficulty_payload = {
-                    'stars': stars,
-                    'level': level,
-                    'branch': branch,
-                    'valid': valid,
-                }
-                if issues:
-                    difficulty_payload['issues'] = issues
-                normalized_difficulties[diff] = difficulty_payload
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                stars = _coerce_int(value, 0)
-                normalized_difficulties[diff] = {
-                    'stars': stars,
-                    'level': stars,
-                    'branch': False,
-                    'valid': True,
-                }
-            elif value is True:
-                normalized_difficulties[diff] = {
-                    'stars': 0,
-                    'level': 0,
-                    'branch': False,
-                    'valid': True,
-                }
+        normalized_difficulties = _normalize_difficulties(entry, assume_valid=CATALOG_ASSUME_VALID)
         sanitized['difficulties'] = normalized_difficulties
+        doc_is_playable = bool(entry.get('is_playable'))
+        sanitized['is_playable'] = doc_is_playable or bool(CATALOG_ASSUME_VALID)
         preview_available = bool(sanitized.get('preview_available'))
         sanitized['preview_available'] = preview_available
         source_type_value = sanitized.get('source_type')
@@ -1114,7 +1135,28 @@ def route_api_song_detail(song_id: str):
         abort(500)
 
     if not isinstance(song_doc, dict):
-        abort(404)
+        return jsonify({'error': 'chart_not_found'}), 404
+
+    valid_count: Optional[int] = None
+    for key in ('valid_chart_count', 'valid_charts'):
+        candidate = song_doc.get(key)
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            valid_count = int(candidate)
+            break
+        if isinstance(candidate, str):
+            try:
+                valid_count = int(candidate)
+                break
+            except ValueError:
+                continue
+
+    charts_field = song_doc.get('charts') if isinstance(song_doc.get('charts'), list) else []
+    has_chart_entry = any(isinstance(entry, dict) for entry in charts_field)
+    if valid_count is not None:
+        if valid_count <= 0:
+            return jsonify({'error': 'chart_not_found'}), 404
+    elif not has_chart_entry:
+        return jsonify({'error': 'chart_not_found'}), 404
 
     manifest_map = _load_manifest_entries_for_ids([stable_id])
     manifest_entry = manifest_map.get(stable_id)

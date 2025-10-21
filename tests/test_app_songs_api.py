@@ -231,6 +231,14 @@ class SongsApiTestCase(unittest.TestCase):
             db=mock.Mock(songs=songs_collection),
         )
 
+    def _patch_catalog_assume_valid(self, value):
+        assume_valid = bool(value)
+        return mock.patch.multiple(
+            taiko_app,
+            CATALOG_ASSUME_VALID=assume_valid,
+            CATALOG_ASSUME_VALID_INT=1 if assume_valid else 0,
+        )
+
     def test_api_songs_etag_304(self):
         manifest_entries = [
             {
@@ -511,6 +519,114 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertIsInstance(entry['difficulties']['oni'], dict)
         self.assertEqual(entry['difficulties']['oni']['stars'], 10)
         self.assertTrue(entry['difficulties']['oni']['valid'])
+
+    def test_catalog_preserves_difficulty_objects_without_false_defaults(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'diffs', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 1,
+                'title': 'Difficulty Test',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 0,
+                'duration_ms': 1234,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-1/'},
+                'difficulties': {
+                    'easy': {'stars': 3},
+                    'normal': False,
+                    'hard': 7,
+                    'oni': True,
+                    'ura': None,
+                },
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        difficulties = entry['difficulties']
+        self.assertEqual(set(difficulties.keys()), {'easy', 'hard', 'oni'})
+        self.assertEqual(difficulties['easy']['stars'], 3)
+        self.assertTrue(difficulties['easy']['valid'])
+        self.assertEqual(difficulties['hard'], {'stars': 7, 'valid': True})
+        self.assertEqual(difficulties['oni'], {'valid': True})
+        self.assertNotIn('normal', difficulties)
+        self.assertNotIn('ura', difficulties)
+
+    def test_catalog_preserve_valid_false_in_difficulties(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'preserve-valid', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-keep-valid',
+                'id': 77,
+                'title': 'Keep Valid',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 0,
+                'duration_ms': 0,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-keep-valid/'},
+                'difficulties': {
+                    'oni': {
+                        'valid': False,
+                        'stars': 10,
+                        'issues': ['test-issue'],
+                    }
+                },
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        difficulties = entry['difficulties']
+        self.assertIn('oni', difficulties)
+        self.assertFalse(difficulties['oni']['valid'])
+        self.assertEqual(difficulties['oni']['stars'], 10)
+        self.assertIn('test-issue', difficulties['oni'].get('issues', []))
+
+    def test_catalog_assume_valid_fallback(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'optimistic', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-optimistic',
+                'id': 42,
+                'title': 'Optimistic Song',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 1,
+                'difficulties': {},
+                'duration_ms': 0,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-optimistic/'},
+            }
+        ]
+
+        with self._patch_catalog_assume_valid(True), self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        self.assertEqual(entry['difficulties'], {'oni': {'valid': True}})
+        self.assertTrue(entry['is_playable'])
 
     def test_catalog_filters_require_playable_and_not_hidden(self):
         manifest_entries = []
