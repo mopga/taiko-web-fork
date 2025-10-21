@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -125,6 +126,8 @@ class _ManifestCollection:
 class _SongsCollection:
     def __init__(self, docs):
         self._docs = {doc.get('scanner_stable_id'): dict(doc) for doc in docs}
+        self.last_filter = None
+        self.last_projection = None
 
     class _Cursor:
         def __init__(self, docs):
@@ -150,6 +153,25 @@ class _SongsCollection:
         def __iter__(self):
             return iter(self._docs)
 
+    def _matches(self, doc, filter_):
+        if not isinstance(filter_, dict):
+            return True
+        for key, expected in filter_.items():
+            value = doc.get(key)
+            if isinstance(expected, dict):
+                if '$ne' in expected and value == expected['$ne']:
+                    return False
+                if '$regex' in expected:
+                    pattern = expected['$regex']
+                    if not isinstance(value, str) or re.match(pattern, value) is None:
+                        return False
+                if '$in' in expected and value not in expected['$in']:
+                    return False
+            else:
+                if value != expected:
+                    return False
+        return True
+
     def find_one(self, filter_, projection=None):
         stable_id = filter_.get('scanner_stable_id') if isinstance(filter_, dict) else None
         doc = self._docs.get(stable_id)
@@ -166,21 +188,33 @@ class _SongsCollection:
         return projected
 
     def find(self, filter_, projection=None):
-        ids = filter_.get('scanner_stable_id', {}).get('$in', []) if isinstance(filter_, dict) else []
+        self.last_filter = filter_
+        self.last_projection = projection
         results = []
-        for stable_id in ids:
-            doc = self._docs.get(stable_id)
-            if not doc:
-                continue
-            if projection:
-                projected = {}
-                for key, enabled in projection.items():
-                    if enabled and key != '_id':
-                        projected[key] = doc.get(key)
-                results.append(projected)
-            else:
-                results.append(dict(doc))
+        if isinstance(filter_, dict) and 'scanner_stable_id' in filter_ and isinstance(filter_['scanner_stable_id'], dict):
+            ids = filter_['scanner_stable_id'].get('$in', [])
+            for stable_id in ids:
+                doc = self._docs.get(stable_id)
+                if not doc:
+                    continue
+                payload = dict(doc)
+                results.append(self._project(payload, projection))
+            return self._Cursor(results)
+
+        for doc in self._docs.values():
+            if self._matches(doc, filter_ or {}):
+                payload = dict(doc)
+                results.append(self._project(payload, projection))
         return self._Cursor(results)
+
+    def _project(self, doc, projection):
+        if not projection:
+            return doc
+        projected = {}
+        for key, enabled in projection.items():
+            if enabled and key != '_id':
+                projected[key] = doc.get(key)
+        return projected
 
 
 class SongsApiTestCase(unittest.TestCase):
@@ -223,13 +257,24 @@ class SongsApiTestCase(unittest.TestCase):
                 'subtitleJa': '',
                 'titleJa': '',
                 'category': 'General',
+                'category_id': 0,
                 'preview': 0,
                 'music_type': 'ogg',
                 'type': 'tja',
-                'paths': {},
+                'paths': {'dir_url': '/songs/song-1/'},
                 'courses': {},
+                'difficulties': {
+                    'normal': {
+                        'stars': 5,
+                        'level': 5,
+                        'branch': False,
+                        'valid': True,
+                    }
+                },
                 'import_issues': [],
-                'valid_chart_count': 0,
+                'valid_chart_count': 1,
+                'valid_charts': 1,
+                'is_playable': True,
                 'charts': [],
                 'hash': 'hash',
                 'fingerprint': 'fp',
@@ -284,13 +329,24 @@ class SongsApiTestCase(unittest.TestCase):
                 'subtitleJa': '',
                 'titleJa': '',
                 'category': 'General',
+                'category_id': 0,
                 'preview': 0,
                 'music_type': 'ogg',
                 'type': 'tja',
-                'paths': {},
+                'paths': {'dir_url': '/songs/song-1/'},
                 'courses': {},
+                'difficulties': {
+                    'normal': {
+                        'stars': 5,
+                        'level': 5,
+                        'branch': False,
+                        'valid': True,
+                    }
+                },
                 'import_issues': [],
-                'valid_chart_count': 0,
+                'valid_chart_count': 1,
+                'valid_charts': 1,
+                'is_playable': True,
                 'charts': [],
                 'hash': 'hash',
                 'fingerprint': 'fp',
@@ -403,4 +459,86 @@ class SongsApiTestCase(unittest.TestCase):
             payload = json.loads(response.data.decode('utf-8'))
             self.assertEqual(payload.get('error'), 'songs_details_failed')
             self.assertTrue(payload.get('reason'))
+
+    def test_catalog_includes_dan_dojo_when_valid(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'dojo', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'dojo-1',
+                'id': 101,
+                'title': 'Trial Dan',
+                'subtitle': '',
+                'subtitleJa': '',
+                'titleJa': '',
+                'category': 'Dan Dojo',
+                'category_id': 99,
+                'preview_available': False,
+                'music_type': 'ogg',
+                'type': 'tja',
+                'paths': {'dir_url': '/songs/dojo-1/'},
+                'courses': {},
+                'difficulties': {
+                    'oni': {
+                        'stars': 10,
+                        'level': 10,
+                        'branch': False,
+                        'valid': True,
+                        'issues': ['mapped-course', 'unknown-metadata'],
+                    }
+                },
+                'import_issues': ['mapped-course', 'unknown-metadata'],
+                'valid_chart_count': 1,
+                'valid_charts': 1,
+                'is_playable': True,
+                'charts': [],
+                'hash': 'hash-dojo',
+                'fingerprint': 'fp-dojo',
+                'source_type': 'dan_dojo',
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode('utf-8'))
+        self.assertEqual(len(payload), 1)
+        entry = payload[0]
+        self.assertEqual(entry['id'], 'dojo-1')
+        self.assertEqual(entry['source_type'], 'dan_dojo')
+        self.assertIn('oni', entry['difficulties'])
+        self.assertIsInstance(entry['difficulties']['oni'], dict)
+        self.assertEqual(entry['difficulties']['oni']['stars'], 10)
+        self.assertTrue(entry['difficulties']['oni']['valid'])
+
+    def test_catalog_filters_require_playable_and_not_hidden(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'filter-check', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 'song-1',
+                'title': 'Filter Check',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 1,
+                'difficulties': {},
+                'duration_ms': 0,
+                'preview_available': False,
+                'is_playable': True,
+                'paths': {'dir_url': '/songs/song-1/'},
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+            self.assertEqual(response.status_code, 200)
+            songs_collection = taiko_app.db.songs
+            captured_filter = songs_collection.last_filter
+
+        self.assertEqual(
+            captured_filter,
+            {'is_hidden': {'$ne': True}, 'is_playable': True},
+        )
 

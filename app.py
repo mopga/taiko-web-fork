@@ -962,7 +962,7 @@ def route_api_songs():
         limit = None
         skip = 0
 
-    filters: dict[str, object] = {'enabled': {'$ne': False}}
+    filters: dict[str, object] = {'is_hidden': {'$ne': True}, 'is_playable': True}
     category_param = request.args.get('category', '')
     if isinstance(category_param, str):
         category_value = category_param.strip()
@@ -982,6 +982,7 @@ def route_api_songs():
         'title': 1,
         'subtitle': 1,
         'category': 1,
+        'category_id': 1,
         'difficulties': 1,
         'duration_ms': 1,
         'preview_available': 1,
@@ -1015,15 +1016,44 @@ def route_api_songs():
         sanitized.pop('scanner_stable_id', None)
         if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
             sanitized['subtitle'] = ''
-        difficulties = sanitized.get('difficulties')
-        if not isinstance(difficulties, dict):
-            sanitized['difficulties'] = {
-                'easy': False,
-                'normal': False,
-                'hard': False,
-                'oni': False,
-                'ura': False,
-            }
+        raw_difficulties = sanitized.get('difficulties') if isinstance(sanitized.get('difficulties'), dict) else {}
+        normalized_difficulties: dict[str, object] = {diff: None for diff in ('easy', 'normal', 'hard', 'oni', 'ura')}
+        for diff in ('easy', 'normal', 'hard', 'oni', 'ura'):
+            value = raw_difficulties.get(diff) if isinstance(raw_difficulties, dict) else None
+            if isinstance(value, dict):
+                stars_value = value.get('stars') if 'stars' in value else value.get('level')
+                stars = _coerce_int(stars_value, 0)
+                level_value = value.get('level') if 'level' in value else stars
+                level = _coerce_int(level_value, stars)
+                branch = bool(value.get('branch'))
+                valid = bool(value.get('valid', True))
+                issues_raw = value.get('issues')
+                issues = [str(issue) for issue in issues_raw if isinstance(issue, str)] if isinstance(issues_raw, list) else []
+                difficulty_payload = {
+                    'stars': stars,
+                    'level': level,
+                    'branch': branch,
+                    'valid': valid,
+                }
+                if issues:
+                    difficulty_payload['issues'] = issues
+                normalized_difficulties[diff] = difficulty_payload
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                stars = _coerce_int(value, 0)
+                normalized_difficulties[diff] = {
+                    'stars': stars,
+                    'level': stars,
+                    'branch': False,
+                    'valid': True,
+                }
+            elif value is True:
+                normalized_difficulties[diff] = {
+                    'stars': 0,
+                    'level': 0,
+                    'branch': False,
+                    'valid': True,
+                }
+        sanitized['difficulties'] = normalized_difficulties
         preview_available = bool(sanitized.get('preview_available'))
         sanitized['preview_available'] = preview_available
         source_type_value = sanitized.get('source_type')
@@ -1034,6 +1064,8 @@ def route_api_songs():
             sanitized['duration_ms'] = int(duration_value) if duration_value is not None else 0
         except (TypeError, ValueError):
             sanitized['duration_ms'] = 0
+        category_id_value = sanitized.get('category_id')
+        sanitized['category_id'] = _coerce_int(category_id_value, 0)
         paths_value = sanitized.get('paths')
         if isinstance(paths_value, dict):
             sanitized['paths'] = {
@@ -1041,6 +1073,8 @@ def route_api_songs():
                 for key in ('tja_url', 'audio_url', 'dir_url')
                 if paths_value.get(key)
             }
+        else:
+            sanitized['paths'] = {}
         payload.append(sanitized)
 
     response = make_response(jsonify(payload))

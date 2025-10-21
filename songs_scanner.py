@@ -2515,6 +2515,27 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate best effort counter initialisation
                 LOGGER.debug('Failed to ensure songs counter document')
 
+            songs_collection = getattr(self.db, 'songs', None)
+            if songs_collection is not None:
+                try:
+                    songs_collection.update_many(
+                        {
+                            'source_type': 'dan_dojo',
+                            '$or': [
+                                {'valid_charts': {'$gt': 0}},
+                                {'valid_chart_count': {'$gt': 0}},
+                            ],
+                        },
+                        {'$set': {'is_playable': True}},
+                    )
+                except Exception:  # pragma: no cover - tolerate transient issues
+                    LOGGER.debug(
+                        'Failed to backfill dan dojo songs is_playable flag',
+                        exc_info=True,
+                    )
+
+        self._run_index_migration = _run_index_migration
+
         lock_acquired = False
         if ensure_indexes_lock_collection is not None and hasattr(ensure_indexes_lock_collection, 'find_one_and_update'):
             try:
@@ -3665,11 +3686,30 @@ class SongScanner:
         courses_doc: Dict[str, Optional[Dict[str, object]]] = {
             legacy: None for legacy in COURSE_LEGACY_MAP.values()
         }
+        difficulties_doc: Dict[str, Optional[Dict[str, object]]] = {
+            legacy: None for legacy in COURSE_LEGACY_MAP.values()
+        }
         for canonical, entry in canonical_map.items():
             legacy = COURSE_LEGACY_MAP[canonical]
+            stars_value = entry.get('level')
+            try:
+                stars_int = int(stars_value) if stars_value is not None else 0
+            except (TypeError, ValueError):
+                stars_int = 0
             courses_doc[legacy] = {
-                'stars': entry['level'] or 0,
+                'stars': stars_int,
                 'branch': bool(entry['branch']),
+            }
+            issues_value = entry.get('issues') if isinstance(entry.get('issues'), list) else []
+            normalized_issues = [
+                str(issue) for issue in issues_value if isinstance(issue, str)
+            ]
+            difficulties_doc[legacy] = {
+                'stars': stars_int,
+                'level': stars_int,
+                'branch': bool(entry['branch']),
+                'valid': bool(entry.get('valid', True)),
+                'issues': normalized_issues,
             }
 
         valid_chart_count = sum(1 for chart in canonical_map.values() if chart['valid'])
@@ -3750,9 +3790,12 @@ class SongScanner:
             'subtitle_lang': subtitle_lang,
             'locale': base.locale,
             'courses': courses_doc,
+            'difficulties': difficulties_doc,
             'charts': charts_payload,
             'import_issues': import_issues,
             'valid_chart_count': valid_chart_count,
+            'valid_charts': valid_chart_count,
+            'is_playable': valid_chart_count > 0,
             'enabled': enabled,
             'category_id': base.category_id,
             'category': base.category_title,
@@ -3808,13 +3851,19 @@ class SongScanner:
             category_value = category_value.strip()
 
         courses_doc = document.get('courses') if isinstance(document.get('courses'), dict) else {}
-        difficulties = {
-            'easy': bool(courses_doc.get('easy')),
-            'normal': bool(courses_doc.get('normal')),
-            'hard': bool(courses_doc.get('hard')),
-            'oni': bool(courses_doc.get('oni')),
-            'ura': bool(courses_doc.get('ura')),
-        }
+        raw_difficulties = document.get('difficulties') if isinstance(document.get('difficulties'), dict) else {}
+
+        def _difficulty_available(value: object) -> bool:
+            if isinstance(value, dict):
+                return bool(value.get('valid', True))
+            return bool(value)
+
+        difficulties = {}
+        for legacy in ('easy', 'normal', 'hard', 'oni', 'ura'):
+            if legacy in raw_difficulties:
+                difficulties[legacy] = _difficulty_available(raw_difficulties.get(legacy))
+            else:
+                difficulties[legacy] = bool(courses_doc.get(legacy))
 
         charts_payload = document.get('charts') if isinstance(document.get('charts'), list) else []
         max_duration = 0
@@ -3936,7 +3985,16 @@ class SongScanner:
         for entry_id in sorted(entries):
             entry = entries[entry_id]
             difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
-            difficulty_tuple = tuple(bool(difficulties.get(level)) for level in ('easy', 'normal', 'hard', 'oni', 'ura'))
+
+            def _manifest_available(value: object) -> bool:
+                if isinstance(value, dict):
+                    return bool(value.get('valid', True))
+                return bool(value)
+
+            difficulty_tuple = tuple(
+                _manifest_available(difficulties.get(level))
+                for level in ('easy', 'normal', 'hard', 'oni', 'ura')
+            )
             normalized_paths: List[Tuple[str, str]] = []
             raw_paths = entry.get('paths') if isinstance(entry.get('paths'), dict) else None
             if raw_paths:

@@ -46,6 +46,15 @@ class _MemoryCollection:
         if not filter_:
             return True
         for key, expected in filter_.items():
+            if key == '$or':
+                if not isinstance(expected, list) or not expected:
+                    return False
+                if not any(
+                    isinstance(clause, dict) and self._matches(doc, clause)
+                    for clause in expected
+                ):
+                    return False
+                continue
             if isinstance(expected, dict):
                 if '$exists' in expected:
                     has_field = self._has_path(doc, key)
@@ -112,6 +121,20 @@ class _MemoryCollection:
                 return
         if isinstance(target, dict):
             target[parts[-1]] = value
+
+    def update_many(self, filter_, update):
+        matched = 0
+        with self._lock:
+            for doc in self._docs:
+                if self._matches(doc, filter_ or {}):
+                    matched += 1
+                    if '$set' in update:
+                        for key, value in update['$set'].items():
+                            if '.' in key:
+                                self._set_path(doc, key, self._clone(value))
+                            else:
+                                doc[key] = self._clone(value)
+        return _DummyUpdateResult(matched, matched, None)
 
     def _parse_array_filters(self, array_filters):
         mapping = {}
@@ -415,6 +438,68 @@ class TestSongsScanner(unittest.TestCase):
         base = self._base_record_kwargs()
         base.update(overrides)
         return TjaImportRecord(**base)
+
+    def test_init_backfills_legacy_dan_dojo_is_playable(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        legacy_doc = {
+            '_id': 'legacy-dojo',
+            'source_type': 'dan_dojo',
+            'valid_chart_count': 1,
+            'valid_charts': 0,
+            'is_playable': False,
+        }
+        db.songs._docs.append(legacy_doc)
+
+        with mock.patch.object(db.songs, 'update_many', wraps=db.songs.update_many) as mocked_update:
+            SongScanner(
+                db=db,
+                songs_dir=songs_dir,
+                songs_baseurl="/songs/",
+                ignore_globs=None,
+            )
+
+        self.assertTrue(db.songs._docs[0]['is_playable'])
+        mocked_update.assert_called_with(
+            {
+                'source_type': 'dan_dojo',
+                '$or': [
+                    {'valid_charts': {'$gt': 0}},
+                    {'valid_chart_count': {'$gt': 0}},
+                ],
+            },
+            {'$set': {'is_playable': True}},
+        )
+
+    def test_run_index_migration_backfills_legacy_dan_dojo(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        legacy_doc = {
+            '_id': 'legacy-dojo',
+            'source_type': 'dan_dojo',
+            'valid_chart_count': 1,
+            'valid_charts': 0,
+            'is_playable': False,
+        }
+        db.songs._docs.append(legacy_doc)
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        db.songs._docs[0]['is_playable'] = False
+        scanner._run_index_migration()
+
+        self.assertTrue(db.songs._docs[0]['is_playable'])
 
     def test_parse_tja_extracts_metadata(self):
         tmp_dir = Path(self._tmp_dir())
@@ -2202,6 +2287,12 @@ LEVEL:7
         self.assertIn('easy', courses)
         self.assertIn('oni', courses)
         self.assertEqual(inserted.get('valid_chart_count'), 2)
+        self.assertEqual(inserted.get('valid_charts'), 2)
+        self.assertTrue(inserted.get('is_playable'))
+        difficulties = inserted.get('difficulties')
+        self.assertIsInstance(difficulties, dict)
+        self.assertIsInstance(difficulties.get('oni'), dict)
+        self.assertTrue(difficulties['oni'].get('valid'))
         self.assertEqual(inserted.get('genre'), 'Unsorted')
         self.assertTrue(all(chart.get('total_notes', 0) > 0 for chart in inserted['charts']))
 
