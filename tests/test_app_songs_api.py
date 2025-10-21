@@ -599,7 +599,7 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(difficulties['oni']['stars'], 10)
         self.assertIn('test-issue', difficulties['oni'].get('issues', []))
 
-    def test_no_false_defaults_in_catalog(self):
+    def test_no_false_defaults(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'no-defaults', 'count': 1}
         songs_docs = [
@@ -625,15 +625,7 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]['difficulties'], {})
 
-        with self._patch_catalog_assume_valid(True), self._patch_collections(manifest_entries, manifest_meta, songs_docs):
-            response = self.client.get('/api/songs')
-
-        self.assertEqual(response.status_code, 200)
-        payload = json.loads(response.data.decode('utf-8'))
-        self.assertEqual(len(payload), 1)
-        self.assertEqual(payload[0]['difficulties'], {'oni': {'valid': True}})
-
-    def test_catalog_assume_valid_fallback(self):
+    def test_assume_valid_fallback(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'optimistic', 'count': 1}
         songs_docs = [

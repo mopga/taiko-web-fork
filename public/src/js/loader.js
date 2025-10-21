@@ -336,10 +336,17 @@ class Loader{
                                                 courseInfo[diff] = null
                                                 difficultyDetails[diff] = null
                                         })
-                                        var rawDifficulties = song.difficulties && typeof song.difficulties === "object" ? song.difficulties : {}
+                                        var diffs = song.difficulties && typeof song.difficulties === "object" ? song.difficulties : {}
+                                        const isValid = d => d && typeof d === "object" ? d.valid !== false : d === true
+                                        let playable = Object.entries(diffs).filter(([_, d]) => isValid(d))
+                                        if(playable.length === 0 && window.catalogAssumeValid){
+                                                song.difficulties = { oni: { valid: true } }
+                                                diffs = song.difficulties
+                                                playable = [["oni", { valid: true }]]
+                                        }
                                         var validCourses = 0
                                         difficultyOrder.forEach(diff => {
-                                                var entry = rawDifficulties[diff]
+                                                var entry = diffs[diff]
                                                 if(entry && typeof entry === "object"){
                                                         var issues = Array.isArray(entry.issues) ? entry.issues.filter(issue => typeof issue === "string") : []
                                                         var stars = 0
