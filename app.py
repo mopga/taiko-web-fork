@@ -86,32 +86,32 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
-def _normalize_difficulties(doc: object, assume_valid: bool = False) -> dict[str, object]:
-    if not isinstance(doc, dict):
-        return {'oni': {'valid': True}} if assume_valid else {}
-    raw_difficulties = doc.get('difficulties')
-    if not isinstance(raw_difficulties, dict) or not raw_difficulties:
+def _normalize_difficulties(entry: object, assume_valid: bool = False) -> dict[str, object]:
+    if not isinstance(entry, dict):
         return {'oni': {'valid': True}} if assume_valid else {}
 
+    raw_difficulties = entry.get('difficulties')
+    if not isinstance(raw_difficulties, dict):
+        raw_difficulties = {}
+
     normalized: dict[str, object] = {}
-    for key, value in raw_difficulties.items():
-        level = str(key)
+    for name in ('easy', 'normal', 'hard', 'oni', 'ura'):
+        value = raw_difficulties.get(name)
         if isinstance(value, dict):
-            difficulty_payload = dict(value)
-            difficulty_payload['valid'] = bool(value.get('valid', True))
-            normalized[level] = difficulty_payload
+            payload = dict(value)
+            payload['valid'] = bool(value.get('valid', True))
+            normalized[name] = payload
+        elif value is True:
+            normalized[name] = {'valid': True}
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            normalized[level] = {
+            normalized[name] = {
                 'stars': _coerce_int(value, 0),
                 'valid': True,
             }
-        elif value is True:
-            normalized[level] = {'valid': True}
-        else:
-            continue
 
     if not normalized and assume_valid:
         normalized['oni'] = {'valid': True}
+
     return normalized
 
 
@@ -548,8 +548,9 @@ def get_config(credentials=False):
         'plugins': take_config('PLUGINS') and [x for x in take_config('PLUGINS') if x['url']],
         'preview_type': take_config('PREVIEW_TYPE') or 'mp3',
         'multiplayer_url': take_config('MULTIPLAYER_URL'),
-        'catalog_assume_valid': CATALOG_ASSUME_VALID_INT,
     }
+    config_out['catalog_assume_valid'] = bool(CATALOG_ASSUME_VALID)
+    config_out['catalogAssumeValid'] = bool(CATALOG_ASSUME_VALID)
     relative_urls = ['songs_baseurl', 'assets_baseurl']
     for name in relative_urls:
         if not config_out[name].startswith("/") and not config_out[name].startswith("http://") and not config_out[name].startswith("https://"):
@@ -1037,13 +1038,13 @@ def route_api_songs():
         'subtitle': 1,
         'category': 1,
         'category_id': 1,
-        'difficulties': 1,
         'duration_ms': 1,
         'preview_available': 1,
         'source_type': 1,
         'is_playable': 1,
         'paths': 1,
     }
+    projection.update({'difficulties': 1})
 
     try:
         cursor = songs_collection.find(filters, projection).sort([
