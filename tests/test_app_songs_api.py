@@ -126,6 +126,30 @@ class _SongsCollection:
     def __init__(self, docs):
         self._docs = {doc.get('scanner_stable_id'): dict(doc) for doc in docs}
 
+    class _Cursor:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def sort(self, spec):
+            if isinstance(spec, list):
+                for key, direction in reversed(spec):
+                    reverse = direction < 0
+                    self._docs.sort(key=lambda doc: doc.get(key), reverse=reverse)
+            return self
+
+        def skip(self, amount):
+            if isinstance(amount, int) and amount > 0:
+                self._docs = self._docs[amount:]
+            return self
+
+        def limit(self, amount):
+            if isinstance(amount, int) and amount >= 0:
+                self._docs = self._docs[:amount]
+            return self
+
+        def __iter__(self):
+            return iter(self._docs)
+
     def find_one(self, filter_, projection=None):
         stable_id = filter_.get('scanner_stable_id') if isinstance(filter_, dict) else None
         doc = self._docs.get(stable_id)
@@ -156,7 +180,7 @@ class _SongsCollection:
                 results.append(projected)
             else:
                 results.append(dict(doc))
-        return results
+        return self._Cursor(results)
 
 
 class SongsApiTestCase(unittest.TestCase):
@@ -173,7 +197,7 @@ class SongsApiTestCase(unittest.TestCase):
             db=mock.Mock(songs=songs_collection),
         )
 
-    def test_songs_endpoint_returns_etag_and_304(self):
+    def test_api_songs_etag_304(self):
         manifest_entries = [
             {
                 '_id': 'song-1',
@@ -216,12 +240,23 @@ class SongsApiTestCase(unittest.TestCase):
             first_response = self.client.get('/api/songs')
             self.assertEqual(first_response.status_code, 200)
             self.assertIn('ETag', first_response.headers)
+            self.assertIn('Cache-Control', first_response.headers)
+            self.assertIn('Vary', first_response.headers)
             etag_value = first_response.headers['ETag']
             self.assertTrue(etag_value)
 
             second_response = self.client.get('/api/songs', headers={'If-None-Match': etag_value})
             self.assertEqual(second_response.status_code, 304)
             self.assertEqual(second_response.data, b'')
+            self.assertEqual(second_response.headers.get('ETag'), etag_value)
+            self.assertEqual(
+                second_response.headers.get('Cache-Control'),
+                'public, max-age=86400, stale-while-revalidate=600',
+            )
+            vary_header = second_response.headers.get('Vary', '')
+            vary_tokens = {token.strip() for token in vary_header.split(',') if token.strip()}
+            self.assertIn('If-None-Match', vary_tokens)
+            self.assertIn('Accept-Encoding', vary_tokens)
 
     def test_songs_etag_changes_after_manifest_update(self):
         manifest_entries = [
@@ -275,7 +310,7 @@ class SongsApiTestCase(unittest.TestCase):
             second_etag = second_response.headers['ETag']
             self.assertNotEqual(first_etag, second_etag)
 
-    def test_songs_details_endpoint_orders_and_trims_notes(self):
+    def test_details_notes_none_order(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'aaa', 'count': 2}
         songs_docs = [
@@ -346,4 +381,26 @@ class SongsApiTestCase(unittest.TestCase):
             self.assertTrue(isinstance(charts, list))
             for chart in charts:
                 self.assertNotIn('chart_data', chart)
+
+    def test_details_error_no_500(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'aaa', 'count': 0}
+
+        class _FailingSongsCollection:
+            def find(self, *args, **kwargs):  # pragma: no cover - behaviour validated via API
+                raise RuntimeError('database temporarily unavailable')
+
+        failing_db = types.SimpleNamespace(songs=_FailingSongsCollection())
+        manifest_collection = _ManifestCollection(manifest_entries, manifest_meta)
+
+        with mock.patch.multiple(
+            taiko_app,
+            _get_manifest_collection=mock.Mock(return_value=manifest_collection),
+            db=failing_db,
+        ):
+            response = self.client.get('/api/songs/details?ids=song-1,song-2&notes=none')
+            self.assertEqual(response.status_code, 400)
+            payload = json.loads(response.data.decode('utf-8'))
+            self.assertEqual(payload.get('error'), 'songs_details_failed')
+            self.assertTrue(payload.get('reason'))
 

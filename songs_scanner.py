@@ -3937,17 +3937,30 @@ class SongScanner:
             entry = entries[entry_id]
             difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
             difficulty_tuple = tuple(bool(difficulties.get(level)) for level in ('easy', 'normal', 'hard', 'oni', 'ura'))
+            normalized_paths: List[Tuple[str, str]] = []
+            raw_paths = entry.get('paths') if isinstance(entry.get('paths'), dict) else None
+            if raw_paths:
+                for key in sorted(raw_paths):
+                    value = raw_paths.get(key)
+                    if value:
+                        normalized_paths.append((key, str(value)))
             payload = {
                 'id': entry_id,
-                'sha1': entry.get('sha1') or '',
+                'sha1': str(entry.get('sha1') or ''),
+                'title': str(entry.get('title') or ''),
+                'subtitle': str(entry.get('subtitle') or ''),
+                'category': str(entry.get('category') or ''),
                 'duration_ms': int(entry.get('duration_ms') or 0),
                 'preview_available': bool(entry.get('preview_available')),
                 'difficulties': difficulty_tuple,
-                'source_type': entry.get('source_type') or '',
+                'source_type': str(entry.get('source_type') or ''),
+                'paths': normalized_paths,
             }
             checksum_inputs.append(json.dumps(payload, sort_keys=True, separators=(',', ':')))
         checksum_source = '|'.join(checksum_inputs)
-        return hashlib.sha1(checksum_source.encode('utf-8')).hexdigest() if checksum_inputs else hashlib.sha1(b'').hexdigest()
+        if not checksum_inputs:
+            return hashlib.sha1(b'').hexdigest()
+        return hashlib.sha1(checksum_source.encode('utf-8')).hexdigest()
 
     def _sync_manifest_entries(self, entries: Dict[str, Dict[str, object]]) -> Optional[str]:
         collection = self._manifest_collection

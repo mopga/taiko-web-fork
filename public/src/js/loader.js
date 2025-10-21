@@ -11,6 +11,8 @@ class CatalogDetailBatcher{
                 this.maxConcurrency = options && options.maxConcurrency ? options.maxConcurrency : 6;
                 this.batchInterval = options && options.batchInterval ? options.batchInterval : 16;
                 this.includeNotes = !options || options.includeNotes !== false;
+                const rawRetries = options && typeof options.maxRetries === "number" ? options.maxRetries : null;
+                this.maxRetries = rawRetries !== null && rawRetries >= 0 ? Math.floor(rawRetries) : 3;
                 this._queue = new Map();
                 this._pending = new Set();
                 this._inFlight = 0;
@@ -24,7 +26,7 @@ class CatalogDetailBatcher{
                         if(!this._queue.has(id)){
                                 this._queue.set(id, []);
                         }
-                        this._queue.get(id).push({resolve, reject});
+                        this._queue.get(id).push({resolve, reject, attempts: 0});
                         this._schedule();
                 });
         }
@@ -84,16 +86,54 @@ class CatalogDetailBatcher{
                         });
                 };
                 const handleFailure = error => {
+                        const retryableStatus = error && typeof error.status === "number" ? error.status : 0;
+                        const shouldRetry = !retryableStatus || (retryableStatus >= 400 && retryableStatus < 600);
+                        const retryMap = new Map();
                         batch.forEach(id => {
                                 const resolvers = this._queue.get(id) || [];
                                 this._queue.delete(id);
                                 this._pending.delete(id);
+                                if(!resolvers.length){
+                                        return;
+                                }
+                                if(!shouldRetry){
+                                        resolvers.forEach(entry => {
+                                                try{
+                                                        entry.reject(error);
+                                                }catch(e){}
+                                        });
+                                        return;
+                                }
+                                const retryEntries = [];
                                 resolvers.forEach(entry => {
-                                        try{
-                                                entry.reject(error);
-                                        }catch(e){}
+                                        const attempts = typeof entry.attempts === "number" ? entry.attempts : 0;
+                                        if(attempts < this.maxRetries){
+                                                entry.attempts = attempts + 1;
+                                                retryEntries.push(entry);
+                                        }else{
+                                                try{
+                                                        entry.reject(error);
+                                                }catch(e){}
+                                        }
                                 });
+                                if(retryEntries.length){
+                                        retryMap.set(id, retryEntries);
+                                }
                         });
+                        if(retryMap.size){
+                                setTimeout(() => {
+                                        retryMap.forEach((entries, id) => {
+                                                const existing = this._queue.get(id);
+                                                if(Array.isArray(existing) && existing.length){
+                                                        this._queue.set(id, entries.concat(existing));
+                                                }else{
+                                                        this._queue.set(id, entries.slice());
+                                                }
+                                        });
+                                        retryMap.clear();
+                                        this._schedule();
+                                }, this.batchInterval);
+                        }
                 };
                 const finalize = () => {
                         this._inFlight--;
