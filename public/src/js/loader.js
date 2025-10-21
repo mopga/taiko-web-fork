@@ -1,9 +1,9 @@
 const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
 const songsCatalogCache = {
-        pages: Object.create(null),
         lastResult: [],
         details: Object.create(null),
         etag: null,
+        detailBatcher: null,
 };
 
 class CatalogDetailBatcher{
@@ -910,11 +910,6 @@ class Loader{
                 return promise
         }
         loadSongsCatalog(){
-                const PAGE_SIZE = 200
-                const HARD_PAGE_CAP = 8
-                const SOFT_PAGE_STEP = 8
-                const ABSOLUTE_PAGE_LIMIT = 200
-                const collected = []
                 const loaderInstance = this
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
                 const detailBatcher = songsCatalogCache.detailBatcher || (songsCatalogCache.detailBatcher = new CatalogDetailBatcher({
@@ -922,68 +917,9 @@ class Loader{
                         batchInterval: 16,
                         includeNotes: false,
                 }))
-                let pageCache = songsCatalogCache.pages
-
-                function normalisePageCache(existing){
-                        if(existing instanceof Map){
-                                return existing
-                        }
-                        const map = new Map()
-                        if(existing && typeof existing === "object"){
-                                Object.keys(existing).forEach(key => {
-                                        const numericKey = parseInt(key, 10)
-                                        if(Number.isFinite(numericKey) && Array.isArray(existing[key])){
-                                                map.set(numericKey, existing[key].slice())
-                                        }
-                                })
-                        }
-                        return map
-                }
-
-                pageCache = normalisePageCache(pageCache)
-                songsCatalogCache.pages = pageCache
-
-                function cachePage(pageNumber, items){
-                        if(!(pageCache instanceof Map)){
-                                return
-                        }
-                        pageCache.set(pageNumber, Array.isArray(items) ? items.slice() : [])
-                }
-
-                function getCachedPage(pageNumber){
-                        if(!(pageCache instanceof Map)){
-                                return null
-                        }
-                        if(!pageCache.has(pageNumber)){
-                                return null
-                        }
-                        const cached = pageCache.get(pageNumber)
-                        return Array.isArray(cached) ? cached.slice() : null
-                }
-
-                function pruneCacheAfter(pageNumber){
-                        if(!(pageCache instanceof Map)){
-                                return
-                        }
-                        const keysToDelete = []
-                        pageCache.forEach((_, key) => {
-                                if(key > pageNumber){
-                                        keysToDelete.push(key)
-                                }
-                        })
-                        keysToDelete.forEach(key => pageCache.delete(key))
-                }
-
-                function appendItems(items){
-                        if(!Array.isArray(items)){
-                                return
-                        }
-                        items.forEach(detail => {
-                                if(detail && typeof detail === "object"){
-                                        collected.push(detail)
-                                }
-                        })
-                }
+                const supportsFetch = typeof fetch === "function"
+                const catalogUrl = "api/songs"
+                const cachedDetails = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null
 
                 function loadDetail(entry){
                         if(!entry || typeof entry.id !== "string" || !entry.id){
@@ -1009,279 +945,164 @@ class Loader{
                         }).catch(() => cachedDetail || null)
                 }
 
-                async function fetchPage(pageNumber, limit){
-                        const baseUrl = `api/songs?page=${pageNumber}&limit=${limit}`
-                        const hasCache = pageCache instanceof Map && pageCache.has(pageNumber)
-                        const supportsFetch = typeof fetch === "function"
+                function normaliseEntries(payload){
+                        if(Array.isArray(payload)){
+                                return payload
+                        }
+                        if(payload && typeof payload === "object" && Array.isArray(payload.entries)){
+                                return payload.entries
+                        }
+                        if(typeof payload === "string" && payload){
+                                try{
+                                        const parsed = JSON.parse(payload)
+                                        return Array.isArray(parsed) ? parsed : []
+                                }catch(e){
+                                        return []
+                                }
+                        }
+                        return []
+                }
 
-                        async function performRequest(url, bypassCache){
-                                if(supportsFetch){
-                                        const headers = {}
-                                        if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
-                                                headers["If-None-Match"] = songsCatalogCache.etag
-                                        }
-                                        if(bypassCache){
-                                                headers["Cache-Control"] = "no-cache"
-                                                headers["Pragma"] = "no-cache"
-                                        }
-                                        const init = {
-                                                method: "GET",
-                                                credentials: "same-origin",
-                                                headers,
-                                        }
-                                        if(bypassCache){
-                                                init.cache = "no-store"
-                                        }
-                                        const response = await fetch(url, init)
-                                        const responseEtag = response.headers ? response.headers.get("ETag") : null
-                                        if(responseEtag){
-                                                songsCatalogCache.etag = responseEtag
-                                        }
-                                        if(response.status === 304){
-                                                return {notModified: true, etag: responseEtag}
-                                        }
-                                        if(response.status === 200){
-                                                const body = await response.text()
-                                                return {body, etag: responseEtag}
-                                        }
+                function rememberEtag(value){
+                        if(typeof value === "string" && value){
+                                songsCatalogCache.etag = value
+                        }
+                }
+
+                async function performRequest(url, bypassCache){
+                        if(supportsFetch){
+                                const headers = {}
+                                if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
+                                        headers["If-None-Match"] = songsCatalogCache.etag
+                                }
+                                if(bypassCache){
+                                        headers["Cache-Control"] = "no-cache"
+                                        headers["Pragma"] = "no-cache"
+                                }
+                                const init = {
+                                        method: "GET",
+                                        credentials: "same-origin",
+                                        headers,
+                                }
+                                if(bypassCache){
+                                        init.cache = "no-store"
+                                }
+                                const response = await fetch(url, init)
+                                const responseEtag = response.headers ? response.headers.get("ETag") : null
+                                rememberEtag(responseEtag)
+                                if(response.status === 304){
+                                        return {notModified: true}
+                                }
+                                if(response.status !== 200){
                                         const error = new Error(`${url} (${response.status})`)
                                         error.status = response.status
                                         throw error
                                 }
-                                let responseEtag = null
-                                return loaderInstance
-                                        .ajax(url, request => {
-                                                if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
-                                                        try{
-                                                                request.setRequestHeader("If-None-Match", songsCatalogCache.etag)
-                                                        }catch(e){}
-                                                }
-                                                if(bypassCache){
-                                                        try{
-                                                                request.setRequestHeader("Cache-Control", "no-cache")
-                                                        }catch(e){}
-                                                        try{
-                                                                request.setRequestHeader("Pragma", "no-cache")
-                                                        }catch(e){}
-                                                }
-                                                request.addEventListener("load", () => {
-                                                        try{
-                                                                responseEtag = request.getResponseHeader("ETag")
-                                                                if(responseEtag){
-                                                                        songsCatalogCache.etag = responseEtag
-                                                                }
-                                                        }catch(e){}
-                                                })
-                                        })
-                                        .then(result => {
-                                                if(result && typeof result === "object" && result.__notModified){
-                                                        return {notModified: true, etag: responseEtag}
-                                                }
-                                                return {body: result, etag: responseEtag}
-                                        })
-                                        .catch(error => {
-                                                if(error && typeof error === "object" && error.__notModified){
-                                                        return {notModified: true, etag: responseEtag}
-                                                }
-                                                throw error
-                                        })
+                                return {body: await response.json()}
                         }
 
-                        const initial = await performRequest(baseUrl, false)
-                        if(initial.notModified){
-                                if(hasCache){
-                                        return {__notModified: true}
-                                }
-                                const bypassUrl = `${baseUrl}${baseUrl.indexOf("?") === -1 ? "?" : "&"}_bypass=${Date.now()}`
-                                const retry = await performRequest(bypassUrl, true)
-                                if(retry.notModified){
-                                        return []
-                                }
-                                if(typeof retry.etag === "string" && retry.etag){
-                                        songsCatalogCache.etag = retry.etag
-                                }
-                                return retry.body
+                        let responseEtag = null
+                        const result = await loaderInstance
+                                .ajax(url, request => {
+                                        if(!bypassCache && typeof songsCatalogCache.etag === "string" && songsCatalogCache.etag){
+                                                try{
+                                                        request.setRequestHeader("If-None-Match", songsCatalogCache.etag)
+                                                }catch(e){}
+                                        }
+                                        if(bypassCache){
+                                                try{
+                                                        request.setRequestHeader("Cache-Control", "no-cache")
+                                                }catch(e){}
+                                                try{
+                                                        request.setRequestHeader("Pragma", "no-cache")
+                                                }catch(e){}
+                                        }
+                                        request.addEventListener("load", () => {
+                                                try{
+                                                        responseEtag = request.getResponseHeader("ETag")
+                                                        rememberEtag(responseEtag)
+                                                }catch(e){}
+                                        })
+                                })
+                                .catch(error => {
+                                        if(error && typeof error === "object" && error.__notModified){
+                                                return {__notModified: true}
+                                        }
+                                        throw error
+                                })
+                        if(result && typeof result === "object" && result.__notModified){
+                                return {notModified: true}
                         }
-                        if(typeof initial.etag === "string" && initial.etag){
-                                songsCatalogCache.etag = initial.etag
-                        }
-                        return initial.body
+                        rememberEtag(responseEtag)
+                        return {body: result}
                 }
 
-                async function processPage(pageNumber){
+                async function fetchEntries(){
                         let response
                         try{
-                                response = await fetchPage(pageNumber, PAGE_SIZE)
-                        }catch(err){
-                                const cached = getCachedPage(pageNumber)
-                                if(cached && cached.length){
-                                        appendItems(cached)
-                                        if(cached.length < PAGE_SIZE){
-                                                pruneCacheAfter(pageNumber)
-                                                return false
-                                        }
-                                        return true
+                                response = await performRequest(catalogUrl, false)
+                        }catch(error){
+                                if(cachedDetails){
+                                        return {details: cachedDetails}
                                 }
-                                return false
+                                throw error
                         }
 
-                        if(response && typeof response === "object" && response.__notModified){
-                                const cached = getCachedPage(pageNumber)
-                                if(Array.isArray(cached) && cached.length){
-                                        appendItems(cached)
-                                        if(cached.length < PAGE_SIZE){
-                                                pruneCacheAfter(pageNumber)
-                                                return false
-                                        }
-                                        return true
+                        if(response.notModified){
+                                if(cachedDetails){
+                                        return {details: cachedDetails}
                                 }
-                                pruneCacheAfter(pageNumber)
-                                return false
+                                const bypassUrl = `${catalogUrl}${catalogUrl.indexOf("?") === -1 ? "?" : "&"}_=${Date.now()}`
+                                const retry = await performRequest(bypassUrl, true)
+                                if(retry.notModified){
+                                        return {entries: []}
+                                }
+                                return {entries: normaliseEntries(retry.body)}
                         }
 
-                        let entries = []
-                        if(Array.isArray(response)){
-                                entries = response
-                        }else if(typeof response === "string" && response){
-                                try{
-                                        entries = JSON.parse(response)
-                                }catch(parseErr){
-                                        entries = []
-                                }
-                        }else if(response === "" || response === null || typeof response === "undefined"){
-                                const cached = getCachedPage(pageNumber)
-                                if(Array.isArray(cached) && cached.length){
-                                        appendItems(cached)
-                                        if(cached.length < PAGE_SIZE){
-                                                pruneCacheAfter(pageNumber)
-                                                return false
-                                        }
-                                        return true
-                                }
-                                entries = []
-                        }
+                        return {entries: normaliseEntries(response.body)}
+                }
 
+                async function hydrateDetails(entries){
                         if(!Array.isArray(entries) || entries.length === 0){
-                                if(pageCache instanceof Map){
-                                        pageCache.delete(pageNumber)
-                                }
-                                pruneCacheAfter(pageNumber)
-                                return false
-                        }
-
-                        const details = await Promise.all(entries.map(loadDetail))
-                        const pageDetails = details.filter(detail => detail && typeof detail === "object")
-                        if(pageDetails.length === 0){
-                                if(pageCache instanceof Map){
-                                        pageCache.delete(pageNumber)
-                                }
-                                pruneCacheAfter(pageNumber)
-                                return false
-                        }
-
-                        cachePage(pageNumber, pageDetails)
-                        appendItems(pageDetails)
-                        if(entries.length < PAGE_SIZE || pageDetails.length < PAGE_SIZE){
-                                pruneCacheAfter(pageNumber)
-                                return false
-                        }
-                        return true
-                }
-
-                async function loadAllPages(){
-                        let page = 1
-                        let hasMore = true
-                        let totalPagesFetched = 0
-                        let reachedAbsoluteCap = false
-                        let chunkInFlight = null
-
-                        function updateCatalogState(){
-                                songsCatalogCache.catalogHasMore = hasMore
-                                songsCatalogCache.catalogReachedCap = reachedAbsoluteCap
-                                songsCatalogCache.pageSize = PAGE_SIZE
-                                songsCatalogCache.nextCatalogPage = hasMore ? page : null
-                                songsCatalogCache.loadedCatalogPages = totalPagesFetched
-                                songsCatalogCache.totalCatalogPages = hasMore ? ABSOLUTE_PAGE_LIMIT : totalPagesFetched
-                                songsCatalogCache.absoluteCatalogPageLimit = ABSOLUTE_PAGE_LIMIT
-                        }
-
-                        async function fetchChunk(maxPages){
-                                let processed = 0
-                                while(hasMore && processed < maxPages){
-                                        if(totalPagesFetched >= ABSOLUTE_PAGE_LIMIT){
-                                                hasMore = false
-                                                reachedAbsoluteCap = true
-                                                break
-                                        }
-                                        const shouldContinue = await processPage(page)
-                                        totalPagesFetched += 1
-                                        processed += 1
-                                        if(!shouldContinue){
-                                                hasMore = false
-                                                break
-                                        }
-                                        page += 1
-                                }
-                                songsCatalogCache.lastResult = collected.slice()
-                                updateCatalogState()
-                        }
-
-                        function normaliseStep(step){
-                                const numeric = Number(step)
-                                if(!Number.isFinite(numeric) || numeric <= 0){
-                                        return SOFT_PAGE_STEP
-                                }
-                                return Math.max(1, Math.min(Math.floor(numeric), ABSOLUTE_PAGE_LIMIT - totalPagesFetched))
-                        }
-
-                        async function requestMoreCatalog(step = SOFT_PAGE_STEP){
-                                if(chunkInFlight){
-                                        return chunkInFlight
-                                }
-                                if(!hasMore){
-                                        updateCatalogState()
-                                        return Promise.resolve([])
-                                }
-                                const pagesToFetch = normaliseStep(step)
-                                if(pagesToFetch <= 0){
-                                        hasMore = false
-                                        reachedAbsoluteCap = totalPagesFetched >= ABSOLUTE_PAGE_LIMIT
-                                        updateCatalogState()
-                                        return Promise.resolve([])
-                                }
-                                const previousCount = collected.length
-                                chunkInFlight = fetchChunk(pagesToFetch).then(() => {
-                                        const newCount = collected.length
-                                        if(newCount > previousCount){
-                                                return collected.slice(previousCount, newCount)
-                                        }
-                                        return []
-                                }).finally(() => {
-                                        chunkInFlight = null
-                                })
-                                return chunkInFlight
-                        }
-
-                        songsCatalogCache.requestMoreCatalog = requestMoreCatalog
-                        loaderInstance.requestMoreCatalog = requestMoreCatalog
-
-                        await fetchChunk(HARD_PAGE_CAP)
-
-                        while(hasMore){
-                                await requestMoreCatalog(SOFT_PAGE_STEP)
-                        }
-                }
-
-                return loadAllPages().then(() => {
-                        if(collected.length === 0){
-                                if(Array.isArray(songsCatalogCache.lastResult) && songsCatalogCache.lastResult.length){
-                                        return songsCatalogCache.lastResult.slice()
-                                }
                                 return []
                         }
-                        songsCatalogCache.lastResult = collected.slice()
-                        return collected
-                })
+                        const results = []
+                        const CHUNK_SIZE = 48
+                        for(let index = 0; index < entries.length; index += CHUNK_SIZE){
+                                const chunk = entries.slice(index, index + CHUNK_SIZE)
+                                const chunkDetails = await Promise.all(chunk.map(loadDetail))
+                                chunkDetails.forEach(detail => {
+                                        if(detail && typeof detail === "object"){
+                                                results.push(detail)
+                                        }
+                                })
+                        }
+                        return results
+                }
+
+                return fetchEntries()
+                        .then(async payload => {
+                                if(Array.isArray(payload.details)){
+                                        const cachedList = payload.details.slice()
+                                        songsCatalogCache.lastResult = cachedList
+                                        return cachedList.slice()
+                                }
+                                const entries = Array.isArray(payload.entries) ? payload.entries : []
+                                if(entries.length === 0){
+                                        songsCatalogCache.lastResult = []
+                                        return []
+                                }
+                                const details = await hydrateDetails(entries)
+                                songsCatalogCache.lastResult = details.slice()
+                                return details
+                        })
+                        .catch(() => {
+                                if(Array.isArray(cachedDetails)){
+                                        return cachedDetails.slice()
+                                }
+                                return []
+                        })
         }
         loadModesManifest(){
                 const existingStore = typeof window !== "undefined" ? window.__modes__ : null
