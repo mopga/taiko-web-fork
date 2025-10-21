@@ -5,6 +5,50 @@ const songsCatalogCache = {
         details: Object.create(null),
 };
 
+function createRequestPool(limit){
+        const maxConcurrency = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 1;
+        const queue = [];
+        let active = 0;
+
+        function schedule(){
+                if(active >= maxConcurrency){
+                        return;
+                }
+                const task = queue.shift();
+                if(!task){
+                        return;
+                }
+                active++;
+                let result;
+                try{
+                        result = task.fn();
+                }catch(err){
+                        active--;
+                        task.reject(err);
+                        schedule();
+                        return;
+                }
+                Promise.resolve(result).then(value => {
+                        active--;
+                        task.resolve(value);
+                        schedule();
+                }).catch(error => {
+                        active--;
+                        task.reject(error);
+                        schedule();
+                });
+        }
+
+        return {
+                enqueue(fn){
+                        return new Promise((resolve, reject) => {
+                                queue.push({fn, resolve, reject});
+                                schedule();
+                        });
+                },
+        };
+}
+
 function resolveManifestStatus(manifest){
         if(manifest && typeof manifest === "object" && typeof manifest.status === "string" && manifest.status.trim()){
                 return manifest.status.trim();
@@ -401,8 +445,18 @@ class Loader{
                                         if(song.lyrics){
                                                 song.lyricsFile = new RemoteFile(dirUrl + "main.vtt")
                                         }
-                                        if(song.preview > 0){
-                                                song.previewMusic = new RemoteFile(dirUrl + "preview." + gameConfig.preview_type)
+                                        const previewUrl = typeof paths.preview_url === "string" && paths.preview_url ? paths.preview_url : null
+                                        if(typeof song.preview_available !== "boolean"){
+                                                song.preview_available = !!(previewUrl || song.preview > 0)
+                                        }
+                                        if(previewUrl){
+                                                song.previewMusic = new RemoteFile(previewUrl)
+                                        }else if(song.preview_available === false){
+                                                song.previewMusic = null
+                                        }else if(song.preview > 0){
+                                                const previewPath = dirUrl + "preview." + gameConfig.preview_type
+                                                paths.preview_url = previewPath
+                                                song.previewMusic = new RemoteFile(previewPath)
                                         }
                                 })
                                 assets.songsDefault = songs
@@ -745,7 +799,9 @@ class Loader{
                 var request = new XMLHttpRequest()
                 request.open("GET", url)
                 var promise = pageEvents.load(request)
-                if(!customResponse){
+                if(typeof customResponse === "function"){
+                        promise = promise.then(() => customResponse(request))
+                }else{
                         promise = promise.then(() => {
                                 if(request.status === 304){
                                         return {__notModified: true}
@@ -763,12 +819,20 @@ class Loader{
                 return promise
         }
         loadSongsCatalog(){
-                const HARD_PAGE_CAP = 200
+                const MAX_CONCURRENCY = 6
+                const DETAIL_BATCH_SIZE = 50
+                const HARD_PAGE_CAP_DEFAULT = 200
+                const MIN_PAGE_CAP = 5
                 const LIMIT = 200
                 const collected = []
                 const loaderInstance = this
                 const detailCache = songsCatalogCache.details || (songsCatalogCache.details = Object.create(null))
                 let pageCache = songsCatalogCache.pages
+                const requestPool = createRequestPool(MAX_CONCURRENCY)
+                const supportsFetch = typeof fetch === "function"
+                let batchEndpointAvailable = typeof songsCatalogCache.batchEndpointAvailable === "boolean" ? songsCatalogCache.batchEndpointAvailable : true
+                let totalCount = typeof songsCatalogCache.totalCount === "number" ? songsCatalogCache.totalCount : null
+                let hardPageCap = HARD_PAGE_CAP_DEFAULT
 
                 function normalisePageCache(existing){
                         if(existing instanceof Map){
@@ -786,8 +850,20 @@ class Loader{
                         return map
                 }
 
+                function recomputePageCap(){
+                        if(Number.isFinite(totalCount) && totalCount > 0){
+                                const computed = Math.ceil(totalCount / LIMIT)
+                                if(Number.isFinite(computed) && computed > 0){
+                                        hardPageCap = Math.min(HARD_PAGE_CAP_DEFAULT, Math.max(MIN_PAGE_CAP, computed))
+                                        return
+                                }
+                        }
+                        hardPageCap = HARD_PAGE_CAP_DEFAULT
+                }
+
                 pageCache = normalisePageCache(pageCache)
                 songsCatalogCache.pages = pageCache
+                recomputePageCap()
 
                 function cachePage(pageNumber, items){
                         if(!(pageCache instanceof Map)){
@@ -831,43 +907,37 @@ class Loader{
                         })
                 }
 
-                function loadDetail(entry){
-                        if(!entry || typeof entry.id !== "string" || !entry.id){
-                                return Promise.resolve(null)
-                        }
-                        const detailId = entry.id
-                        const cachedDetail = detailCache[detailId]
-                        const url = `api/song/${encodeURIComponent(detailId)}`
-                        return loaderInstance.ajax(url).then(detailResponse => {
-                                if(detailResponse && typeof detailResponse === "object" && detailResponse.__notModified){
-                                        return cachedDetail || null
-                                }
-                                if(detailResponse === "" || detailResponse === null || typeof detailResponse === "undefined"){
-                                        return cachedDetail || null
-                                }
-                                try{
-                                        const parsed = JSON.parse(detailResponse)
-                                        if(parsed && typeof parsed === "object"){
-                                                const stableId = typeof parsed.id === "string" && parsed.id ? parsed.id : detailId
-                                                if(stableId){
-                                                        detailCache[stableId] = parsed
-                                                }
-                                                return parsed
+                function makeHeadersShim(request){
+                        return {
+                                get(name){
+                                        try{
+                                                return request.getResponseHeader(name)
+                                        }catch(e){
+                                                return null
                                         }
-                                }catch(err){
-                                        return cachedDetail || null
-                                }
-                                return cachedDetail || null
-                        }).catch(() => cachedDetail || null)
+                                },
+                        }
                 }
 
-                async function fetchPage(pageNumber, limit){
-                        const baseUrl = `api/songs?page=${pageNumber}&limit=${limit}`
-                        const hasCache = pageCache instanceof Map && pageCache.has(pageNumber)
-                        const supportsFetch = typeof fetch === "function"
+                function updateTotalCountFromHeaders(headers){
+                        if(!headers || typeof headers.get !== "function"){
+                                return
+                        }
+                        const headerValue = headers.get("X-Total-Count")
+                        if(!headerValue){
+                                return
+                        }
+                        const parsed = parseInt(headerValue, 10)
+                        if(Number.isFinite(parsed) && parsed >= 0){
+                                totalCount = parsed
+                                songsCatalogCache.totalCount = parsed
+                                recomputePageCap()
+                        }
+                }
 
-                        async function performRequest(url, bypassCache){
-                                if(supportsFetch){
+                function performRequest(url, bypassCache){
+                        if(supportsFetch){
+                                return requestPool.enqueue(() => {
                                         const init = {
                                                 method: "GET",
                                                 credentials: "same-origin",
@@ -879,62 +949,218 @@ class Loader{
                                                         "Pragma": "no-cache",
                                                 }
                                         }
-                                        const response = await fetch(url, init)
-                                        if(response.status === 304){
-                                                return {notModified: true}
-                                        }
-                                        if(response.status === 200){
-                                                const body = await response.text()
-                                                return {body}
-                                        }
-                                        const error = new Error(`${url} (${response.status})`)
-                                        error.status = response.status
-                                        throw error
-                                }
-                                return loaderInstance
-                                        .ajax(url, request => {
-                                                if(bypassCache){
-                                                        try{
-                                                                request.setRequestHeader("Cache-Control", "no-cache")
-                                                        }catch(e){}
-                                                        try{
-                                                                request.setRequestHeader("Pragma", "no-cache")
-                                                        }catch(e){}
+                                        return fetch(url, init).then(response => {
+                                                const headers = response.headers
+                                                if(response.status === 304){
+                                                        return {notModified: true, headers}
                                                 }
-                                        })
-                                        .then(result => {
-                                                if(result && typeof result === "object" && result.__notModified){
-                                                        return {notModified: true}
+                                                if(response.ok){
+                                                        return response.text().then(body => ({body, headers}))
                                                 }
-                                                return {body: result}
-                                        })
-                                        .catch(error => {
-                                                if(error && typeof error === "object" && error.__notModified){
-                                                        return {notModified: true}
-                                                }
+                                                const error = new Error(`${url} (${response.status})`)
+                                                error.status = response.status
                                                 throw error
                                         })
+                                })
+                        }
+                        return requestPool.enqueue(() => loaderInstance.ajax(
+                                url,
+                                request => {
+                                        if(bypassCache){
+                                                try{
+                                                        request.setRequestHeader("Cache-Control", "no-cache")
+                                                }catch(e){}
+                                                try{
+                                                        request.setRequestHeader("Pragma", "no-cache")
+                                                }catch(e){}
+                                        }
+                                },
+                                request => {
+                                        const headers = makeHeadersShim(request)
+                                        if(request.status === 304){
+                                                return {notModified: true, headers}
+                                        }
+                                        if(request.status === 200){
+                                                return {body: request.response, headers}
+                                        }
+                                        const error = new Error(`${url} (${request.status})`)
+                                        error.status = request.status
+                                        throw error
+                                }
+                        ))
+                }
+
+                function parseEntries(payload){
+                        if(Array.isArray(payload)){
+                                return payload
+                        }
+                        if(typeof payload === "string" && payload){
+                                try{
+                                        return JSON.parse(payload)
+                                }catch(e){
+                                        return []
+                                }
+                        }
+                        return []
+                }
+
+                async function requestDetailBatch(ids){
+                        if(!Array.isArray(ids) || ids.length === 0){
+                                return {}
+                        }
+                        const query = ids.map(id => encodeURIComponent(id)).join(",")
+                        const url = `api/songs/details?ids=${query}`
+                        const response = await performRequest(url, false)
+                        if(response && response.headers){
+                                updateTotalCountFromHeaders(response.headers)
+                        }
+                        if(response && response.notModified){
+                                return {}
+                        }
+                        const body = response ? response.body : null
+                        let parsed = body
+                        if(typeof parsed === "string" && parsed){
+                                try{
+                                        parsed = JSON.parse(parsed)
+                                }catch(e){
+                                        parsed = []
+                                }
+                        }
+                        const map = {}
+                        if(Array.isArray(parsed)){
+                                parsed.forEach(item => {
+                                        if(item && typeof item === "object"){
+                                                const stableId = typeof item.id === "string" ? item.id : null
+                                                if(stableId){
+                                                        map[stableId] = item
+                                                }
+                                        }
+                                })
+                        }
+                        return map
+                }
+
+                async function requestSingleDetail(id){
+                        const url = `api/song/${encodeURIComponent(id)}`
+                        const response = await performRequest(url, false)
+                        if(response && response.notModified){
+                                return detailCache[id] || null
+                        }
+                        const body = response ? response.body : null
+                        if(body === "" || body === null || typeof body === "undefined"){
+                                return detailCache[id] || null
+                        }
+                        let parsed = body
+                        if(typeof parsed === "string"){
+                                try{
+                                        parsed = JSON.parse(parsed)
+                                }catch(e){
+                                        parsed = null
+                                }
+                        }
+                        if(parsed && typeof parsed === "object"){
+                                detailCache[id] = parsed
+                                return parsed
+                        }
+                        return detailCache[id] || null
+                }
+
+                async function loadDetails(entries){
+                        if(!Array.isArray(entries) || entries.length === 0){
+                                return []
+                        }
+                        const seen = new Set()
+                        const order = []
+                        entries.forEach(entry => {
+                                if(!entry || typeof entry !== "object"){
+                                        return
+                                }
+                                const detailId = typeof entry.id === "string" ? entry.id : ""
+                                if(!detailId){
+                                        return
+                                }
+                                order.push(detailId)
+                                if(!seen.has(detailId)){
+                                        seen.add(detailId)
+                                }
+                        })
+                        const uniqueIds = Array.from(seen)
+                        const missingIds = uniqueIds.filter(id => !detailCache[id])
+
+                        async function fetchBatch(ids){
+                                if(!ids.length){
+                                        return
+                                }
+                                if(batchEndpointAvailable){
+                                        try{
+                                                const map = await requestDetailBatch(ids)
+                                                const unresolved = []
+                                                ids.forEach(id => {
+                                                        const detail = map[id]
+                                                        if(detail && typeof detail === "object"){
+                                                                detailCache[id] = detail
+                                                        }else if(!detailCache[id]){
+                                                                unresolved.push(id)
+                                                        }
+                                                })
+                                                if(unresolved.length){
+                                                        await Promise.all(unresolved.map(requestSingleDetail))
+                                                }
+                                                return
+                                        }catch(error){
+                                                if(error && (error.status === 404 || error.status === 405)){
+                                                        batchEndpointAvailable = false
+                                                        songsCatalogCache.batchEndpointAvailable = false
+                                                }else{
+                                                        throw error
+                                                }
+                                        }
+                                }
+                                await Promise.all(ids.map(requestSingleDetail))
                         }
 
-                        const initial = await performRequest(baseUrl, false)
-                        if(initial.notModified){
+                        for(let index = 0; index < missingIds.length; index += DETAIL_BATCH_SIZE){
+                                const slice = missingIds.slice(index, index + DETAIL_BATCH_SIZE)
+                                await fetchBatch(slice)
+                        }
+
+                        const pageDetails = order.map(id => detailCache[id] || null).filter(detail => detail && typeof detail === "object")
+                        return pageDetails
+                }
+
+                async function fetchPage(pageNumber){
+                        const baseUrl = `api/songs?page=${pageNumber}&limit=${LIMIT}`
+                        const hasCache = pageCache instanceof Map && pageCache.has(pageNumber)
+                        let response
+                        try{
+                                response = await performRequest(baseUrl, false)
+                        }catch(error){
+                                throw error
+                        }
+                        if(response && response.headers){
+                                updateTotalCountFromHeaders(response.headers)
+                        }
+                        if(response && response.notModified){
                                 if(hasCache){
                                         return {__notModified: true}
                                 }
                                 const bypassUrl = `${baseUrl}${baseUrl.indexOf("?") === -1 ? "?" : "&"}_bypass=${Date.now()}`
                                 const retry = await performRequest(bypassUrl, true)
-                                if(retry.notModified){
-                                        return []
+                                if(retry && retry.headers){
+                                        updateTotalCountFromHeaders(retry.headers)
                                 }
-                                return retry.body
+                                if(retry && retry.notModified){
+                                        return {body: []}
+                                }
+                                return retry
                         }
-                        return initial.body
+                        return response
                 }
 
                 async function processPage(pageNumber){
                         let response
                         try{
-                                response = await fetchPage(pageNumber, LIMIT)
+                                response = await fetchPage(pageNumber)
                         }catch(err){
                                 const cached = getCachedPage(pageNumber)
                                 if(cached && cached.length){
@@ -948,7 +1174,7 @@ class Loader{
                                 return false
                         }
 
-                        if(response && typeof response === "object" && response.__notModified){
+                        if(response && response.__notModified){
                                 const cached = getCachedPage(pageNumber)
                                 if(Array.isArray(cached) && cached.length){
                                         appendItems(cached)
@@ -962,27 +1188,8 @@ class Loader{
                                 return false
                         }
 
-                        let entries = []
-                        if(Array.isArray(response)){
-                                entries = response
-                        }else if(typeof response === "string" && response){
-                                try{
-                                        entries = JSON.parse(response)
-                                }catch(parseErr){
-                                        entries = []
-                                }
-                        }else if(response === "" || response === null || typeof response === "undefined"){
-                                const cached = getCachedPage(pageNumber)
-                                if(Array.isArray(cached) && cached.length){
-                                        appendItems(cached)
-                                        if(cached.length < LIMIT){
-                                                pruneCacheAfter(pageNumber)
-                                                return false
-                                        }
-                                        return true
-                                }
-                                entries = []
-                        }
+                        const rawEntries = response ? response.body : response
+                        const entries = parseEntries(rawEntries)
 
                         if(!Array.isArray(entries) || entries.length === 0){
                                 if(pageCache instanceof Map){
@@ -992,8 +1199,7 @@ class Loader{
                                 return false
                         }
 
-                        const details = await Promise.all(entries.map(loadDetail))
-                        const pageDetails = details.filter(detail => detail && typeof detail === "object")
+                        const pageDetails = await loadDetails(entries)
                         if(pageDetails.length === 0){
                                 if(pageCache instanceof Map){
                                         pageCache.delete(pageNumber)
@@ -1013,7 +1219,7 @@ class Loader{
 
                 async function loadAllPages(){
                         let page = 1
-                        while(page <= HARD_PAGE_CAP){
+                        while(page <= hardPageCap){
                                 const shouldContinue = await processPage(page)
                                 if(!shouldContinue){
                                         break
@@ -1023,6 +1229,10 @@ class Loader{
                 }
 
                 return loadAllPages().then(() => {
+                        songsCatalogCache.batchEndpointAvailable = batchEndpointAvailable
+                        if(Number.isFinite(totalCount)){
+                                songsCatalogCache.totalCount = totalCount
+                        }
                         if(collected.length === 0){
                                 if(Array.isArray(songsCatalogCache.lastResult) && songsCatalogCache.lastResult.length){
                                         return songsCatalogCache.lastResult.slice()
