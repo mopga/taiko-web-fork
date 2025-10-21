@@ -1,3 +1,10 @@
+;(function(){
+        const cfg = (window.gameConfig || window.GAME_CONFIG || {});
+        const v = (cfg.catalogAssumeValid ?? cfg.catalog_assume_valid ?? false);
+        if(typeof window.catalogAssumeValid === "undefined"){
+                window.catalogAssumeValid = Boolean(v);
+        }
+})();
 const DEFAULT_MODES_MANIFEST_CACHE_TTL_MS = 12000;
 const USE_DETAILS_IN_CATALOG = 0;
 const songsCatalogCache = {
@@ -101,9 +108,14 @@ class Loader{
                 this.loaderPercentage = document.querySelector("#loader .percentage")
                 this.loaderProgress = document.querySelector("#loader .progress")
 
-                const resolvedCatalogFlag = Number(gameConfig.catalog_assume_valid) === 1 ? 1 : 0
+                const configCatalogFlag = gameConfig.catalogAssumeValid ?? gameConfig.catalog_assume_valid
                 if(typeof window !== "undefined"){
+                        if(typeof configCatalogFlag !== "undefined"){
+                                window.catalogAssumeValid = Boolean(configCatalogFlag)
+                        }
+                        const resolvedCatalogFlag = window.catalogAssumeValid ? 1 : 0
                         window.CATALOG_ASSUME_VALID = resolvedCatalogFlag
+                        window.catalogAssumeValid = resolvedCatalogFlag === 1
                 }
 		
 		this.queryString = gameConfig._version.commit_short ? "?" + gameConfig._version.commit_short : ""
@@ -377,7 +389,7 @@ class Loader{
                                         song.valid_charts = declaredValid
                                         song.valid_chart_count = declaredValid
                                         song.hasValidCharts = declaredValid > 0
-                                        const assumedViaCatalog = catalogAssumeValid && song.is_playable && validCourses > 0 && (!rawValidChartsLegacy || rawValidChartsLegacy <= 0) && (!rawValidChartCount || rawValidChartCount <= 0)
+                                        const assumedViaCatalog = window.catalogAssumeValid && song.is_playable && validCourses > 0 && (!rawValidChartsLegacy || rawValidChartsLegacy <= 0) && (!rawValidChartCount || rawValidChartCount <= 0)
                                         song.catalogAssumeValid = assumedViaCatalog
                                         song.courses = song.hasValidCharts ? courseInfo : null
 
@@ -768,7 +780,6 @@ class Loader{
                 }
 
                 const loaderInstance = this
-                const catalogAssumeValid = typeof window !== "undefined" && window.CATALOG_ASSUME_VALID === 1
                 const supportsFetch = typeof fetch === "function"
                 const catalogUrl = "api/songs"
                 const cachedList = Array.isArray(songsCatalogCache.lastResult) ? songsCatalogCache.lastResult.slice() : null
