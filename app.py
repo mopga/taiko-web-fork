@@ -87,30 +87,23 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
 
 
 def _normalize_difficulties(entry: object, assume_valid: bool = False) -> dict[str, object]:
-    if isinstance(entry, dict):
-        source = entry.get('difficulties') or {}
-    else:
-        source = {}
-
-    if not isinstance(source, dict):
-        source = {}
-
-    normalized: dict[str, object] = {}
+    src = entry.get('difficulties') if isinstance(entry, dict) else None
+    if not isinstance(src, dict):
+        src = {}
+    out: dict[str, object] = {}
     for name in ('easy', 'normal', 'hard', 'oni', 'ura'):
-        value = source.get(name)
-        if isinstance(value, dict):
-            payload = dict(value)
-            payload['valid'] = bool(value.get('valid', True))
-            normalized[name] = payload
-        elif value is True:
-            normalized[name] = {'valid': True}
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            normalized[name] = {'stars': int(value), 'valid': True}
-
-    if not normalized and assume_valid:
-        normalized['oni'] = {'valid': True}
-
-    return normalized
+        val = src.get(name)
+        if isinstance(val, dict):
+            d = dict(val)
+            d['valid'] = bool(val.get('valid', True))
+            out[name] = d
+        elif val is True:
+            out[name] = {'valid': True}
+        elif isinstance(val, (int, float)) and not isinstance(val, bool):
+            out[name] = {'stars': int(val), 'valid': True}
+    if not out and assume_valid:
+        out['oni'] = {'valid': True}
+    return out
 
 
 def _apply_catalog_cache_headers(response: 'flask.Response', *, etag: Optional[str], cache_control: str, vary: str) -> None:
@@ -1041,8 +1034,8 @@ def route_api_songs():
         'source_type': 1,
         'is_playable': 1,
         'paths': 1,
+        'difficulties': 1,
     }
-    projection.update({'difficulties': 1})
 
     try:
         cursor = songs_collection.find(filters, projection).sort([
