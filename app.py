@@ -86,11 +86,11 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
-def _normalize_difficulties(entry: object, assume_valid: bool = False) -> dict[str, object]:
+def _normalize_difficulties(entry, assume_valid=False):
     src = entry.get('difficulties') if isinstance(entry, dict) else None
     if not isinstance(src, dict):
         src = {}
-    out: dict[str, object] = {}
+    out = {}
     for name in ('easy', 'normal', 'hard', 'oni', 'ura'):
         val = src.get(name)
         if isinstance(val, dict):
@@ -540,8 +540,9 @@ def get_config(credentials=False):
         'preview_type': take_config('PREVIEW_TYPE') or 'mp3',
         'multiplayer_url': take_config('MULTIPLAYER_URL'),
     }
-    config_out['catalog_assume_valid'] = bool(CATALOG_ASSUME_VALID)
-    config_out['catalogAssumeValid'] = bool(CATALOG_ASSUME_VALID)
+    catalog_assume_valid_flag = bool(CATALOG_ASSUME_VALID)
+    config_out['catalog_assume_valid'] = catalog_assume_valid_flag
+    config_out['catalogAssumeValid'] = catalog_assume_valid_flag
     relative_urls = ['songs_baseurl', 'assets_baseurl']
     for name in relative_urls:
         if not config_out[name].startswith("/") and not config_out[name].startswith("http://") and not config_out[name].startswith("https://"):
@@ -1021,21 +1022,17 @@ def route_api_songs():
         if search_value:
             filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
 
-    projection = {
-        '_id': 0,
-        'id': 1,
-        'scanner_stable_id': 1,
-        'title': 1,
-        'subtitle': 1,
-        'category': 1,
-        'category_id': 1,
-        'duration_ms': 1,
-        'preview_available': 1,
+    projection = {'_id': 0}
+    projection.update({
+        'id': 1, 'scanner_stable_id': 1,
+        'title': 1, 'subtitle': 1,
+        'category': 1, 'category_id': 1,
+        'duration_ms': 1, 'preview_available': 1,
         'source_type': 1,
-        'is_playable': 1,
         'paths': 1,
+        'is_playable': 1,
         'difficulties': 1,
-    }
+    })
 
     try:
         cursor = songs_collection.find(filters, projection).sort([
@@ -1056,39 +1053,31 @@ def route_api_songs():
     for entry in raw_payload:
         if not isinstance(entry, dict):
             continue
-        sanitized = dict(entry)
-        stable_id = sanitized.get('scanner_stable_id')
-        if isinstance(stable_id, str) and stable_id:
-            sanitized['id'] = stable_id
-        sanitized.pop('scanner_stable_id', None)
-        if 'subtitle' not in sanitized or not isinstance(sanitized.get('subtitle'), str):
-            sanitized['subtitle'] = ''
-        normalized_difficulties = _normalize_difficulties(entry, assume_valid=CATALOG_ASSUME_VALID)
-        sanitized['difficulties'] = normalized_difficulties
-        doc_is_playable = bool(entry.get('is_playable'))
-        sanitized['is_playable'] = doc_is_playable or bool(CATALOG_ASSUME_VALID)
-        preview_available = bool(sanitized.get('preview_available'))
-        sanitized['preview_available'] = preview_available
-        source_type_value = sanitized.get('source_type')
+        item = dict(entry)
+        item['id'] = item.pop('scanner_stable_id', item.get('id'))
+        item['subtitle'] = item['subtitle'] if isinstance(item.get('subtitle'), str) else ''
+        item['difficulties'] = _normalize_difficulties(entry, assume_valid=CATALOG_ASSUME_VALID)
+        item['is_playable'] = bool(item.get('is_playable')) or bool(CATALOG_ASSUME_VALID)
+        item['preview_available'] = bool(item.get('preview_available'))
+        source_type_value = item.get('source_type')
         if not isinstance(source_type_value, str) or not source_type_value:
-            sanitized['source_type'] = 'tja'
-        duration_value = sanitized.get('duration_ms')
+            item['source_type'] = 'tja'
+        duration_value = item.get('duration_ms')
         try:
-            sanitized['duration_ms'] = int(duration_value) if duration_value is not None else 0
+            item['duration_ms'] = int(duration_value) if duration_value is not None else 0
         except (TypeError, ValueError):
-            sanitized['duration_ms'] = 0
-        category_id_value = sanitized.get('category_id')
-        sanitized['category_id'] = _coerce_int(category_id_value, 0)
-        paths_value = sanitized.get('paths')
+            item['duration_ms'] = 0
+        item['category_id'] = _coerce_int(item.get('category_id'), 0)
+        paths_value = item.get('paths')
         if isinstance(paths_value, dict):
-            sanitized['paths'] = {
-                key: paths_value.get(key)
+            item['paths'] = {
+                key: v
                 for key in ('tja_url', 'audio_url', 'dir_url')
-                if paths_value.get(key)
+                if (v := paths_value.get(key))
             }
         else:
-            sanitized['paths'] = {}
-        payload.append(sanitized)
+            item['paths'] = {}
+        payload.append(item)
 
     response = make_response(jsonify(payload))
     _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
