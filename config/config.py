@@ -1,3 +1,9 @@
+import os
+
+# Logging flags for the song scanner.
+SCAN_LOG_SUMMARY = int(os.getenv("SCAN_LOG_SUMMARY", "1"))
+SCAN_LOG_LEVEL = os.getenv("SCAN_LOG_LEVEL", "INFO")
+
 # The base URL for Taiko Web, with trailing slash.
 BASEDIR = '/'
 
