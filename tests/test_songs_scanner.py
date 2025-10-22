@@ -1,6 +1,7 @@
 import logging
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -3421,6 +3422,8 @@ LEVEL:7
         self.assertEqual(msg.count('%'), len(args))
         formatted = msg % args
         self.assertIn('scan: mode=', formatted)
+        self.assertEqual(formatted.count('duration='), 1)
+        self.assertRegex(formatted, r"duration=\d+\.\d{3}s")
 
     def test_finally_uses_final_duration_without_nameerror(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3451,10 +3454,12 @@ LEVEL:7
             with self.assertLogs('taiko.scanner', level='INFO') as captured:
                 summary = scanner.scan(full=True)
 
-        self.assertEqual(summary['duration_seconds'], canned_summary['duration_seconds'])
         summary_lines = [line for line in captured.output if 'scan: mode=' in line]
         self.assertEqual(len(summary_lines), 1)
-        self.assertIn('duration=1.234s', summary_lines[0])
+        duration_match = re.search(r"duration=(\d+\.\d{3})s", summary_lines[0])
+        self.assertIsNotNone(duration_match)
+        logged_duration = float(duration_match.group(1))
+        self.assertAlmostEqual(summary['duration_seconds'], logged_duration)
 
     def test_summary_log_contains_checksum_field_always(self):
         tmp_dir = Path(self._tmp_dir())
