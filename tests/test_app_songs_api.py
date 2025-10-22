@@ -374,6 +374,109 @@ class SongsApiTestCase(unittest.TestCase):
             second_etag = second_response.headers['ETag']
             self.assertNotEqual(first_etag, second_etag)
 
+    def test_payload_has_unique_items(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'unique', 'count': 2}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 101,
+                'title': 'Song One',
+                'subtitle': None,
+                'category': 'General',
+                'category_id': 1,
+                'duration_ms': 1234,
+                'preview_available': True,
+                'source_type': 'tja',
+                'paths': {'tja_url': '/song-1.tja'},
+                'is_playable': True,
+                'difficulties': {'oni': {'valid': True}},
+            },
+            {
+                'scanner_stable_id': 'song-2',
+                'id': 102,
+                'title': 'Song Two',
+                'subtitle': 'Second',
+                'category': 'General',
+                'category_id': 2,
+                'duration_ms': 5678,
+                'preview_available': False,
+                'source_type': 'tja',
+                'paths': {'audio_url': '/song-2.mp3'},
+                'is_playable': True,
+                'difficulties': {'hard': {'valid': True}},
+            },
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data)
+
+        self.assertEqual(len(payload), len(songs_docs))
+        self.assertEqual({item['id'] for item in payload}, {'song-1', 'song-2'})
+
+    def test_preserve_source_type(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'source', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 1,
+                'title': 'Song One',
+                'subtitle': '',
+                'category': 'General',
+                'category_id': 1,
+                'duration_ms': 1234,
+                'preview_available': True,
+                'source_type': 'custom',
+                'paths': {},
+                'is_playable': True,
+                'difficulties': {'oni': {'valid': True}},
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data)
+
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]['source_type'], 'custom')
+
+    def test_projection_integrity(self):
+        manifest_entries = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'projection', 'count': 1}
+        songs_docs = [
+            {
+                'scanner_stable_id': 'song-1',
+                'id': 1,
+                'title': 'Song One',
+                'subtitle': 'Sub',
+                'category': 'General',
+                'category_id': 1,
+                'duration_ms': 1234,
+                'preview_available': False,
+                'source_type': 'tja',
+                'paths': {'dir_url': '/songs/song-1/'},
+                'is_playable': True,
+                'difficulties': {'oni': {'valid': True}},
+                'extra_field': 'should not leak',
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get('/api/songs')
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data)
+
+        self.assertEqual(len(payload), 1)
+        item = payload[0]
+        expected_keys = {
+            'id', 'title', 'subtitle', 'category', 'category_id', 'duration_ms',
+            'preview_available', 'source_type', 'paths', 'is_playable', 'difficulties',
+        }
+        self.assertEqual(set(item.keys()), expected_keys)
     def test_details_notes_none_order(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'aaa', 'count': 2}

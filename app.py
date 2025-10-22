@@ -540,8 +540,9 @@ def get_config(credentials=False):
         'preview_type': take_config('PREVIEW_TYPE') or 'mp3',
         'multiplayer_url': take_config('MULTIPLAYER_URL'),
     }
-    config_out['catalog_assume_valid'] = CATALOG_ASSUME_VALID
-    config_out['catalogAssumeValid'] = CATALOG_ASSUME_VALID
+    catalog_assume_valid_flag = bool(CATALOG_ASSUME_VALID)
+    config_out['catalog_assume_valid'] = catalog_assume_valid_flag
+    config_out['catalogAssumeValid'] = catalog_assume_valid_flag
     relative_urls = ['songs_baseurl', 'assets_baseurl']
     for name in relative_urls:
         if not config_out[name].startswith("/") and not config_out[name].startswith("http://") and not config_out[name].startswith("https://"):
@@ -1021,22 +1022,16 @@ def route_api_songs():
         if search_value:
             filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
 
-    projection = {
-        '_id': 0,
-        'id': 1,
-        'scanner_stable_id': 1,
-    }
+    projection = {'_id': 0}
     projection.update({
-        'is_playable': 1,
-        'difficulties': 1,
-        'title': 1,
-        'subtitle': 1,
-        'category': 1,
-        'category_id': 1,
-        'duration_ms': 1,
-        'preview_available': 1,
+        'id': 1, 'scanner_stable_id': 1,
+        'title': 1, 'subtitle': 1,
+        'category': 1, 'category_id': 1,
+        'duration_ms': 1, 'preview_available': 1,
         'source_type': 1,
         'paths': 1,
+        'is_playable': 1,
+        'difficulties': 1,
     })
 
     try:
@@ -1059,16 +1054,11 @@ def route_api_songs():
         if not isinstance(entry, dict):
             continue
         item = dict(entry)
-        stable_id = item.get('scanner_stable_id')
-        if isinstance(stable_id, str) and stable_id:
-            item['id'] = stable_id
-        item.pop('scanner_stable_id', None)
-        if 'subtitle' not in item or not isinstance(item.get('subtitle'), str):
-            item['subtitle'] = ''
+        item['id'] = item.pop('scanner_stable_id', item.get('id'))
+        item['subtitle'] = item['subtitle'] if isinstance(item.get('subtitle'), str) else ''
         item['difficulties'] = _normalize_difficulties(entry, assume_valid=CATALOG_ASSUME_VALID)
-        item['is_playable'] = bool(entry.get('is_playable')) or bool(CATALOG_ASSUME_VALID)
-        preview_available = bool(item.get('preview_available'))
-        item['preview_available'] = preview_available
+        item['is_playable'] = bool(item.get('is_playable')) or bool(CATALOG_ASSUME_VALID)
+        item['preview_available'] = bool(item.get('preview_available'))
         source_type_value = item.get('source_type')
         if not isinstance(source_type_value, str) or not source_type_value:
             item['source_type'] = 'tja'
@@ -1077,14 +1067,13 @@ def route_api_songs():
             item['duration_ms'] = int(duration_value) if duration_value is not None else 0
         except (TypeError, ValueError):
             item['duration_ms'] = 0
-        category_id_value = item.get('category_id')
-        item['category_id'] = _coerce_int(category_id_value, 0)
+        item['category_id'] = _coerce_int(item.get('category_id'), 0)
         paths_value = item.get('paths')
         if isinstance(paths_value, dict):
             item['paths'] = {
-                key: paths_value.get(key)
+                key: v
                 for key in ('tja_url', 'audio_url', 'dir_url')
-                if paths_value.get(key)
+                if (v := paths_value.get(key))
             }
         else:
             item['paths'] = {}
