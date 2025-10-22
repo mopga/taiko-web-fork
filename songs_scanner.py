@@ -53,14 +53,39 @@ except Exception:  # pragma: no cover - watchdog optional dependency
     Observer = None  # type: ignore[assignment]
 
 
-logger = logging.getLogger("taiko.scanner")
-
 try:  # pragma: no cover - config import may fail in some test contexts
     from config.config import SCAN_LOG_LEVEL, SCAN_LOG_SUMMARY
 except Exception:  # pragma: no cover - fall back to safe defaults
-    SCAN_LOG_LEVEL, SCAN_LOG_SUMMARY = "INFO", 1
+    SCAN_LOG_LEVEL, SCAN_LOG_SUMMARY = "INFO", True
 
-logger.setLevel(getattr(logging, SCAN_LOG_LEVEL.upper(), logging.INFO))
+
+def _resolve_log_level(level_name: str) -> int:
+    level_value = getattr(logging, str(level_name).upper(), logging.INFO)
+    return level_value if isinstance(level_value, int) else logging.INFO
+
+
+class _ScanSummaryLogger:
+    def __init__(self, logger_name: str, level_name: str) -> None:
+        self._logger = logging.getLogger(logger_name)
+        self._level = _resolve_log_level(level_name)
+        self._extra = {"component": "scanner"}
+        self._logger.setLevel(self._level)
+
+    def _should_log(self, level: int) -> bool:
+        return level >= self._level and self._logger.isEnabledFor(level)
+
+    def log(self, level: int, msg: str, *args, **kwargs) -> None:
+        if not self._should_log(level):
+            return
+        extra = kwargs.pop("extra", None) or {}
+        merged_extra = {**self._extra, **extra}
+        self._logger.log(level, msg, *args, extra=merged_extra, **kwargs)
+
+    def info(self, msg: str, *args, **kwargs) -> None:
+        self.log(logging.INFO, msg, *args, **kwargs)
+
+
+SUMMARY_LOGGER = _ScanSummaryLogger("taiko.scanner", SCAN_LOG_LEVEL)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -4429,69 +4454,56 @@ class SongScanner:
         start_wall = time.time()
         mode_str = 'full' if full else 'incremental'
         summary: Dict[str, int] = {}
-        duration: Optional[float] = None
         counter_handler = _ScanLogCounter()
         log_targets = [LOGGER]
         for target in log_targets:
             target.addHandler(counter_handler)
+
         if SCAN_LOG_SUMMARY:
-            logger.info("scan:start ts=%d mode=%s", int(start_wall), mode_str)
+            SUMMARY_LOGGER.info("scan:start ts=%d mode=%s", int(start_wall), mode_str)
+
         try:
             with self._scan_lock:
                 summary = self._scan_impl(full=full)
-        except Exception:
-            raise
-        else:
-            duration = time.perf_counter() - start_perf
-            summary['duration_seconds'] = round(duration, 3)
-            TJA_VALIDATOR.flush_summary()
-            checksum = summary.get('manifest_checksum')
-            log_template = (
-                "scan-summary: found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs"
-            )
-            base_args = (
-                summary.get('found', 0),
-                summary.get('inserted', 0),
-                summary.get('updated', 0),
-                summary.get('disabled', 0),
-                summary.get('errors', 0),
-                summary.get('skipped', 0),
-                summary.get('duration_seconds', 0.0),
-            )
-            if checksum:
-                LOGGER.info(log_template + " checksum=%s", *base_args, checksum)
-            else:
-                LOGGER.info(log_template, *base_args)
-            return summary
         finally:
-            active_summary: Dict[str, int] = {}
-            if summary:
-                active_summary = summary
-            elif isinstance(self._active_summary, dict):
+            elapsed = time.perf_counter() - start_perf
+            if elapsed < 0:
+                elapsed = 0.0
+            duration_seconds = round(elapsed, 3)
+            summary['duration_seconds'] = duration_seconds
+
+            active_summary: Dict[str, int] = summary
+            if not active_summary and isinstance(self._active_summary, dict):
                 active_summary = self._active_summary
-            warn_count = counter_handler.warn_count
+
+            checksum_value = summary.get('manifest_checksum')
+            checksum_str = checksum_value if checksum_value else '-'
+
+            TJA_VALIDATOR.flush_summary()
+
             error_count = counter_handler.error_count
+
             for target in log_targets:
                 with contextlib.suppress(Exception):
                     target.removeHandler(counter_handler)
-            final_duration = duration if duration is not None else time.perf_counter() - start_perf
-            if final_duration < 0:
-                final_duration = 0.0
-            songs_scanned = int(active_summary.get('found', 0)) if active_summary else 0
-            updated = int(active_summary.get('updated', 0)) if active_summary else 0
-            skipped = int(active_summary.get('skipped', 0)) if active_summary else 0
+
             if SCAN_LOG_SUMMARY:
-                logger.info(
-                    "scan:done mode=%s duration=%.3fs songs_scanned=%d updated=%d skipped=%d warns=%d errors=%d",
+                SUMMARY_LOGGER.info(
+                    "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s",
                     mode_str,
-                    final_duration,
-                    songs_scanned,
-                    updated,
-                    skipped,
-                    warn_count,
-                    error_count,
+                    int(active_summary.get('found', 0)),
+                    int(active_summary.get('inserted', 0)),
+                    int(active_summary.get('updated', 0)),
+                    int(active_summary.get('disabled', 0)),
+                    int(max(active_summary.get('errors', 0), error_count)),
+                    int(active_summary.get('skipped', 0)),
+                    duration_seconds,
+                    checksum_str,
                 )
+
             self._active_summary = None
+
+        return summary
 
     def _scan_impl(self, *, full: bool) -> Dict[str, int]:
         summary = {
