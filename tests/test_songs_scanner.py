@@ -3461,6 +3461,42 @@ LEVEL:7
         logged_duration = float(duration_match.group(1))
         self.assertAlmostEqual(summary['duration_seconds'], logged_duration)
 
+    def test_summary_duration_matches_logged_duration_real_run(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Duration", 
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=True)
+
+        summary_lines = [line for line in captured.output if 'scan: mode=' in line]
+        self.assertEqual(len(summary_lines), 1)
+        duration_match = re.search(r"duration=(\d+\.\d{3})s", summary_lines[0])
+        self.assertIsNotNone(duration_match)
+        logged_duration = float(duration_match.group(1))
+        self.assertAlmostEqual(summary['duration_seconds'], logged_duration)
+
     def test_summary_log_contains_checksum_field_always(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)

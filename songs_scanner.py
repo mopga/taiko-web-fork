@@ -71,9 +71,7 @@ class _ScanSummaryLogger:
         self._extra = {"component": "scanner"}
 
     def _should_log(self, level: int) -> bool:
-        if level < self._level:
-            return False
-        return self._logger.isEnabledFor(level)
+        return level >= self._level
 
     def log(self, level: int, msg: str, *args, **kwargs) -> None:
         if not self._should_log(level):
@@ -4471,7 +4469,13 @@ class SongScanner:
             if elapsed < 0:
                 elapsed = 0.0
             computed_duration = round(elapsed, 3)
-            summary['duration_seconds'] = computed_duration
+            existing_duration = summary.get('duration_seconds') if isinstance(summary, dict) else None
+            candidate_duration = existing_duration or computed_duration
+            try:
+                final_duration = float(candidate_duration)
+            except (TypeError, ValueError):
+                final_duration = computed_duration
+            summary['duration_seconds'] = final_duration
 
             active_summary: Dict[str, int] = summary
             if not active_summary and isinstance(self._active_summary, dict):
@@ -4498,7 +4502,7 @@ class SongScanner:
                     int(active_summary.get('disabled', 0)),
                     int(max(active_summary.get('errors', 0), error_count)),
                     int(active_summary.get('skipped', 0)),
-                    computed_duration,
+                    final_duration,
                     checksum_str,
                 )
 
