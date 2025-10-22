@@ -1,3 +1,10 @@
+import os
+from distutils.util import strtobool
+
+# Logging flags for the song scanner.
+SCAN_LOG_SUMMARY = bool(strtobool(os.getenv("SCAN_LOG_SUMMARY", "1")))
+SCAN_LOG_LEVEL = os.getenv("SCAN_LOG_LEVEL", "INFO").upper()
+
 # The base URL for Taiko Web, with trailing slash.
 BASEDIR = '/'
 

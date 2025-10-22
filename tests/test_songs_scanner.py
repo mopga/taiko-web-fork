@@ -1,11 +1,14 @@
-from pathlib import Path
 import logging
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
 import unittest
+import importlib.util
+import shutil
+from pathlib import Path
 from typing import List, Optional
 from unittest import mock
 
@@ -3306,6 +3309,329 @@ LEVEL:7
         self.assertTrue(inserted.get('preview_available'))
         self.assertIn('parse_failed_at', inserted)
         self.assertIsNone(inserted.get('parse_failed_at'))
+
+    def test_scan_summary_always_sets_duration(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertIn('duration_seconds', summary)
+        self.assertIsInstance(summary['duration_seconds'], float)
+        self.assertGreaterEqual(summary['duration_seconds'], 0.0)
+
+    def test_handler_not_accumulated_on_repeated_scan(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Repeat Test",
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        module_logger = songs_scanner.LOGGER
+        summary_logger = logging.getLogger("taiko.scanner")
+        baseline_counts = (len(module_logger.handlers), len(summary_logger.handlers))
+
+        scanner.scan(full=True)
+        after_full = (len(module_logger.handlers), len(summary_logger.handlers))
+
+        scanner.scan(full=False)
+        after_first_incremental = (len(module_logger.handlers), len(summary_logger.handlers))
+
+        scanner.scan(full=False)
+        after_second_incremental = (len(module_logger.handlers), len(summary_logger.handlers))
+
+        self.assertEqual(after_full, baseline_counts)
+        self.assertEqual(after_first_incremental, baseline_counts)
+        self.assertEqual(after_second_incremental, baseline_counts)
+
+    def test_env_parsing_boolean_values(self):
+        module_path = Path(__file__).resolve().parents[1] / "config" / "config.py"
+        cases = [
+            ("1", True),
+            ("0", False),
+            ("true", True),
+            ("false", False),
+            ("on", True),
+            ("off", False),
+        ]
+
+        for value, expected in cases:
+            with self.subTest(value=value, expected=expected):
+                spec = importlib.util.spec_from_file_location(
+                    f"config_for_test_{value}", module_path
+                )
+                self.assertIsNotNone(spec)
+                module = importlib.util.module_from_spec(spec)
+                loader = getattr(spec, 'loader', None)
+                self.assertIsNotNone(loader)
+                with mock.patch.dict(os.environ, {"SCAN_LOG_SUMMARY": value}, clear=True):
+                    loader.exec_module(module)  # type: ignore[union-attr]
+                self.assertEqual(module.SCAN_LOG_SUMMARY, expected)
+
+    def test_summary_log_format_matches_arguments(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with mock.patch.object(songs_scanner.SUMMARY_LOGGER, 'info', wraps=songs_scanner.SUMMARY_LOGGER.info) as wrapped:
+            scanner.scan(full=True)
+
+        self.assertTrue(wrapped.called)
+        msg_and_args = wrapped.call_args[0]
+        self.assertGreaterEqual(len(msg_and_args), 2)
+        msg = msg_and_args[0]
+        args = msg_and_args[1:]
+        self.assertEqual(msg.count('%'), len(args))
+        formatted = msg % args
+        self.assertIn('scan: mode=', formatted)
+        self.assertEqual(formatted.count('duration='), 1)
+        self.assertRegex(formatted, r"duration=\d+\.\d{3}s")
+
+    def test_finally_uses_final_duration_without_nameerror(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        canned_summary = {
+            'found': 0,
+            'inserted': 0,
+            'updated': 0,
+            'disabled': 0,
+            'errors': 0,
+            'skipped': 0,
+            'duration_seconds': 1.234,
+            'manifest_checksum': 'abc123',
+        }
+
+        with mock.patch.object(scanner, '_scan_impl', return_value=canned_summary.copy()):
+            with self.assertLogs('taiko.scanner', level='INFO') as captured:
+                summary = scanner.scan(full=True)
+
+        summary_lines = [line for line in captured.output if 'scan: mode=' in line]
+        self.assertEqual(len(summary_lines), 1)
+        duration_match = re.search(r"duration=(\d+\.\d{3})s", summary_lines[0])
+        self.assertIsNotNone(duration_match)
+        logged_duration = float(duration_match.group(1))
+        self.assertAlmostEqual(summary['duration_seconds'], logged_duration)
+
+    def test_summary_duration_matches_logged_duration_real_run(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Duration", 
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=True)
+
+        summary_lines = [line for line in captured.output if 'scan: mode=' in line]
+        self.assertEqual(len(summary_lines), 1)
+        duration_match = re.search(r"duration=(\d+\.\d{3})s", summary_lines[0])
+        self.assertIsNotNone(duration_match)
+        logged_duration = float(duration_match.group(1))
+        self.assertAlmostEqual(summary['duration_seconds'], logged_duration)
+
+    def test_summary_log_contains_checksum_field_always(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            scanner.scan(full=True)
+
+        summary_lines = [line for line in captured.output if 'scan: mode=' in line]
+        self.assertTrue(summary_lines)
+        self.assertIn('checksum=-', summary_lines[-1])
+
+    def test_scan_empty_directory_integration(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=True)
+
+        self.assertEqual(summary.get('found'), 0)
+        self.assertEqual(summary.get('inserted'), 0)
+        self.assertTrue(any('scan: mode=full found=0 inserted=0' in line for line in captured.output))
+
+    def test_scan_with_missing_chart_counts_error(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        missing_path = songs_dir / "ghost.tja"
+        with mock.patch.object(scanner, '_iter_tja_files', return_value=iter([missing_path])):
+            with self.assertLogs('taiko.scanner', level='INFO') as captured:
+                summary = scanner.scan(full=True)
+
+        self.assertEqual(summary.get('errors'), 1)
+        self.assertTrue(any('errors=1' in line for line in captured.output if 'scan: mode=' in line))
+
+    def test_repeated_incremental_scan_integration(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Incremental",
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        scanner.scan(full=True)
+        summary_first = scanner.scan(full=False)
+        summary_second = scanner.scan(full=False)
+
+        self.assertEqual(summary_first.get('found'), summary_second.get('found'))
+        self.assertIn('duration_seconds', summary_first)
+        self.assertIn('duration_seconds', summary_second)
+
+    def test_full_then_incremental_logs_single_summary_line_each(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Integration",
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured_full:
+            scanner.scan(full=True)
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured_incremental:
+            scanner.scan(full=False)
+
+        full_lines = [line for line in captured_full.output if 'scan: mode=' in line]
+        incremental_lines = [line for line in captured_incremental.output if 'scan: mode=' in line]
+
+        self.assertEqual(len(full_lines), 1)
+        self.assertEqual(len(incremental_lines), 1)
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()
