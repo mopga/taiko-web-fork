@@ -3396,6 +3396,66 @@ LEVEL:7
                     loader.exec_module(module)  # type: ignore[union-attr]
                 self.assertEqual(module.SCAN_LOG_SUMMARY, expected)
 
+    def test_summary_log_format_matches_arguments(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with mock.patch.object(songs_scanner.SUMMARY_LOGGER, 'info', wraps=songs_scanner.SUMMARY_LOGGER.info) as wrapped:
+            scanner.scan(full=True)
+
+        self.assertTrue(wrapped.called)
+        msg_and_args = wrapped.call_args[0]
+        self.assertGreaterEqual(len(msg_and_args), 2)
+        msg = msg_and_args[0]
+        args = msg_and_args[1:]
+        self.assertEqual(msg.count('%'), len(args))
+        formatted = msg % args
+        self.assertIn('scan: mode=', formatted)
+
+    def test_finally_uses_final_duration_without_nameerror(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        canned_summary = {
+            'found': 0,
+            'inserted': 0,
+            'updated': 0,
+            'disabled': 0,
+            'errors': 0,
+            'skipped': 0,
+            'duration_seconds': 1.234,
+            'manifest_checksum': 'abc123',
+        }
+
+        with mock.patch.object(scanner, '_scan_impl', return_value=canned_summary.copy()):
+            with self.assertLogs('taiko.scanner', level='INFO') as captured:
+                summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['duration_seconds'], canned_summary['duration_seconds'])
+        summary_lines = [line for line in captured.output if 'scan: mode=' in line]
+        self.assertEqual(len(summary_lines), 1)
+        self.assertIn('duration=1.234s', summary_lines[0])
+
     def test_summary_log_contains_checksum_field_always(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
@@ -3493,6 +3553,44 @@ LEVEL:7
         self.assertEqual(summary_first.get('found'), summary_second.get('found'))
         self.assertIn('duration_seconds', summary_first)
         self.assertIn('duration_seconds', summary_second)
+
+    def test_full_then_incremental_logs_single_summary_line_each(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        song_dir = songs_dir / "Pack"
+        song_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = song_dir / "chart.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Integration",
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (song_dir / "main.ogg").write_bytes(b"audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured_full:
+            scanner.scan(full=True)
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured_incremental:
+            scanner.scan(full=False)
+
+        full_lines = [line for line in captured_full.output if 'scan: mode=' in line]
+        incremental_lines = [line for line in captured_incremental.output if 'scan: mode=' in line]
+
+        self.assertEqual(len(full_lines), 1)
+        self.assertEqual(len(incremental_lines), 1)
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()
