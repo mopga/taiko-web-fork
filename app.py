@@ -2278,7 +2278,7 @@ def _ensure_song_directory_watcher_started():
     _start_song_directory_watcher()
 
 if __name__ == '__main__':
-    import argparse
+    import argparse, sys
 
     parser = argparse.ArgumentParser(description='Run the taiko-web development server.')
     parser.add_argument('port', type=int, metavar='PORT', nargs='?', default=34801, help='Port to listen on.')
@@ -2288,14 +2288,14 @@ if __name__ == '__main__':
 
     run_profile = RUN_PROFILE
 
-    if run_profile == 'desktop':
-        LOGGER.info('Desktop run profile is not implemented yet; exiting without starting the server.')
+    if run_profile == 'web':
+        app.run(host=args.bind_address, port=args.port, debug=args.debug)
+    elif run_profile == 'desktop':
+        LOGGER.info('RUN_PROFILE=desktop stub: exiting without starting the server.')
         sys.exit(0)
-
-    if run_profile != 'web':
+    else:
         LOGGER.error('Unknown run_profile=%s; defaulting to web', run_profile)
-
-    app.run(host=args.bind_address, port=args.port, debug=args.debug)
+        app.run(host=args.bind_address, port=args.port, debug=args.debug)
 
 _SONG_DETAIL_PROJECTION = {
     '_id': False,
