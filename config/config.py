@@ -1,6 +1,5 @@
 import os
-<<<<<<< HEAD
-import os
+
 
 def getenv_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
@@ -15,17 +14,6 @@ def getenv_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-# Logging flags for the song scanner.
-=======
-
-
-def getenv_bool(name: str, default: bool = False) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    val = val.strip().lower()
-    return val in ("1", "true", "t", "yes", "y", "on")
-
 
 # Logging flags for the song scanner. ``SCAN_LOG_LEVEL`` accepts any standard
 # Python logging level (``DEBUG``, ``INFO``, etc). The default ``INFO`` logs
@@ -33,7 +21,6 @@ def getenv_bool(name: str, default: bool = False) -> bool:
 # verbose diagnostics that avoid PII. ``SCAN_LOG_SUMMARY`` controls whether the
 # final summary line is emitted after each scan; disable it in exceptionally
 # latency-sensitive environments.
->>>>>>> 1b77ccf39946376b84d185f46ccabcca3a97295b
 SCAN_LOG_SUMMARY = getenv_bool("SCAN_LOG_SUMMARY", True)
 SCAN_LOG_LEVEL = os.getenv("SCAN_LOG_LEVEL", "INFO").upper()
 
