@@ -1803,9 +1803,12 @@ def invalidate_category_cache():
 
 def perform_song_scan(*, full: bool = False):
     summary = song_scanner.scan(full=full)
-    leader = bool(summary.get('leader', True)) if isinstance(summary, dict) else True
-    if leader:
+    summary_dict = summary if isinstance(summary, dict) else {}
+    leader = bool(summary_dict.get('leader', True))
+    fast_path = summary_dict.get('fast_path') is True
+    if leader and not fast_path:
         invalidate_category_cache()
+    if leader:
         app.logger.info("Song scan finished: %s", summary)
     else:
         app.logger.info("Song scan skipped (no leader): %s", summary)
@@ -2138,12 +2141,6 @@ def send_songs(ref):
 def send_manifest():
     return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
 
-if SCAN_ON_START != 'skip':
-    try:
-        perform_song_scan(full=SCAN_ON_START == 'force')
-    except Exception:
-        app.logger.exception('Automatic song scan failed')
-
 
 def _start_song_directory_watcher():
     global _song_watcher_handle
@@ -2180,6 +2177,18 @@ def _start_song_directory_watcher():
         app.logger.error('Failed to start song directory watcher (exiting): %s', exc, exc_info=True)
     except Exception:
         app.logger.exception('Failed to start song directory watcher')
+
+
+# Run an eager scan at startup when configured and immediately start the
+# directory watcher if this process currently owns the scanner leader lock.
+if SCAN_ON_START != 'skip':
+    try:
+        perform_song_scan(full=SCAN_ON_START == 'force')
+    except Exception:
+        app.logger.exception('Automatic song scan failed')
+    else:
+        if song_scanner.has_leader_lock():
+            _start_song_directory_watcher()
 
 
 # Flask 3 removed the ``before_serving`` decorator. Provide a compatible fallback

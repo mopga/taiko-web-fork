@@ -2427,7 +2427,15 @@ class SongScanner:
         self._songs_root = songs_dir.resolve()
         self.songs_baseurl = songs_baseurl
         self.ignore_globs = list(ignore_globs or [])
-        self._redis: Optional["Redis"] = redis_client
+        validated_redis: Optional["Redis"] = None
+        if redis_client is not None:
+            try:
+                from redis import Redis as _Redis  # type: ignore
+            except Exception:  # pragma: no cover - redis optional at runtime
+                _Redis = None  # type: ignore[assignment]
+            if _Redis is not None and isinstance(redis_client, _Redis):
+                validated_redis = redis_client
+        self._redis: Optional["Redis"] = validated_redis
         self._coerce_unknown_course: Optional[str] = None
         if coerce_unknown_course:
             token = coerce_unknown_course.strip()
@@ -4586,7 +4594,12 @@ class SongScanner:
                 if stored_checksum:
                     summary['manifest_checksum'] = stored_checksum
                 summary['fast_path'] = True
-                summary['leader'] = self.has_leader_lock()
+                if not self._acquire_leader_lock():
+                    summary['leader'] = False
+                    summary['skipped_due_to_leader'] = True
+                    LOGGER.info('scan: fast-path (no changes)')
+                    return summary
+                summary['leader'] = True
                 LOGGER.info('scan: fast-path (no changes)')
                 return summary
 
@@ -5057,12 +5070,12 @@ class SongScanner:
             return False
         client = self._redis
         if client is None:
-            return True
+            return False
         try:
             value = client.get(self._leader_lock_key)
         except Exception:  # pragma: no cover - redis access best effort
             LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
-            return True
+            return False
         if value is None:
             self._leader_lock_token = None
             return False
