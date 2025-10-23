@@ -3473,11 +3473,13 @@ LEVEL:7
         leader_fast_summary = scanner_leader.scan(full=False)
         self.assertTrue(leader_fast_summary.get('fast_path'))
         self.assertTrue(leader_fast_summary.get('leader'))
+        self.assertTrue(scanner_leader.has_leader_lock())
 
         follower_fast_summary = scanner_follower.scan(full=False)
         self.assertTrue(follower_fast_summary.get('fast_path'))
         self.assertFalse(follower_fast_summary.get('leader'))
         self.assertTrue(follower_fast_summary.get('skipped_due_to_leader'))
+        self.assertFalse(scanner_follower.has_leader_lock())
 
     def test_fast_path_does_not_enter_full_scan_when_digest_matches(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3510,6 +3512,99 @@ LEVEL:7
 
         self.assertTrue(summary.get('fast_path'))
         self.assertEqual(summary.get('found'), 0)
+
+    def test_initial_scan_runs_full_when_manifest_missing(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "firstscan.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:First Scan",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+
+        class _StubRedis:
+            def __init__(self):
+                self.value = None
+
+            def get(self, key):
+                return self.value
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and self.value is not None:
+                    return False
+                self.value = value
+                return True
+
+            def expire(self, key, ttl):
+                return True
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=None,
+        )
+        scanner._redis = _StubRedis()  # type: ignore[assignment]
+
+        summary = scanner.scan(full=False)
+
+        self.assertFalse(summary.get('fast_path'))
+        self.assertTrue(summary.get('leader'))
+        self.assertGreater(summary.get('found', 0), 0)
+        self.assertTrue(scanner.has_leader_lock())
+
+        manifest_meta = db.meta.find_one({'_id': 'songs_manifest'})
+        self.assertIsInstance(manifest_meta, dict)
+
+    def test_scan_skipped_when_redis_unavailable(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "redisfail.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Redis Down",
+            "COURSE:Oni",
+            "LEVEL:6",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        class _BrokenRedis:
+            def get(self, key):
+                raise RuntimeError("redis unavailable")
+
+            def set(self, key, value, nx=False, ex=None):
+                raise RuntimeError("redis unavailable")
+
+        scanner._redis = _BrokenRedis()  # type: ignore[assignment]
+        scanner._leader_lock_token = "token"
+
+        summary = scanner.scan(full=True)
+
+        self.assertFalse(summary.get('leader'))
+        self.assertTrue(summary.get('skipped_due_to_leader'))
+        self.assertFalse(scanner.has_leader_lock())
     def test_handler_not_accumulated_on_repeated_scan(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)

@@ -2435,6 +2435,11 @@ class SongScanner:
                 _Redis = None  # type: ignore[assignment]
             if _Redis is not None and isinstance(redis_client, _Redis):
                 validated_redis = redis_client
+            else:
+                LOGGER.debug(
+                    "scanner redis client rejected: type=%s",
+                    type(redis_client).__name__,
+                )
         self._redis: Optional["Redis"] = validated_redis
         self._coerce_unknown_course: Optional[str] = None
         if coerce_unknown_course:
@@ -5066,9 +5071,13 @@ class SongScanner:
     def has_leader_lock(self) -> bool:
         client = self._redis
         if client is None:
+            if self._leader_lock_token is not None:
+                LOGGER.debug('scanner leader lock unavailable: redis client missing')
+            self._leader_lock_token = None
             return False
         token = self._leader_lock_token
         if token is None:
+            LOGGER.debug('scanner leader lock unavailable: token missing')
             return False
         try:
             value = client.get(self._leader_lock_key)
@@ -5077,6 +5086,7 @@ class SongScanner:
             self._leader_lock_token = None
             return False
         if value is None:
+            LOGGER.debug('scanner leader lock unavailable: key missing on redis')
             self._leader_lock_token = None
             return False
         if isinstance(value, bytes):
@@ -5086,6 +5096,7 @@ class SongScanner:
                 value = None
         if value == token:
             return True
+        LOGGER.debug('scanner leader lock unavailable: token mismatch')
         self._leader_lock_token = None
         return False
 
@@ -5101,7 +5112,8 @@ class SongScanner:
                 current = client.get(self._leader_lock_key)
             except Exception:  # pragma: no cover - redis access best effort
                 LOGGER.debug('Failed to refresh scanner leader lock', exc_info=True)
-                return True
+                self._leader_lock_token = None
+                return False
             if isinstance(current, bytes):
                 try:
                     current = current.decode('utf-8')

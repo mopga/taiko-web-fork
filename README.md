@@ -56,6 +56,18 @@ When running in production the scanner persists a songs manifest with a determin
 
 The new `/api/songs/details` endpoint accepts up to 50 comma-separated song identifiers and returns the detailed payloads in the same order. Pass `notes=none` to fetch metadata without full chart data.
 
+### Scan on start
+
+The scanner supports multiple startup modes via the `SCAN_ON_START` configuration value (or environment variable):
+
+* `auto` (default) computes a lightweight filesystem digest at boot, compares it with the persisted manifest metadata stored in the MongoDB `meta` collection, and skips full parsing when nothing changed.
+* `force` always performs a full rescan regardless of manifest state.
+* `skip` disables automatic scanning entirely; use the admin scan API to refresh manually.
+
+Metadata about the last successful scan lives in the `meta` collection as the `_id="songs_manifest"` document. Deployments that predate the manifest feature can run `python -m tools.migration_add_manifest_collection` to create the collection and backfill the metadata entry. Without that document the scanner will perform a full parse on the next boot.
+
+Leader election for incremental rescans uses Redis (`taiko:scanner:leader`). When Redis is not configured, workers still perform scans but cannot claim leadership, so the filesystem watcher remains disabled; enable Redis to allow a single process to run the watcher.
+
 ## Database maintenance
 
 Run the index initialization utility after provisioning a fresh MongoDB deployment to guarantee all required taiko-web collections have the expected indexes:

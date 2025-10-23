@@ -58,6 +58,10 @@ from tools.init_db_schema import init_db_schema
 LOGGER = logging.getLogger(__name__)
 
 
+_startup_scan_started_at: Optional[float] = None
+_startup_scan_logged = False
+
+
 class _ResourceStore:
     def __init__(self, key: str):
         self._key = key
@@ -515,8 +519,12 @@ def create_app():
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
     global song_scanner, _song_watcher_handle
     global _mongo_dispatcher, _redis_dispatcher, _song_scanner_provider
+    global _startup_scan_started_at, _startup_scan_logged
 
     setup_stdout_logging()
+
+    _startup_scan_started_at = time.monotonic()
+    _startup_scan_logged = False
 
     app_instance = Flask(__name__)
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
@@ -648,6 +656,16 @@ def create_app():
 
 
 app = create_app()
+
+
+def _maybe_log_startup_duration(*, fast_path: bool) -> None:
+    global _startup_scan_started_at, _startup_scan_logged
+    if _startup_scan_started_at is None or _startup_scan_logged:
+        return
+    duration = time.monotonic() - _startup_scan_started_at
+    logger = app.logger if 'app' in globals() else LOGGER
+    logger.info('Song scan startup_duration_seconds=%.3f fast_path=%s', duration, fast_path)
+    _startup_scan_logged = True
 
 
 @app.route('/healthz')
@@ -1812,6 +1830,7 @@ def perform_song_scan(*, full: bool = False):
         app.logger.info("Song scan finished: %s", summary)
     else:
         app.logger.info("Song scan skipped (no leader): %s", summary)
+    _maybe_log_startup_duration(fast_path=fast_path)
     return summary
 
 
