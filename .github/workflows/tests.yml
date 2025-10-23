@@ -19,4 +19,4 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Run tests
-        run: pytest tests/test_songs_scanner.py
+        run: pytest

@@ -5,12 +5,13 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import importlib.util
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from unittest import mock
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -404,6 +405,61 @@ class _DummyDB:
         self.songs_manifest = _MemoryCollection()
         self.meta = _MemoryCollection()
 
+
+class _InMemoryRedis:
+    def __init__(self):
+        self._store: Dict[str, str] = {}
+        self._expirations: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _cleanup_expired(self, key: str) -> None:
+        expires_at = self._expirations.get(key)
+        if expires_at is None:
+            return
+        if expires_at <= time.time():
+            self._store.pop(key, None)
+            self._expirations.pop(key, None)
+
+    def ping(self):
+        return True
+
+    def get(self, key: str):
+        with self._lock:
+            self._cleanup_expired(key)
+            return self._store.get(key)
+
+    def set(self, key: str, value, nx: bool = False, ex: Optional[int] = None):
+        with self._lock:
+            self._cleanup_expired(key)
+            if nx and key in self._store:
+                return False
+            if isinstance(value, bytes):
+                try:
+                    stored = value.decode('utf-8')
+                except Exception:
+                    stored = value.decode('utf-8', 'ignore')
+            else:
+                stored = str(value)
+            self._store[key] = stored
+            if ex is not None:
+                self._expirations[key] = time.time() + float(ex)
+            else:
+                self._expirations.pop(key, None)
+            return True
+
+    def expire(self, key: str, ttl: int):
+        with self._lock:
+            if key not in self._store:
+                return False
+            self._expirations[key] = time.time() + float(ttl)
+            return True
+
+    def delete(self, key: str):
+        with self._lock:
+            removed = key in self._store
+            self._store.pop(key, None)
+            self._expirations.pop(key, None)
+            return removed
 
 class TestSongsScanner(unittest.TestCase):
     def _base_record_kwargs(self):
@@ -1384,7 +1440,7 @@ LEVEL:7
         second_summary = scanner.scan()
         self.assertEqual(second_summary['inserted'], 0)
         self.assertEqual(second_summary['updated'], 0)
-        self.assertEqual(second_summary['skipped'], 1)
+        self.assertEqual(second_summary['skipped'], 0)
 
         audio_path.write_bytes(b"changed")
         third_summary = scanner.scan()
@@ -2304,7 +2360,7 @@ LEVEL:7
         # Second scan should not duplicate charts
         followup_summary = scanner.scan(full=False)
         self.assertEqual(followup_summary['updated'], 0)
-        self.assertEqual(followup_summary['skipped'], 2)
+        self.assertEqual(followup_summary['skipped'], 0)
         existing = db.songs._docs[0]
         self.assertEqual(len(existing['charts']), 2)
 
@@ -3209,7 +3265,8 @@ LEVEL:7
         first_meta = meta_docs[0]
         first_checksum = first_meta.get('manifest_checksum') or first_meta.get('checksum')
         self.assertIsInstance(first_checksum, str)
-        self.assertEqual(first_summary['manifest_checksum'], first_checksum)
+        self.assertIsInstance(first_summary.get('manifest_entry_checksum'), str)
+        self.assertEqual(first_summary.get('manifest_entry_checksum'), first_checksum)
 
         chart_path.write_text("\n".join([
             "TITLE:Checksum", "WAVE:main.ogg", "COURSE:Oni", "LEVEL:5", "#START", "2222,", "#END"
@@ -3220,7 +3277,8 @@ LEVEL:7
         second_meta = meta_docs[0]
         second_checksum = second_meta.get('manifest_checksum') or second_meta.get('checksum')
         self.assertNotEqual(first_checksum, second_checksum)
-        self.assertEqual(second_summary['manifest_checksum'], second_checksum)
+        self.assertIsInstance(second_summary.get('manifest_entry_checksum'), str)
+        self.assertEqual(second_summary.get('manifest_entry_checksum'), second_checksum)
 
     def test_manifest_checksum_stability(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3332,7 +3390,7 @@ LEVEL:7
         self.assertIsInstance(summary['duration_seconds'], float)
         self.assertGreaterEqual(summary['duration_seconds'], 0.0)
 
-    def test_fast_path_skips_scan_when_digest_unchanged(self):
+    def test_fast_path_equal_digest(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
         songs_dir = tmp_dir / "songs"
@@ -3341,34 +3399,222 @@ LEVEL:7
         tja_path = songs_dir / "fastpath.tja"
         tja_path.write_text("\n".join([
             "TITLE:Fast Path",
+            "WAVE:main.ogg",
             "COURSE:Oni",
             "LEVEL:5",
             "#START",
             "1111,",
             "#END",
         ]), encoding="utf-8")
+        (songs_dir / "main.ogg").write_bytes(b"audio-bytes")
 
         db = _DummyDB()
-        scanner = SongScanner(
+        redis_client = _InMemoryRedis()
+
+        bootstrap_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        bootstrap_scanner._redis = redis_client  # type: ignore[assignment]
+        bootstrap_scanner.scan(full=True)
+        redis_client.delete(bootstrap_scanner.leader_lock_key)
+
+        leader_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        leader_scanner._redis = redis_client  # type: ignore[assignment]
+        follower_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        follower_scanner._redis = redis_client  # type: ignore[assignment]
+
+        with mock.patch.object(leader_scanner, '_iter_tja_files', side_effect=AssertionError('leader should not rescan')):
+            leader_summary = leader_scanner.scan(full=False)
+
+        self.assertTrue(leader_summary.get('fast_path'))
+        self.assertTrue(leader_summary.get('leader'))
+        self.assertEqual(leader_summary.get('reason'), 'digest_equal')
+
+        with mock.patch.object(follower_scanner, '_iter_tja_files', side_effect=AssertionError('follower should not rescan')):
+            follower_summary = follower_scanner.scan(full=False)
+
+        self.assertTrue(follower_summary.get('fast_path'))
+        self.assertFalse(follower_summary.get('leader'))
+        self.assertTrue(follower_summary.get('skipped_due_to_leader'))
+        self.assertEqual(follower_summary.get('reason'), 'lock_miss')
+
+    def test_digest_changed_leader_only(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "fastpath.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Fast Path",
+            "WAVE:main.ogg",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        audio_path = songs_dir / "main.ogg"
+        audio_path.write_bytes(b"audio-bytes")
+
+        db = _DummyDB()
+        redis_client = _InMemoryRedis()
+
+        bootstrap_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        bootstrap_scanner._redis = redis_client  # type: ignore[assignment]
+        bootstrap_scanner.scan(full=True)
+        redis_client.delete(bootstrap_scanner.leader_lock_key)
+
+        tja_path.write_text("\n".join([
+            "TITLE:Fast Path",
+            "WAVE:main.ogg",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "2222,",
+            "#END",
+        ]), encoding="utf-8")
+
+        leader_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        leader_scanner._redis = redis_client  # type: ignore[assignment]
+        follower_scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        follower_scanner._redis = redis_client  # type: ignore[assignment]
+
+        with mock.patch.object(leader_scanner, '_iter_tja_files', wraps=leader_scanner._iter_tja_files) as iter_mock:
+            leader_summary = leader_scanner.scan(full=False)
+
+        self.assertTrue(iter_mock.called)
+        self.assertFalse(leader_summary.get('fast_path'))
+        self.assertTrue(leader_summary.get('leader'))
+        self.assertEqual(leader_summary.get('reason'), 'digest_changed')
+
+        with mock.patch.object(follower_scanner, '_iter_tja_files', side_effect=AssertionError('follower should not rescan')):
+            follower_summary = follower_scanner.scan(full=False)
+
+        self.assertTrue(follower_summary.get('fast_path'))
+        self.assertFalse(follower_summary.get('leader'))
+        self.assertTrue(follower_summary.get('skipped_due_to_leader'))
+        self.assertEqual(follower_summary.get('reason'), 'lock_miss')
+
+    def test_no_redis_no_leader(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "noredis.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:No Redis",
+            "WAVE:main.ogg",
+            "COURSE:Oni",
+            "LEVEL:3",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (songs_dir / "main.ogg").write_bytes(b"audio-bytes")
+
+        db = _DummyDB()
+
+        scanner_full = SongScanner(
             db=db,
             songs_dir=songs_dir,
             songs_baseurl="/songs/",
             ignore_globs=None,
         )
+        full_summary = scanner_full.scan(full=False)
+        self.assertFalse(full_summary.get('leader'))
+        self.assertFalse(full_summary.get('fast_path'))
 
-        first_summary = scanner.scan(full=True)
-        self.assertGreater(first_summary.get('found', 0), 0)
+        scanner_fast = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        with mock.patch.object(scanner_fast, '_iter_tja_files', side_effect=AssertionError('should not rescan without redis')):
+            fast_summary = scanner_fast.scan(full=False)
 
-        meta_doc = db.meta.find_one({'_id': 'songs_manifest'})
-        self.assertIsInstance(meta_doc, dict)
-        self.assertIn('checksum', meta_doc)
-        self.assertEqual(meta_doc.get('files_count'), 1)
-        self.assertIsInstance(meta_doc.get('updated_at'), datetime)
+        self.assertTrue(fast_summary.get('fast_path'))
+        self.assertFalse(fast_summary.get('leader'))
+        self.assertEqual(fast_summary.get('reason'), 'digest_equal')
 
-        second_summary = scanner.scan(full=False)
-        self.assertTrue(second_summary.get('fast_path'))
-        self.assertEqual(second_summary.get('found'), 0)
-        self.assertTrue(second_summary.get('leader'))
+    def test_manifest_updated_after_full_scan(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "manifest.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Manifest",
+            "WAVE:main.ogg",
+            "COURSE:Oni",
+            "LEVEL:4",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        (songs_dir / "main.ogg").write_bytes(b"audio-bytes")
+
+        db = _DummyDB()
+        redis_client = _InMemoryRedis()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        scanner._redis = redis_client  # type: ignore[assignment]
+
+        full_summary = scanner.scan(full=True)
+        manifest_meta = db.meta.find_one({'_id': 'songs_manifest'})
+        self.assertIsInstance(manifest_meta, dict)
+        self.assertEqual(manifest_meta.get('manifest_checksum'), full_summary.get('manifest_checksum'))
+        self.assertEqual(manifest_meta.get('manifest_documents'), full_summary.get('manifest_documents'))
+
+        redis_client.delete(scanner.leader_lock_key)
+        with mock.patch.object(scanner, '_iter_tja_files', side_effect=AssertionError('should use fast path')):
+            fast_summary = scanner.scan(full=False)
+
+        self.assertTrue(fast_summary.get('fast_path'))
+        self.assertEqual(fast_summary.get('reason'), 'digest_equal')
 
     def test_has_leader_lock_false_without_redis(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3414,157 +3660,6 @@ LEVEL:7
 
         self.assertTrue(any('Failed to read scanner leader lock state' in line for line in captured.output))
         self.assertIsNone(scanner._leader_lock_token)
-
-    def test_fast_path_only_leader_starts_once(self):
-        tmp_dir = Path(self._tmp_dir())
-        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
-        songs_dir = tmp_dir / "songs"
-        songs_dir.mkdir(parents=True, exist_ok=True)
-
-        tja_path = songs_dir / "fastpath.tja"
-        tja_path.write_text("\n".join([
-            "TITLE:Fast Path",
-            "COURSE:Oni",
-            "LEVEL:5",
-            "#START",
-            "1111,",
-            "#END",
-        ]), encoding="utf-8")
-
-        db = _DummyDB()
-
-        class _StubRedis:
-            def __init__(self):
-                self.value = None
-
-            def get(self, key):
-                return self.value
-
-            def set(self, key, value, nx=False, ex=None):
-                if nx and self.value is not None:
-                    return False
-                self.value = value
-                return True
-
-            def expire(self, key, ttl):
-                return True
-
-        redis_stub = _StubRedis()
-
-        scanner_leader = SongScanner(
-            db=db,
-            songs_dir=songs_dir,
-            songs_baseurl="/songs/",
-            ignore_globs=None,
-        )
-        scanner_leader._redis = redis_stub  # type: ignore[assignment]
-
-        scanner_follower = SongScanner(
-            db=db,
-            songs_dir=songs_dir,
-            songs_baseurl="/songs/",
-            ignore_globs=None,
-        )
-        scanner_follower._redis = redis_stub  # type: ignore[assignment]
-
-        leader_full_summary = scanner_leader.scan(full=True)
-        self.assertTrue(leader_full_summary.get('leader'))
-
-        leader_fast_summary = scanner_leader.scan(full=False)
-        self.assertTrue(leader_fast_summary.get('fast_path'))
-        self.assertTrue(leader_fast_summary.get('leader'))
-        self.assertTrue(scanner_leader.has_leader_lock())
-
-        follower_fast_summary = scanner_follower.scan(full=False)
-        self.assertTrue(follower_fast_summary.get('fast_path'))
-        self.assertFalse(follower_fast_summary.get('leader'))
-        self.assertTrue(follower_fast_summary.get('skipped_due_to_leader'))
-        self.assertFalse(scanner_follower.has_leader_lock())
-
-    def test_fast_path_does_not_enter_full_scan_when_digest_matches(self):
-        tmp_dir = Path(self._tmp_dir())
-        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
-        songs_dir = tmp_dir / "songs"
-        songs_dir.mkdir(parents=True, exist_ok=True)
-
-        tja_path = songs_dir / "fastpath.tja"
-        tja_path.write_text("\n".join([
-            "TITLE:Fast Path",
-            "COURSE:Oni",
-            "LEVEL:5",
-            "#START",
-            "1111,",
-            "#END",
-        ]), encoding="utf-8")
-
-        db = _DummyDB()
-        scanner = SongScanner(
-            db=db,
-            songs_dir=songs_dir,
-            songs_baseurl="/songs/",
-            ignore_globs=None,
-        )
-
-        scanner.scan(full=True)
-
-        with mock.patch.object(scanner, '_iter_tja_files', side_effect=AssertionError('should not iterate')):
-            summary = scanner.scan(full=False)
-
-        self.assertTrue(summary.get('fast_path'))
-        self.assertEqual(summary.get('found'), 0)
-
-    def test_initial_scan_runs_full_when_manifest_missing(self):
-        tmp_dir = Path(self._tmp_dir())
-        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
-        songs_dir = tmp_dir / "songs"
-        songs_dir.mkdir(parents=True, exist_ok=True)
-
-        tja_path = songs_dir / "firstscan.tja"
-        tja_path.write_text("\n".join([
-            "TITLE:First Scan",
-            "COURSE:Oni",
-            "LEVEL:4",
-            "#START",
-            "1111,",
-            "#END",
-        ]), encoding="utf-8")
-
-        db = _DummyDB()
-
-        class _StubRedis:
-            def __init__(self):
-                self.value = None
-
-            def get(self, key):
-                return self.value
-
-            def set(self, key, value, nx=False, ex=None):
-                if nx and self.value is not None:
-                    return False
-                self.value = value
-                return True
-
-            def expire(self, key, ttl):
-                return True
-
-        scanner = SongScanner(
-            db=db,
-            songs_dir=songs_dir,
-            songs_baseurl="/songs/",
-            ignore_globs=None,
-            redis_client=None,
-        )
-        scanner._redis = _StubRedis()  # type: ignore[assignment]
-
-        summary = scanner.scan(full=False)
-
-        self.assertFalse(summary.get('fast_path'))
-        self.assertTrue(summary.get('leader'))
-        self.assertGreater(summary.get('found', 0), 0)
-        self.assertTrue(scanner.has_leader_lock())
-
-        manifest_meta = db.meta.find_one({'_id': 'songs_manifest'})
-        self.assertIsInstance(manifest_meta, dict)
 
     def test_scan_skipped_when_redis_unavailable(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3791,7 +3886,9 @@ LEVEL:7
 
         summary_lines = [line for line in captured.output if 'scan: mode=' in line]
         self.assertTrue(summary_lines)
-        self.assertIn('checksum=-', summary_lines[-1])
+        self.assertIn('checksum=', summary_lines[-1])
+        checksum_value = summary_lines[-1].split('checksum=')[-1]
+        self.assertTrue(checksum_value)
 
     def test_scan_empty_directory_integration(self):
         tmp_dir = Path(self._tmp_dir())

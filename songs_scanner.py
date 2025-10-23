@@ -103,7 +103,7 @@ TJA_VALIDATOR = get_tja_validator()
 _HANG_WATCHDOG_ARMED = False
 
 
-def compute_fs_digest(root: Path) -> Tuple[str, int]:
+def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = None) -> Tuple[str, int]:
     """Return a checksum and file count for ``root`` without reading file bodies."""
 
     try:
@@ -114,6 +114,14 @@ def compute_fs_digest(root: Path) -> Tuple[str, int]:
     if not root_path.exists():
         return hashlib.sha1(b"").hexdigest(), 0
 
+    ignore_patterns = [pattern for pattern in (ignore_globs or []) if pattern]
+
+    def _ignored(relative_path: Path) -> bool:
+        if not ignore_patterns:
+            return False
+        relative_text = relative_path.as_posix()
+        return any(fnmatch.fnmatch(relative_text, pattern) for pattern in ignore_patterns)
+
     hasher = hashlib.sha1()
     files = 0
 
@@ -121,6 +129,19 @@ def compute_fs_digest(root: Path) -> Tuple[str, int]:
         dirnames.sort()
         filenames.sort()
         base = Path(dirpath)
+
+        filtered_dirs: List[str] = []
+        for dirname in dirnames:
+            candidate_dir = base / dirname
+            try:
+                relative_dir = candidate_dir.relative_to(root_path)
+            except ValueError:
+                continue
+            if _ignored(relative_dir):
+                continue
+            filtered_dirs.append(dirname)
+        dirnames[:] = filtered_dirs
+
         for name in filenames:
             candidate = base / name
             try:
@@ -137,12 +158,31 @@ def compute_fs_digest(root: Path) -> Tuple[str, int]:
             except ValueError:
                 LOGGER.debug("Skipping file outside root during digest: %s", candidate)
                 continue
+            if _ignored(relative):
+                continue
             mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
             payload = f"{relative.as_posix()}\0{stat_result.st_size}\0{mtime_ns}\n"
             hasher.update(payload.encode("utf-8", "surrogateescape"))
             files += 1
 
     return hasher.hexdigest(), files
+
+
+def _coerce_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        try:
+            return int(token)
+        except ValueError:
+            with contextlib.suppress(ValueError):
+                return int(float(token))
+    return None
 
 
 def _validation_warning(message: str, *args, **kwargs) -> None:
@@ -2460,7 +2500,14 @@ class SongScanner:
         self._active_summary: Optional[Dict[str, int]] = None
         self._leader_lock_token: Optional[str] = None
         self._leader_lock_key = 'taiko:scanner:leader'
-        self._leader_lock_ttl = 600
+        ttl_default = 1200
+        ttl_env = os.getenv('SCAN_LEADER_TTL_SECONDS')
+        if ttl_env:
+            with contextlib.suppress(ValueError):
+                parsed_ttl = int(ttl_env)
+                if parsed_ttl > 0:
+                    ttl_default = parsed_ttl
+        self._leader_lock_ttl = ttl_default
         db_name = getattr(self.db, 'name', None)
         client = getattr(self.db, 'client', None)
         host_label: Optional[str] = None
@@ -4577,45 +4624,77 @@ class SongScanner:
         }
         self._active_summary = summary
         performed_scan = False
-        manifest_meta = self._load_manifest_meta()
-        if manifest_meta is None:
-            full = True
-        elif bool(manifest_meta.get('force')):
-            full = True
+        manifest_meta = self._load_manifest_meta() or {}
+        manifest_checksum: Optional[str] = None
+        manifest_documents = 0
+        manifest_files_count: Optional[int] = None
+        force_scan = False
+        if isinstance(manifest_meta, dict):
+            for candidate in (
+                manifest_meta.get('manifest_checksum'),
+                manifest_meta.get('checksum'),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    manifest_checksum = candidate.strip()
+                    break
+            manifest_documents_value = _coerce_int(manifest_meta.get('manifest_documents'))
+            if manifest_documents_value is not None:
+                manifest_documents = manifest_documents_value
+            manifest_files_count = _coerce_int(manifest_meta.get('files_count'))
+            if manifest_files_count is None:
+                manifest_files_count = manifest_documents_value
+            force_scan = bool(manifest_meta.get('force'))
+        summary['manifest_documents'] = manifest_documents
+        if manifest_checksum:
+            summary['manifest_checksum'] = manifest_checksum
+        summary['fast_path'] = False
+        summary['leader'] = False
+        summary['reason'] = 'digest_changed'
+        summary['skipped_due_to_leader'] = False
 
-        checksum, files_count = compute_fs_digest(self.songs_dir)
+        checksum, files_count = compute_fs_digest(self.songs_dir, ignore_globs=self.ignore_globs)
         summary['files_count'] = files_count
         summary['fs_checksum'] = checksum
 
         if not self.songs_dir.exists():
             LOGGER.warning("Songs directory %s does not exist", self.songs_dir)
-            summary['leader'] = self.has_leader_lock()
+            reason = 'digest_equal' if manifest_checksum == checksum and manifest_documents == files_count else 'digest_changed'
+            summary['fast_path'] = True
+            self._log_scan_outcome(summary, fast_path=True, reason=reason)
             return summary
 
-        if not full:
-            stored_checksum = manifest_meta.get('checksum') if isinstance(manifest_meta, dict) else None
-            stored_count = manifest_meta.get('files_count') if isinstance(manifest_meta, dict) else None
-            if stored_checksum == checksum and stored_count == files_count:
-                if stored_checksum:
-                    summary['manifest_checksum'] = stored_checksum
-                summary['fast_path'] = True
-                if not self._acquire_leader_lock():
-                    summary['leader'] = False
-                    summary['skipped_due_to_leader'] = True
-                    return summary
-                summary['leader'] = True
-                LOGGER.info('scan: fast-path (no changes)')
+        if force_scan:
+            full = True
+
+        redis_available = self._redis is not None
+
+        stored_manifest_files = manifest_files_count if manifest_files_count is not None else manifest_documents
+
+        digest_equal = (
+            not full
+            and bool(manifest_checksum)
+            and manifest_checksum == checksum
+            and stored_manifest_files == files_count
+        )
+
+        if digest_equal:
+            summary['fast_path'] = True
+            if redis_available and not self._acquire_leader_lock():
+                summary['skipped_due_to_leader'] = True
+                self._log_scan_outcome(summary, fast_path=True, reason='lock_miss')
+                return summary
+            self._log_scan_outcome(summary, fast_path=True, reason='digest_equal')
+            return summary
+
+        if redis_available:
+            if not self._acquire_leader_lock():
+                summary['skipped_due_to_leader'] = True
+                self._log_scan_outcome(summary, fast_path=False, reason='lock_miss')
                 return summary
 
-        if not self._acquire_leader_lock():
-            if isinstance(manifest_meta, dict) and manifest_meta.get('checksum'):
-                summary['manifest_checksum'] = manifest_meta.get('checksum')
-            summary['leader'] = False
-            summary['skipped_due_to_leader'] = True
-            return summary
-
-        summary['leader'] = True
         performed_scan = True
+        summary['fast_path'] = False
+        summary['reason'] = 'digest_changed'
 
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
@@ -4660,6 +4739,7 @@ class SongScanner:
         group_key_by_path: Dict[str, str] = {}
         dirty_groups: Set[str] = set()
         manifest_entries_by_id: Dict[str, Dict[str, object]] = {}
+        manifest_entry_checksum: Optional[str] = None
 
         for tja_path in self._iter_tja_files():
             summary['found'] += 1
@@ -5029,14 +5109,18 @@ class SongScanner:
                 except Exception:  # pragma: no cover - best effort cleanup
                     LOGGER.debug('Failed to prune %d stale scanner state entries', len(stale_paths))
 
+        manifest_document_count = len(manifest_entries_by_id)
         if manifest_entries_by_id:
             try:
-                checksum = self._sync_manifest_entries(manifest_entries_by_id)
-                if checksum:
-                    summary['manifest_checksum'] = checksum
-                summary['manifest_documents'] = len(manifest_entries_by_id)
+                manifest_checksum_value = self._sync_manifest_entries(manifest_entries_by_id)
+                if manifest_checksum_value:
+                    manifest_entry_checksum = manifest_checksum_value
             except Exception:
                 LOGGER.debug('Failed to synchronise songs manifest entries', exc_info=True)
+        summary['manifest_documents'] = manifest_document_count
+
+        if manifest_entry_checksum:
+            summary['manifest_entry_checksum'] = manifest_entry_checksum
 
         for cat_id, title in categories.items():
             update = {
@@ -5058,15 +5142,27 @@ class SongScanner:
                 summary['disabled'] += 1
 
         if performed_scan:
-            self._update_manifest_meta(checksum, files_count)
+            manifest_documents_for_meta = int(summary.get('manifest_documents') or 0)
+            final_manifest_checksum = checksum or summary.get('fs_checksum') or ''
+            if final_manifest_checksum is None:
+                final_manifest_checksum = ''
+            summary['manifest_checksum'] = final_manifest_checksum
+            self._update_manifest_meta(final_manifest_checksum, files_count, manifest_documents_for_meta)
 
         self._metrics.flush()
+
+        if performed_scan:
+            self._log_scan_outcome(summary, fast_path=False, reason=summary.get('reason', 'digest_changed'))
 
         return summary
 
     @property
     def watchdog_supported(self) -> bool:
         return self._watchdog_supported
+
+    @property
+    def leader_lock_key(self) -> str:
+        return self._leader_lock_key
 
     def has_leader_lock(self) -> bool:
         client = self._redis
@@ -5101,12 +5197,12 @@ class SongScanner:
         return False
 
     def _acquire_leader_lock(self) -> bool:
-        token = self._leader_lock_token
         client = self._redis
         if client is None:
-            if token is None:
-                self._leader_lock_token = f"local-{os.getpid()}"
-            return True
+            LOGGER.debug('scanner leader lock unavailable: redis client missing')
+            self._leader_lock_token = None
+            return False
+        token = self._leader_lock_token
         if token is not None:
             try:
                 current = client.get(self._leader_lock_key)
@@ -5151,13 +5247,15 @@ class SongScanner:
             return dict(doc)
         return None
 
-    def _update_manifest_meta(self, checksum: str, files_count: int) -> None:
+    def _update_manifest_meta(self, checksum: str, files_count: int, manifest_documents: int) -> None:
         collection = self._meta_collection
         if collection is None:
             return
         payload = {
             'checksum': checksum,
+            'manifest_checksum': checksum,
             'files_count': files_count,
+            'manifest_documents': manifest_documents,
             'updated_at': datetime.now(UTC),
         }
         update = {
@@ -5168,6 +5266,23 @@ class SongScanner:
             collection.update_one({'_id': 'songs_manifest'}, update, upsert=True)
         except Exception:  # pragma: no cover - tolerate transient meta errors
             LOGGER.debug('Failed to update songs manifest meta document', exc_info=True)
+
+    def _log_scan_outcome(self, summary: Dict[str, object], *, fast_path: bool, reason: str) -> None:
+        leader = self.has_leader_lock()
+        summary['leader'] = bool(leader)
+        summary['fast_path'] = fast_path
+        summary['reason'] = reason
+        files_count_value = _coerce_int(summary.get('files_count')) or 0
+        manifest_documents_value = _coerce_int(summary.get('manifest_documents')) or 0
+        SUMMARY_LOGGER.info(
+            'scan: pid=%d fast_path=%s leader=%s reason=%s files_count=%d manifest_documents=%d',
+            os.getpid(),
+            fast_path,
+            leader,
+            reason,
+            files_count_value,
+            manifest_documents_value,
+        )
 
     def _ensure_manifest_indexes(self) -> None:
         collection = self._manifest_collection

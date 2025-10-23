@@ -51,6 +51,7 @@ The song scanner and validator can be controlled via environment variables:
 | `TJA_VALIDATION_MODE` | `warn` | Validation mode: `off`, `warn`, or `strict`. `strict` turns validation errors into scanner errors. |
 | `TJA_VALIDATION_LOG` | `0` | Enable verbose validation logging when set to `1`. |
 | `TJA_VALIDATION_SUMMARY` | `1` | Emit aggregated validation summaries when logging is enabled. |
+| `SCAN_LEADER_TTL_SECONDS` | `1200` | Expiration time (seconds) for the Redis leader lock key `taiko:scanner:leader`. |
 
 When running in production the scanner persists a songs manifest with a deterministic `manifest_checksum`. The `/api/songs` endpoint exposes this checksum as an HTTP `ETag` header and accepts `If-None-Match` requests to serve `304 Not Modified` responses when the catalog has not changed.
 
@@ -64,9 +65,9 @@ The scanner supports multiple startup modes via the `SCAN_ON_START` configuratio
 * `force` always performs a full rescan regardless of manifest state.
 * `skip` disables automatic scanning entirely; use the admin scan API to refresh manually.
 
-Metadata about the last successful scan lives in the `meta` collection as the `_id="songs_manifest"` document. Deployments that predate the manifest feature can run `python -m tools.migration_add_manifest_collection` to create the collection and backfill the metadata entry. Without that document the scanner will perform a full parse on the next boot.
+Metadata about the last successful scan lives in the `meta` collection as the `_id="songs_manifest"` document. The document tracks the deterministic `manifest_checksum`, the lightweight filesystem digest (`fs_checksum`), and the number of discovered song files (`manifest_documents`). When the digest and file counts match the persisted values the scanner enters a fast-path mode that avoids reparsing charts. Deployments that predate the manifest feature can run `python -m tools.migration_add_manifest_collection` to create the collection and backfill the metadata entry. Without that document the scanner will perform a full parse on the next boot.
 
-Leader election for incremental rescans uses Redis (`taiko:scanner:leader`). When Redis is not configured, workers still perform scans but cannot claim leadership, so the filesystem watcher remains disabled; enable Redis to allow a single process to run the watcher.
+Leader election for incremental rescans uses Redis (`taiko:scanner:leader`). The TTL can be tuned with `SCAN_LEADER_TTL_SECONDS` to accommodate longer scans. When Redis is not configured, workers still perform scans but cannot claim leadership, so the filesystem watcher remains disabled; enable Redis to allow a single process to run the watcher.
 
 ## Database maintenance
 

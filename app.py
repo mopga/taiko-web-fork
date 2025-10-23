@@ -544,35 +544,62 @@ def create_app():
     basedir_value = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
 
     app_instance.secret_key = take_config('SECRET_KEY') or 'change-me'
-    app_instance.config['SESSION_TYPE'] = 'redis'
     redis_config = dict(take_config('REDIS', required=True))
-    redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
-    if redis_host_env:
-        redis_config['CACHE_REDIS_HOST'] = redis_host_env
-    redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
-    if redis_port_env:
-        redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
+
+    redis_host = os.environ.get("TAIKO_WEB_REDIS_HOST") or redis_config.get('CACHE_REDIS_HOST') or 'redis'
+    redis_port = int(os.environ.get("TAIKO_WEB_REDIS_PORT", redis_config.get('CACHE_REDIS_PORT', 6379)))
     redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
-    if redis_password_env is not None:
-        redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
-    redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
-    if redis_db_env is not None:
-        redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
+    redis_password = redis_password_env if redis_password_env is not None else redis_config.get('CACHE_REDIS_PASSWORD')
+    redis_db = int(os.environ.get("TAIKO_WEB_REDIS_DB", redis_config.get('CACHE_REDIS_DB', 0)))
+
+    redis_config['CACHE_REDIS_HOST'] = redis_host
+    redis_config['CACHE_REDIS_PORT'] = redis_port
+    redis_config['CACHE_REDIS_PASSWORD'] = redis_password
+    redis_config['CACHE_REDIS_DB'] = redis_db
+
+    session_redis = Redis(
+        host=redis_host,
+        port=redis_port,
+        password=redis_password,
+        db=redis_db,
+        decode_responses=False,
+    )
+
+    session_logger = logging.getLogger('taiko.session')
+    try:
+        session_redis.ping()
+    except Exception as exc:
+        session_logger.error('SESSION_REDIS ping=FAIL: %r', exc)
+    else:
+        pool = getattr(session_redis, 'connection_pool', None)
+        connection_kwargs = getattr(pool, 'connection_kwargs', {}) if pool is not None else {}
+        session_logger.info(
+            'SESSION_REDIS ping=ok host=%s port=%s db=%s',
+            connection_kwargs.get('host', redis_host),
+            connection_kwargs.get('port', redis_port),
+            connection_kwargs.get('db', redis_db),
+        )
+
+    app_instance.config.update(
+        SESSION_TYPE='redis',
+        SESSION_REDIS=session_redis,
+        SESSION_KEY_PREFIX=os.getenv('SESSION_KEY_PREFIX', 'sess:'),
+        PERMANENT_SESSION_LIFETIME=int(os.getenv('SESSION_TTL_SECONDS', '1209600')),
+    )
     db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
 
     def _create_redis_client() -> Redis:
         return Redis(
-            host=redis_config['CACHE_REDIS_HOST'],
-            port=redis_config['CACHE_REDIS_PORT'],
-            password=redis_config.get('CACHE_REDIS_PASSWORD'),
-            db=redis_config.get('CACHE_REDIS_DB'),
+            host=redis_host,
+            port=redis_port,
+            password=redis_password,
+            db=redis_db,
+            decode_responses=False,
         )
 
     _mongo_dispatcher = MongoDispatcher(_create_mongo_client, db_name)
     _redis_dispatcher = RedisDispatcher(_create_redis_client)
 
-    session_redis = _LazyResourceProxy(_redis_dispatcher.get_client)
-    app_instance.config['SESSION_REDIS'] = session_redis
     app_instance.cache = Cache(app_instance, config=redis_config)
     sess.init_app(app_instance)
     #csrf = CSRFProtect(app)
@@ -1822,15 +1849,15 @@ def invalidate_category_cache():
 def perform_song_scan(*, full: bool = False):
     summary = song_scanner.scan(full=full)
     summary_dict = summary if isinstance(summary, dict) else {}
-    leader = bool(summary_dict.get('leader', True))
+    leader = summary_dict.get('leader') is True
     fast_path = summary_dict.get('fast_path') is True
     if leader and not fast_path:
         invalidate_category_cache()
     if leader:
         app.logger.info("Song scan finished: %s", summary)
-        _maybe_log_startup_duration(fast_path=fast_path)
     else:
         app.logger.info("Song scan skipped (no leader): %s", summary)
+    _maybe_log_startup_duration(fast_path=fast_path)
     return summary
 
 
@@ -2174,7 +2201,10 @@ def _start_song_directory_watcher():
     if not SONGS_DIR_PATH.exists():
         app.logger.warning('Songs directory %s missing; live song updates disabled', SONGS_DIR_PATH)
         return
-    if hasattr(song_scanner, 'has_leader_lock') and not song_scanner.has_leader_lock():
+    if not hasattr(song_scanner, 'has_leader_lock'):
+        app.logger.info('Song directory watcher not started: leader lock unavailable')
+        return
+    if not song_scanner.has_leader_lock():
         app.logger.info('Song directory watcher not started: scanner is not leader')
         return
 
@@ -2188,7 +2218,8 @@ def _start_song_directory_watcher():
     try:
         handle = song_scanner.start_watcher(callback=_run_scan, debounce_seconds=0.75)
         if handle:
-            app.logger.info('Song directory watcher started (pid=%s)', os.getpid())
+            key_value = getattr(song_scanner, 'leader_lock_key', 'taiko:scanner:leader')
+            app.logger.info('Song directory watcher started (pid=%s, key=%s)', os.getpid(), key_value)
             _song_watcher_handle = handle
     except KeyboardInterrupt:
         raise
