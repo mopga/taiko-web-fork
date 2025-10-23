@@ -55,3 +55,13 @@ The song scanner and validator can be controlled via environment variables:
 When running in production the scanner persists a songs manifest with a deterministic `manifest_checksum`. The `/api/songs` endpoint exposes this checksum as an HTTP `ETag` header and accepts `If-None-Match` requests to serve `304 Not Modified` responses when the catalog has not changed.
 
 The new `/api/songs/details` endpoint accepts up to 50 comma-separated song identifiers and returns the detailed payloads in the same order. Pass `notes=none` to fetch metadata without full chart data.
+
+## Database maintenance
+
+Run the index initialization utility after provisioning a fresh MongoDB deployment to guarantee all required taiko-web collections have the expected indexes:
+
+```bash
+python -m tools.init_db_schema --uri "mongodb://localhost:27017" --database taiko
+```
+
+The script also respects the `TAIKO_WEB_MONGO_URI`, `TAIKO_WEB_MONGO_HOST`, and `TAIKO_WEB_MONGO_DB` environment variables, so it can be invoked without arguments in most containerized environments.

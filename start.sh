@@ -19,4 +19,15 @@ cleanup() {
 
 trap cleanup EXIT
 
-gunicorn --bind 0.0.0.0:8000 --workers ${GWORKERS:-2} --threads ${GTHREADS:-4} app:app
+if [ "${TAIKO_INIT_INDEXES:-1}" != "0" ]; then
+    "$PY" tools/init_db_schema.py
+fi
+
+gunicorn \
+    --bind 0.0.0.0:8000 \
+    --workers ${GWORKERS:-2} \
+    --threads ${GTHREADS:-4} \
+    --capture-output \
+    --error-logfile - \
+    --access-logfile - \
+    app:app

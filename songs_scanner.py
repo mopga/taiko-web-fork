@@ -64,29 +64,16 @@ def _resolve_log_level(level_name: str) -> int:
     return level_value if isinstance(level_value, int) else logging.INFO
 
 
-class _ScanSummaryLogger:
-    def __init__(self, logger_name: str, level_name: str) -> None:
-        self._logger = logging.getLogger(logger_name)
-        self._level = _resolve_log_level(level_name)
-        self._extra = {"component": "scanner"}
-
-    def _should_log(self, level: int) -> bool:
-        return level >= self._level
-
-    def log(self, level: int, msg: str, *args, **kwargs) -> None:
-        if not self._should_log(level):
-            return
-        extra = kwargs.pop("extra", None) or {}
-        merged_extra = {**self._extra, **extra}
-        self._logger.log(level, msg, *args, extra=merged_extra, **kwargs)
-
-    def info(self, msg: str, *args, **kwargs) -> None:
-        self.log(logging.INFO, msg, *args, **kwargs)
-
-
-SUMMARY_LOGGER = _ScanSummaryLogger("taiko.scanner", SCAN_LOG_LEVEL)
-
-LOGGER = logging.getLogger(__name__)
+# Scanner logging respects ``SCAN_LOG_LEVEL`` and ``SCAN_LOG_SUMMARY``. ``DEBUG``
+# emits detailed per-file diagnostics without sensitive payloads, while ``INFO``
+# restricts output to aggregate markers suitable for production telemetry.
+LOGGER = logging.getLogger("taiko.scanner")
+SUMMARY_LOGGER = logging.getLogger("taiko.scanner.summary")
+LOGGER.setLevel(_resolve_log_level(SCAN_LOG_LEVEL))
+SUMMARY_LOGGER.setLevel(_resolve_log_level(SCAN_LOG_LEVEL))
+LOGGER.propagate = True
+SUMMARY_LOGGER.propagate = True
+logging.Logger.manager.loggerDict[__name__] = LOGGER
 
 
 TJA_LENIENT_FALLBACK = os.getenv("TJA_LENIENT_FALLBACK", "1") == "1"
@@ -4470,11 +4457,12 @@ class SongScanner:
                 elapsed = 0.0
             computed_duration = round(elapsed, 3)
             existing_duration = summary.get('duration_seconds') if isinstance(summary, dict) else None
-            candidate_duration = existing_duration or computed_duration
-            try:
-                final_duration = float(candidate_duration)
-            except (TypeError, ValueError):
-                final_duration = computed_duration
+            final_duration = computed_duration
+            if existing_duration is not None:
+                try:
+                    final_duration = float(existing_duration)
+                except (TypeError, ValueError):
+                    final_duration = computed_duration
             summary['duration_seconds'] = final_duration
 
             active_summary: Dict[str, int] = summary
@@ -4493,18 +4481,21 @@ class SongScanner:
                     target.removeHandler(counter_handler)
 
             if SCAN_LOG_SUMMARY:
-                SUMMARY_LOGGER.info(
-                    "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s",
-                    mode_str,
-                    int(active_summary.get('found', 0)),
-                    int(active_summary.get('inserted', 0)),
-                    int(active_summary.get('updated', 0)),
-                    int(active_summary.get('disabled', 0)),
-                    int(max(active_summary.get('errors', 0), error_count)),
-                    int(active_summary.get('skipped', 0)),
-                    final_duration,
-                    checksum_str,
-                )
+                try:
+                    SUMMARY_LOGGER.info(
+                        "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s",
+                        mode_str,
+                        int(active_summary.get('found', 0)),
+                        int(active_summary.get('inserted', 0)),
+                        int(active_summary.get('updated', 0)),
+                        int(active_summary.get('disabled', 0)),
+                        int(max(active_summary.get('errors', 0), error_count)),
+                        int(active_summary.get('skipped', 0)),
+                        final_duration,
+                        checksum_str,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging path
+                    SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
 
             self._active_summary = None
 
