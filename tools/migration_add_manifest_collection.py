@@ -51,9 +51,14 @@ def _extract_manifest_payload(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
     if raw.get("checksum"):
         payload["checksum"] = str(raw["checksum"])
+    if raw.get("manifest_checksum"):
+        payload["manifest_checksum"] = str(raw["manifest_checksum"])
     files_count = raw.get("files_count")
     if isinstance(files_count, (int, float)):
         payload["files_count"] = int(files_count)
+    manifest_documents = raw.get("manifest_documents")
+    if isinstance(manifest_documents, (int, float)):
+        payload["manifest_documents"] = int(manifest_documents)
     updated_at = raw.get("updated_at")
     if isinstance(updated_at, datetime):
         payload["updated_at"] = updated_at
@@ -87,7 +92,9 @@ def _ensure_manifest_meta(db: Database) -> None:
 
     payload = _extract_manifest_payload(legacy_source)
     payload.setdefault("checksum", "")
+    payload.setdefault("manifest_checksum", payload.get("checksum", ""))
     payload.setdefault("files_count", 0)
+    payload.setdefault("manifest_documents", payload.get("files_count", 0))
     payload.setdefault("updated_at", None)
 
     try:

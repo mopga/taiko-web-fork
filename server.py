@@ -10,7 +10,7 @@ import sys
 from typing import Optional
 
 import websockets
-from websockets.server import serve as ws_serve
+from websockets import serve as ws_serve
 
 
 def _build_parser() -> argparse.ArgumentParser:
