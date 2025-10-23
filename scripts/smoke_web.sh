@@ -5,12 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-for bin in docker curl jq; do
+need() {
+  local bin="$1"
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "[smoke] required binary not found: $bin" >&2
     exit 1
   fi
-done
+}
+
+need docker
+need curl
+need jq
 
 [[ "${SMOKE_WEB_DEBUG:-}" == "1" ]] && set -x
 
