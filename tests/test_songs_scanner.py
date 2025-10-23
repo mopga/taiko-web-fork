@@ -3370,6 +3370,146 @@ LEVEL:7
         self.assertEqual(second_summary.get('found'), 0)
         self.assertTrue(second_summary.get('leader'))
 
+    def test_has_leader_lock_false_without_redis(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        self.assertFalse(scanner.has_leader_lock())
+        scanner._leader_lock_token = "local-token"
+        self.assertFalse(scanner.has_leader_lock())
+
+    def test_has_leader_lock_false_when_redis_raises(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        class _RaisingRedis:
+            def get(self, key):
+                raise RuntimeError("boom")
+
+        scanner._leader_lock_token = "token"
+        scanner._redis = _RaisingRedis()  # type: ignore[assignment]
+
+        with self.assertLogs('taiko.scanner', level='DEBUG') as captured:
+            self.assertFalse(scanner.has_leader_lock())
+
+        self.assertTrue(any('Failed to read scanner leader lock state' in line for line in captured.output))
+        self.assertIsNone(scanner._leader_lock_token)
+
+    def test_fast_path_only_leader_starts_once(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "fastpath.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Fast Path",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+
+        class _StubRedis:
+            def __init__(self):
+                self.value = None
+
+            def get(self, key):
+                return self.value
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and self.value is not None:
+                    return False
+                self.value = value
+                return True
+
+            def expire(self, key, ttl):
+                return True
+
+        redis_stub = _StubRedis()
+
+        scanner_leader = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        scanner_leader._redis = redis_stub  # type: ignore[assignment]
+
+        scanner_follower = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+        scanner_follower._redis = redis_stub  # type: ignore[assignment]
+
+        leader_full_summary = scanner_leader.scan(full=True)
+        self.assertTrue(leader_full_summary.get('leader'))
+
+        leader_fast_summary = scanner_leader.scan(full=False)
+        self.assertTrue(leader_fast_summary.get('fast_path'))
+        self.assertTrue(leader_fast_summary.get('leader'))
+
+        follower_fast_summary = scanner_follower.scan(full=False)
+        self.assertTrue(follower_fast_summary.get('fast_path'))
+        self.assertFalse(follower_fast_summary.get('leader'))
+        self.assertTrue(follower_fast_summary.get('skipped_due_to_leader'))
+
+    def test_fast_path_does_not_enter_full_scan_when_digest_matches(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "fastpath.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Fast Path",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        scanner.scan(full=True)
+
+        with mock.patch.object(scanner, '_iter_tja_files', side_effect=AssertionError('should not iterate')):
+            summary = scanner.scan(full=False)
+
+        self.assertTrue(summary.get('fast_path'))
+        self.assertEqual(summary.get('found'), 0)
     def test_handler_not_accumulated_on_repeated_scan(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)

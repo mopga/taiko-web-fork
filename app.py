@@ -2169,7 +2169,7 @@ def _start_song_directory_watcher():
     try:
         handle = song_scanner.start_watcher(callback=_run_scan, debounce_seconds=0.75)
         if handle:
-            app.logger.info('Song directory watcher started')
+            app.logger.info('Song directory watcher started (pid=%s)', os.getpid())
             _song_watcher_handle = handle
     except KeyboardInterrupt:
         raise

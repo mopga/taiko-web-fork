@@ -27,5 +27,5 @@ the filesystem watcher or invalidate caches.
 
 The scanner coordinates across multiple workers by taking a Redis lock with the key `taiko:scanner:leader`. Only the leader process
 triggers cache invalidation and starts the filesystem watcher. If Redis is not configured or a compatible client is not provided,
-leader election is effectively disabled and the watcher stays offline. Enable Redis in production deployments that require the live
-watcher.
+there is no leader – scans still run, but `has_leader_lock()` always reports `False` and the watcher never starts. Enable Redis in
+production deployments that require the live watcher and cross-process leadership.
