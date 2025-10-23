@@ -69,7 +69,7 @@ MONGO = {
 # Redis server settings, used for sessions + cache.
 REDIS = {
     'CACHE_TYPE': os.getenv("CACHE_TYPE", "redis"),
-    'CACHE_REDIS_HOST': os.getenv("CACHE_REDIS_HOST", "127.0.0.1"),
+    'CACHE_REDIS_HOST': os.getenv("TAIKO_WEB_REDIS_HOST", "127.0.0.1"),
     'CACHE_REDIS_PORT': getenv_int("CACHE_REDIS_PORT", 6379),
     'CACHE_REDIS_PASSWORD': os.getenv("CACHE_REDIS_PASSWORD") or None,
     'CACHE_REDIS_DB': getenv_int("CACHE_REDIS_DB", 0),
