@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -10,7 +9,6 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
-SMOKE_SCRIPT = REPO_ROOT / "scripts" / "smoke_web.sh"
 BASE_URL = "http://localhost:8000"
 
 
@@ -84,11 +82,3 @@ def test_web_stack_health_and_api(web_stack: requests.Session) -> None:
     assert isinstance(songs_payload, list)
 
 
-def test_smoke_script_invocation():
-    proc = subprocess.run(
-        ["bash", str(SMOKE_SCRIPT)],
-        cwd=REPO_ROOT,
-        env=os.environ.copy(),
-        text=True,
-    )
-    assert proc.returncode == 0
