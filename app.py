@@ -94,17 +94,31 @@ class _ResourceStore:
 
 
 class _LazyResourceProxy:
+    _MISSING = object()
+
     def __init__(self, factory: Callable[[], object]):
         self._factory = factory
+        self._instance = self._MISSING
+        self._lock = threading.Lock()
+
+    def _get_instance(self):
+        instance = self._instance
+        if instance is self._MISSING:
+            with self._lock:
+                instance = self._instance
+                if instance is self._MISSING:
+                    instance = self._factory()
+                    self._instance = instance
+        return instance
 
     def __getattr__(self, item):
-        return getattr(self._factory(), item)
+        return getattr(self._get_instance(), item)
 
     def __getitem__(self, key):
-        return self._factory()[key]
+        return self._get_instance()[key]
 
     def __bool__(self) -> bool:
-        return bool(self._factory())
+        return bool(self._get_instance())
 
     def __repr__(self) -> str:
         return f"<LazyResourceProxy factory={self._factory!r}>"
