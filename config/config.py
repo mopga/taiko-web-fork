@@ -9,7 +9,12 @@ def getenv_bool(name: str, default: bool = False) -> bool:
     return val in ("1", "true", "t", "yes", "y", "on")
 
 
-# Logging flags for the song scanner.
+# Logging flags for the song scanner. ``SCAN_LOG_LEVEL`` accepts any standard
+# Python logging level (``DEBUG``, ``INFO``, etc). The default ``INFO`` logs
+# aggregated scanner progress without per-file details, while ``DEBUG`` adds
+# verbose diagnostics that avoid PII. ``SCAN_LOG_SUMMARY`` controls whether the
+# final summary line is emitted after each scan; disable it in exceptionally
+# latency-sensitive environments.
 SCAN_LOG_SUMMARY = getenv_bool("SCAN_LOG_SUMMARY", True)
 SCAN_LOG_LEVEL = os.getenv("SCAN_LOG_LEVEL", "INFO").upper()
 

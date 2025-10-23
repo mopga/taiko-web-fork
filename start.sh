@@ -26,5 +26,4 @@ gunicorn \
     --capture-output \
     --error-logfile - \
     --access-logfile - \
-    --preload \
     app:app

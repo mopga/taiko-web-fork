@@ -64,6 +64,9 @@ def _resolve_log_level(level_name: str) -> int:
     return level_value if isinstance(level_value, int) else logging.INFO
 
 
+# Scanner logging respects ``SCAN_LOG_LEVEL`` and ``SCAN_LOG_SUMMARY``. ``DEBUG``
+# emits detailed per-file diagnostics without sensitive payloads, while ``INFO``
+# restricts output to aggregate markers suitable for production telemetry.
 LOGGER = logging.getLogger("taiko.scanner")
 SUMMARY_LOGGER = logging.getLogger("taiko.scanner.summary")
 LOGGER.setLevel(_resolve_log_level(SCAN_LOG_LEVEL))
