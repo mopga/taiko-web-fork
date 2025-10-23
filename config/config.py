@@ -1,8 +1,16 @@
 import os
-from distutils.util import strtobool
+
+
+def getenv_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    val = val.strip().lower()
+    return val in ("1", "true", "t", "yes", "y", "on")
+
 
 # Logging flags for the song scanner.
-SCAN_LOG_SUMMARY = bool(strtobool(os.getenv("SCAN_LOG_SUMMARY", "1")))
+SCAN_LOG_SUMMARY = getenv_bool("SCAN_LOG_SUMMARY", True)
 SCAN_LOG_LEVEL = os.getenv("SCAN_LOG_LEVEL", "INFO").upper()
 
 # The base URL for Taiko Web, with trailing slash.

@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import re
+import sys
 import requests
 import schema
 import threading
@@ -44,6 +45,47 @@ from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def setup_stdout_logging() -> None:
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    for name in ("taiko.scanner", "taiko.scanner.summary"):
+        logging.getLogger(name).propagate = True
+
+
+client = None
+db = None
+basedir = '/'
+SCAN_ON_START = False
+ENABLE_SONG_WATCHER = True
+SCAN_IGNORE_GLOBS: list[str] = []
+ADMIN_SCAN_TOKEN = ''
+SONGS_BASEURL_VALUE = ''
+COERCE_UNKNOWN_COURSE = None
+SONGS_DIR_PATH = Path('.')
+song_scanner: Optional[SongScanner] = None
+_song_watcher_handle = None
+
+
+def _resolve_baseurl(value):
+    if not value:
+        return '/songs/'
+    if value.startswith('http://') or value.startswith('https://') or value.startswith('/'):
+        return value if value.endswith('/') else value + '/'
+    resolved = basedir + value
+    return resolved if resolved.endswith('/') else resolved + '/'
 
 
 _FEATURE_MODES_MANIFEST_ENV = "FEATURE_MODES_MANIFEST"
@@ -262,124 +304,197 @@ def take_config(name, required=False):
         raise ValueError('Required option is not defined in the config.py file: {}'.format(name))
     return None
 
-app = Flask(__name__)
-app.config.setdefault('COMPRESS_MIN_SIZE', 1024)
 compress = Compress()
-compress.init_app(app)
-
-mongo_config = take_config('MONGO') or {}
-mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
-mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
-
-if mongo_uri:
-    client = MongoClient(mongo_uri)
-else:
-    if not mongo_host:
-        mongo_host = ['127.0.0.1:27017']
-    client = MongoClient(host=mongo_host)
-
-basedir = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
-
-app.secret_key = take_config('SECRET_KEY') or 'change-me'
-app.config['SESSION_TYPE'] = 'redis'
-redis_config = dict(take_config('REDIS', required=True))
-redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
-if redis_host_env:
-    redis_config['CACHE_REDIS_HOST'] = redis_host_env
-redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
-if redis_port_env:
-    redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
-redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
-if redis_password_env is not None:
-    redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
-redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
-if redis_db_env is not None:
-    redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
-app.config['SESSION_REDIS'] = Redis(
-    host=redis_config['CACHE_REDIS_HOST'],
-    port=redis_config['CACHE_REDIS_PORT'],
-    password=redis_config.get('CACHE_REDIS_PASSWORD'),
-    db=redis_config.get('CACHE_REDIS_DB'),
-)
-app.cache = Cache(app, config=redis_config)
 sess = Session()
-sess.init_app(app)
-#csrf = CSRFProtect(app)
 
-db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
-db = client[db_name]
-db.users.create_index('username', unique=True)
-try:
-    db.songs.drop_index('id_1')
-except Exception:
-    pass
-try:
-    db.songs.drop_index('songs_id_unique')
-except Exception:
-    pass
-id_string_partial_filter = {'id': {'$type': 'string'}}
-db.songs.create_index(
-    'id',
-    unique=True,
-    name='songs_id_unique',
-    partialFilterExpression=id_string_partial_filter,
-)
-try:
-    db.songs.drop_index('group_key_1')
-except Exception:
-    pass
-try:
-    db.songs.drop_index('songs_group_key_unique')
-except Exception:
-    pass
-scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
-try:
+
+def init_db_schema(db):
+    logger = logging.getLogger(__name__)
+    db.users.create_index('username', unique=True)
+    try:
+        db.songs.drop_index('id_1')
+    except Exception:
+        pass
+    try:
+        db.songs.drop_index('songs_id_unique')
+    except Exception:
+        pass
+    id_string_partial_filter = {'id': {'$type': 'string'}}
     db.songs.create_index(
-        [('group_key', 1), ('scanner_stable_id', 1)],
+        'id',
         unique=True,
-        name='songs_group_key_scanner_unique',
-        partialFilterExpression=scanner_stable_string_partial_filter,
+        name='songs_id_unique',
+        partialFilterExpression=id_string_partial_filter,
     )
-except Exception:
-    app.logger.debug('Could not ensure compound group/stable index')
-try:
-    db.songs.drop_index('songs_scanner_stable_unique')
-except Exception:
-    pass
-try:
-    db.songs.create_index(
-        'scanner_stable_id',
-        unique=True,
-        name='songs_scanner_stable_id_unique',
-        partialFilterExpression=scanner_stable_string_partial_filter,
+    try:
+        db.songs.drop_index('group_key_1')
+    except Exception:
+        pass
+    try:
+        db.songs.drop_index('songs_group_key_unique')
+    except Exception:
+        pass
+    scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
+    try:
+        db.songs.create_index(
+            [('group_key', 1), ('scanner_stable_id', 1)],
+            unique=True,
+            name='songs_group_key_scanner_unique',
+            partialFilterExpression=scanner_stable_string_partial_filter,
+        )
+    except Exception:
+        logger.debug('Could not ensure compound group/stable index')
+    try:
+        db.songs.drop_index('songs_scanner_stable_unique')
+    except Exception:
+        pass
+    try:
+        db.songs.create_index(
+            'scanner_stable_id',
+            unique=True,
+            name='songs_scanner_stable_id_unique',
+            partialFilterExpression=scanner_stable_string_partial_filter,
+        )
+    except Exception:
+        logger.debug('Could not ensure scanner stable id index')
+    try:
+        db.songs.create_index('group_key', name='songs_group_key_lookup')
+    except Exception:
+        logger.debug('Could not ensure group_key lookup index')
+    try:
+        db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
+    except Exception:
+        logger.debug('Could not ensure audioHash/titleNormalized index')
+    try:
+        db.songs.create_index('title_lc', name='songs_title_lc_index')
+    except Exception:
+        logger.debug('Could not ensure title_lc index')
+    try:
+        db.songs.create_index('category', name='songs_category_index')
+    except Exception:
+        logger.debug('Could not ensure category index')
+    db.scores.create_index('username')
+    try:
+        db.song_scanner_state.create_index('tja_path', unique=True)
+    except Exception:
+        logger.debug('Could not ensure song_scanner_state index')
+    try:
+        db.counters.update_one({'_id': 'songs'}, {'$setOnInsert': {'seq': 0}}, upsert=True)
+    except Exception:
+        logger.debug('Could not ensure songs counter document')
+
+
+def create_app():
+    global client, db, basedir, SCAN_ON_START, ENABLE_SONG_WATCHER, SCAN_IGNORE_GLOBS
+    global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
+    global song_scanner, _song_watcher_handle
+
+    setup_stdout_logging()
+
+    app_instance = Flask(__name__)
+    app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
+    compress.init_app(app_instance)
+
+    mongo_config = take_config('MONGO') or {}
+    mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
+    mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
+
+    if mongo_uri:
+        client_instance = MongoClient(mongo_uri)
+    else:
+        if not mongo_host:
+            mongo_host = ['127.0.0.1:27017']
+        client_instance = MongoClient(host=mongo_host)
+
+    basedir_value = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
+
+    app_instance.secret_key = take_config('SECRET_KEY') or 'change-me'
+    app_instance.config['SESSION_TYPE'] = 'redis'
+    redis_config = dict(take_config('REDIS', required=True))
+    redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
+    if redis_host_env:
+        redis_config['CACHE_REDIS_HOST'] = redis_host_env
+    redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
+    if redis_port_env:
+        redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
+    redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
+    if redis_password_env is not None:
+        redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
+    redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
+    if redis_db_env is not None:
+        redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
+    session_redis = Redis(
+        host=redis_config['CACHE_REDIS_HOST'],
+        port=redis_config['CACHE_REDIS_PORT'],
+        password=redis_config.get('CACHE_REDIS_PASSWORD'),
+        db=redis_config.get('CACHE_REDIS_DB'),
     )
-except Exception:
-    app.logger.debug('Could not ensure scanner stable id index')
-try:
-    db.songs.create_index('group_key', name='songs_group_key_lookup')
-except Exception:
-    app.logger.debug('Could not ensure group_key lookup index')
-try:
-    db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
-except Exception:
-    app.logger.debug('Could not ensure audioHash/titleNormalized index')
-try:
-    db.songs.create_index('title_lc', name='songs_title_lc_index')
-except Exception:
-    app.logger.debug('Could not ensure title_lc index')
-try:
-    db.songs.create_index('category', name='songs_category_index')
-except Exception:
-    app.logger.debug('Could not ensure category index')
-db.scores.create_index('username')
-try:
-    db.song_scanner_state.create_index('tja_path', unique=True)
-except Exception:
-    app.logger.debug('Could not ensure song_scanner_state index')
-try:
-    db.counters.update_one({'_id': 'songs'}, {'$setOnInsert': {'seq': 0}}, upsert=True)
-except Exception:
-    app.logger.debug('Could not ensure songs counter document')
+    app_instance.config['SESSION_REDIS'] = session_redis
+    app_instance.cache = Cache(app_instance, config=redis_config)
+    sess.init_app(app_instance)
+    #csrf = CSRFProtect(app)
+
+    db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
+    db_instance = client_instance[db_name]
+    if os.getenv('TAIKO_INIT_INDEXES') == '1':
+        init_db_schema(db_instance)
+
+    basedir = basedir_value
+    client = client_instance
+    db = db_instance
+
+    SONGS_DIR_PATH = Path(
+        os.environ.get('SONGS_DIR')
+        or take_config('SONGS_DIR')
+        or os.path.join(os.getcwd(), 'public', 'songs')
+    ).expanduser().resolve()
+
+    SCAN_ON_START = take_config('SCAN_ON_START')
+    ENABLE_SONG_WATCHER_DEFAULT = True
+
+    def _coerce_bool(value, default):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        return text not in {'0', 'false', 'no', 'off'}
+
+    ENABLE_SONG_WATCHER = _coerce_bool(
+        os.environ.get('ENABLE_SONG_WATCHER'),
+        _coerce_bool(take_config('ENABLE_SONG_WATCHER'), ENABLE_SONG_WATCHER_DEFAULT),
+    )
+    scan_env = os.environ.get('SCAN_ON_START')
+    if scan_env is not None:
+        SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
+    elif SCAN_ON_START is None:
+        SCAN_ON_START = True
+    SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
+    ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
+    SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
+    COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
+
+    song_scanner = SongScanner(
+        db=db_instance,
+        songs_dir=SONGS_DIR_PATH,
+        songs_baseurl=SONGS_BASEURL_VALUE,
+        ignore_globs=SCAN_IGNORE_GLOBS,
+        coerce_unknown_course=COERCE_UNKNOWN_COURSE,
+    )
+
+    logging.getLogger('taiko.scanner.summary').info('scan:boot marker')
+    logging.getLogger('taiko.scanner').info('scanner:boot marker')
+
+    _song_watcher_handle = None
+
+    return app_instance
+
+
+app = create_app()
 
 
 @app.route('/healthz')
@@ -402,57 +517,6 @@ def route_healthcheck():
         status['redis'] = 'error'
         return jsonify(status), 503
     return jsonify(status)
-
-def _resolve_baseurl(value):
-    if not value:
-        return '/songs/'
-    if value.startswith('http://') or value.startswith('https://') or value.startswith('/'):
-        return value if value.endswith('/') else value + '/'
-    resolved = basedir + value
-    return resolved if resolved.endswith('/') else resolved + '/'
-
-
-SONGS_DIR_PATH = Path(os.environ.get('SONGS_DIR') or take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
-SCAN_ON_START = take_config('SCAN_ON_START')
-ENABLE_SONG_WATCHER_DEFAULT = True
-
-
-def _coerce_bool(value, default):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if not text:
-        return default
-    return text not in {'0', 'false', 'no', 'off'}
-
-
-ENABLE_SONG_WATCHER = _coerce_bool(
-    os.environ.get('ENABLE_SONG_WATCHER'),
-    _coerce_bool(take_config('ENABLE_SONG_WATCHER'), ENABLE_SONG_WATCHER_DEFAULT),
-)
-scan_env = os.environ.get('SCAN_ON_START')
-if scan_env is not None:
-    SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
-elif SCAN_ON_START is None:
-    SCAN_ON_START = True
-SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
-ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
-SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
-COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
-
-song_scanner = SongScanner(
-    db=db,
-    songs_dir=SONGS_DIR_PATH,
-    songs_baseurl=SONGS_BASEURL_VALUE,
-    ignore_globs=SCAN_IGNORE_GLOBS,
-    coerce_unknown_course=COERCE_UNKNOWN_COURSE,
-)
-
-_song_watcher_handle = None
 
 
 class HashException(Exception):

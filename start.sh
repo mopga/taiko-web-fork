@@ -19,4 +19,12 @@ cleanup() {
 
 trap cleanup EXIT
 
-gunicorn --bind 0.0.0.0:8000 --workers ${GWORKERS:-2} --threads ${GTHREADS:-4} app:app
+gunicorn \
+    --bind 0.0.0.0:8000 \
+    --workers ${GWORKERS:-2} \
+    --threads ${GTHREADS:-4} \
+    --capture-output \
+    --error-logfile - \
+    --access-logfile - \
+    --preload \
+    app:app
