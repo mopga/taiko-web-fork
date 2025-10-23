@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
-SONGS_DIR="$ROOT_DIR/songs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+for bin in docker curl jq; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "[smoke] required binary not found: $bin" >&2
+    exit 1
+  fi
+done
+
+[[ "${SMOKE_WEB_DEBUG:-}" == "1" ]] && set -x
+
+COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+SONGS_DIR="$REPO_ROOT/songs"
 TMP_HEALTH="$(mktemp)"
+TMP_HEALTH_ERR="${TMP_HEALTH}.err"
 
 mkdir -p "$SONGS_DIR"
 
@@ -12,6 +25,9 @@ cleanup() {
   local exit_code="$1"
   if [[ -f "$TMP_HEALTH" ]]; then
     rm -f "$TMP_HEALTH"
+  fi
+  if [[ -f "$TMP_HEALTH_ERR" ]]; then
+    rm -f "$TMP_HEALTH_ERR"
   fi
   if [[ "${SMOKE_WEB_DEBUG:-}" != "" || "$exit_code" -ne 0 ]]; then
     echo "\n--- docker compose logs (tail) ---"
@@ -24,21 +40,39 @@ cleanup() {
 trap 'cleanup "$?"' EXIT
 
 echo "Starting docker compose stack..."
-docker compose -f "$COMPOSE_FILE" up -d --build
+docker compose -f "$COMPOSE_FILE" up -d --build || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
 
 health_url="http://localhost:8000/healthz"
 echo "Waiting for $health_url"
 ready=0
 for attempt in $(seq 1 30); do
-  if curl --fail --silent --show-error "$health_url" >"$TMP_HEALTH" 2>/dev/null; then
+  if curl --fail --silent --show-error "$health_url" >"$TMP_HEALTH" 2>"$TMP_HEALTH_ERR"; then
     ready=1
     break
+  else
+    echo "[smoke] health probe attempt $attempt failed" >&2
+    if [[ -s "$TMP_HEALTH_ERR" ]]; then
+      cat "$TMP_HEALTH_ERR" >&2
+    fi
+    fallback_body="$(curl --silent --show-error "$health_url" || true)"
+    if [[ -n "$fallback_body" ]]; then
+      echo "[smoke] response body:" >&2
+      echo "$fallback_body" >&2
+    fi
   fi
   sleep 2
   echo "Attempt $attempt failed, retrying..."
 done
 if [[ "$ready" -ne 1 ]]; then
-  echo "Service did not become healthy in time" >&2
+  echo "[smoke] service did not become healthy in time" >&2
+  if [[ -s "$TMP_HEALTH" ]]; then
+    echo "[smoke] last response body:" >&2
+    cat "$TMP_HEALTH" >&2
+  fi
+  if [[ -s "$TMP_HEALTH_ERR" ]]; then
+    echo "[smoke] curl stderr:" >&2
+    cat "$TMP_HEALTH_ERR" >&2
+  fi
   exit 1
 fi
 
@@ -58,8 +92,19 @@ assert data.get("redis") == "ok", f"Redis not ready: {data}"
 PY
 
 echo "Checking CSRF token endpoint..."
-curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" \
-  | python3 - <<'PY'
+csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
+  echo "[smoke] failed to fetch CSRF token" >&2
+  if [[ -s "$TMP_HEALTH_ERR" ]]; then
+    cat "$TMP_HEALTH_ERR" >&2
+  fi
+  fallback_body="$(curl --silent --show-error "http://localhost:8000/api/csrftoken" || true)"
+  if [[ -n "$fallback_body" ]]; then
+    echo "[smoke] response body:" >&2
+    echo "$fallback_body" >&2
+  fi
+  exit 1
+}
+printf '%s' "$csrf_payload" | python3 - <<'PY'
 import json, sys
 payload = sys.stdin.read()
 try:
@@ -71,8 +116,19 @@ assert isinstance(data.get("token"), str) and data["token"], "CSRF token is empt
 PY
 
 echo "Checking songs catalog endpoint..."
-curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" \
-  | python3 - <<'PY'
+songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
+  echo "[smoke] failed to fetch songs catalog" >&2
+  if [[ -s "$TMP_HEALTH_ERR" ]]; then
+    cat "$TMP_HEALTH_ERR" >&2
+  fi
+  fallback_body="$(curl --silent --show-error "http://localhost:8000/api/songs?limit=5" || true)"
+  if [[ -n "$fallback_body" ]]; then
+    echo "[smoke] response body:" >&2
+    echo "$fallback_body" >&2
+  fi
+  exit 1
+}
+printf '%s' "$songs_payload" | python3 - <<'PY'
 import json, sys
 payload = sys.stdin.read()
 try:

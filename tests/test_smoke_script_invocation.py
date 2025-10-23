@@ -14,6 +14,11 @@ def test_smoke_script_invocation() -> None:
         ["bash", str(SMOKE_SCRIPT)],
         cwd=REPO_ROOT,
         env=env,
+        check=False,
+        capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        print("---- smoke stdout ----\n", proc.stdout)
+        print("---- smoke stderr ----\n", proc.stderr)
     assert proc.returncode == 0
