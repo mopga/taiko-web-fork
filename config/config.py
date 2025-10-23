@@ -93,7 +93,7 @@ GOOGLE_CREDENTIALS = {
 
 # Song scanning configuration
 SONGS_DIR = '/app/public/songs'
-SCAN_ON_START = True
+SCAN_ON_START = os.getenv('SCAN_ON_START', 'auto') or 'auto'
 SCAN_IGNORE_GLOBS = ['**/.DS_Store', '**/Thumbs.db']
 ADMIN_SCAN_TOKEN = os.getenv("SECRET_KEY", "change-me")
 ENABLE_SONG_WATCHER = True

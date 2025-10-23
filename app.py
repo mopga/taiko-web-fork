@@ -270,7 +270,7 @@ def setup_stdout_logging() -> None:
 client = None
 db = None
 basedir = '/'
-SCAN_ON_START = False
+SCAN_ON_START = 'auto'
 ENABLE_SONG_WATCHER = True
 SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
@@ -583,7 +583,23 @@ def create_app():
         or os.path.join(os.getcwd(), 'public', 'songs')
     ).expanduser().resolve()
 
-    SCAN_ON_START = take_config('SCAN_ON_START')
+    def _normalise_scan_mode(value) -> str:
+        if value is None:
+            return 'auto'
+        if isinstance(value, bool):
+            return 'force' if value else 'skip'
+        text = str(value).strip().lower()
+        if not text:
+            return 'auto'
+        if text in {'auto', 'force', 'skip'}:
+            return text
+        if text in {'1', 'true', 'yes', 'on', 'full'}:
+            return 'force'
+        if text in {'0', 'false', 'no', 'off', 'none'}:
+            return 'skip'
+        return 'auto'
+
+    SCAN_ON_START = _normalise_scan_mode(take_config('SCAN_ON_START'))
     ENABLE_SONG_WATCHER_DEFAULT = True
 
     def _coerce_bool(value, default):
@@ -604,9 +620,7 @@ def create_app():
     )
     scan_env = os.environ.get('SCAN_ON_START')
     if scan_env is not None:
-        SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
-    elif SCAN_ON_START is None:
-        SCAN_ON_START = True
+        SCAN_ON_START = _normalise_scan_mode(scan_env)
     SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
     ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
     SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
@@ -619,6 +633,7 @@ def create_app():
             songs_baseurl=SONGS_BASEURL_VALUE,
             ignore_globs=SCAN_IGNORE_GLOBS,
             coerce_unknown_course=COERCE_UNKNOWN_COURSE,
+            redis_client=app_instance.config.get('SESSION_REDIS'),
         )
 
     _song_scanner_provider = SongScannerProvider(_create_song_scanner)
@@ -1788,8 +1803,12 @@ def invalidate_category_cache():
 
 def perform_song_scan(*, full: bool = False):
     summary = song_scanner.scan(full=full)
-    invalidate_category_cache()
-    app.logger.info("Song scan finished: %s", summary)
+    leader = bool(summary.get('leader', True)) if isinstance(summary, dict) else True
+    if leader:
+        invalidate_category_cache()
+        app.logger.info("Song scan finished: %s", summary)
+    else:
+        app.logger.info("Song scan skipped (no leader): %s", summary)
     return summary
 
 
@@ -2119,9 +2138,9 @@ def send_songs(ref):
 def send_manifest():
     return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
 
-if SCAN_ON_START:
+if SCAN_ON_START != 'skip':
     try:
-        perform_song_scan()
+        perform_song_scan(full=SCAN_ON_START == 'force')
     except Exception:
         app.logger.exception('Automatic song scan failed')
 
@@ -2138,6 +2157,9 @@ def _start_song_directory_watcher():
         return
     if not SONGS_DIR_PATH.exists():
         app.logger.warning('Songs directory %s missing; live song updates disabled', SONGS_DIR_PATH)
+        return
+    if hasattr(song_scanner, 'has_leader_lock') and not song_scanner.has_leader_lock():
+        app.logger.info('Song directory watcher not started: scanner is not leader')
         return
 
     def _run_scan():

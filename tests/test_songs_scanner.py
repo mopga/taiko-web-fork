@@ -8,6 +8,7 @@ import threading
 import unittest
 import importlib.util
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 from unittest import mock
@@ -401,6 +402,7 @@ class _DummyDB:
         self.song_scanner_state = _MemoryCollection()
         self.import_issues = _MemoryCollection()
         self.songs_manifest = _MemoryCollection()
+        self.meta = _MemoryCollection()
 
 
 class TestSongsScanner(unittest.TestCase):
@@ -3329,6 +3331,44 @@ LEVEL:7
         self.assertIn('duration_seconds', summary)
         self.assertIsInstance(summary['duration_seconds'], float)
         self.assertGreaterEqual(summary['duration_seconds'], 0.0)
+
+    def test_fast_path_skips_scan_when_digest_unchanged(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "fastpath.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Fast Path",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        first_summary = scanner.scan(full=True)
+        self.assertGreater(first_summary.get('found', 0), 0)
+
+        meta_doc = db.meta.find_one({'_id': 'songs_manifest'})
+        self.assertIsInstance(meta_doc, dict)
+        self.assertIn('checksum', meta_doc)
+        self.assertEqual(meta_doc.get('files_count'), 1)
+        self.assertIsInstance(meta_doc.get('updated_at'), datetime)
+
+        second_summary = scanner.scan(full=False)
+        self.assertTrue(second_summary.get('fast_path'))
+        self.assertEqual(second_summary.get('found'), 0)
+        self.assertTrue(second_summary.get('leader'))
 
     def test_handler_not_accumulated_on_repeated_scan(self):
         tmp_dir = Path(self._tmp_dir())
