@@ -10,12 +10,11 @@ import logging
 import mimetypes
 import os
 import re
-import requests
-import schema
+import sys
 import threading
 import time
 import unicodedata
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -28,7 +27,19 @@ import flask
 # ----
 
 from functools import wraps
-from flask import Flask, g, jsonify, render_template, request, abort, redirect, session, flash, make_response, send_from_directory
+from flask import (
+    Flask,
+    g,
+    jsonify,
+    render_template,
+    request,
+    abort,
+    redirect,
+    session,
+    flash,
+    make_response,
+    send_from_directory,
+)
 from flask_caching import Cache
 from flask_compress import Compress
 from flask_session import Session
@@ -41,9 +52,242 @@ from songs_scanner import SongScanner
 from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
+from tools.init_db_schema import init_db_schema
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _ResourceStore:
+    def __init__(self, key: str):
+        self._key = key
+        self._thread_local = threading.local()
+
+    def _thread_store(self) -> dict:
+        store = getattr(self._thread_local, "store", None)
+        if store is None:
+            store = {}
+            self._thread_local.store = store
+        return store
+
+    def _app_store(self) -> dict:
+        if not flask.has_app_context():
+            return {}
+        app = flask.current_app
+        resources = app.extensions.setdefault("taiko_resources", {})
+        return resources
+
+    def _store(self) -> dict:
+        if flask.has_app_context():
+            return self._app_store()
+        return self._thread_store()
+
+    def get(self):
+        return self._store().get(self._key)
+
+    def set(self, value) -> None:
+        self._store()[self._key] = value
+
+    def pop(self):
+        store = self._store()
+        return store.pop(self._key, None)
+
+
+class _LazyResourceProxy:
+    _MISSING = object()
+
+    def __init__(self, factory: Callable[[], object]):
+        self._factory = factory
+        self._instance = self._MISSING
+        self._lock = threading.Lock()
+
+    def _get_instance(self):
+        instance = self._instance
+        if instance is self._MISSING:
+            with self._lock:
+                instance = self._instance
+                if instance is self._MISSING:
+                    instance = self._factory()
+                    self._instance = instance
+        return instance
+
+    def __getattr__(self, item):
+        return getattr(self._get_instance(), item)
+
+    def __getitem__(self, key):
+        return self._get_instance()[key]
+
+    def __bool__(self) -> bool:
+        return bool(self._get_instance())
+
+    def __repr__(self) -> str:
+        return f"<LazyResourceProxy factory={self._factory!r}>"
+
+
+class MongoDispatcher:
+    def __init__(self, client_factory: Callable[[], MongoClient], db_name: str):
+        self._client_factory = client_factory
+        self._db_name = db_name
+        self._store = _ResourceStore("mongo_client")
+        self._lock = threading.Lock()
+
+    def _refresh_client(self, holder):
+        if holder is not None:
+            _, client = holder
+            try:
+                client.close()
+            except Exception:
+                LOGGER.debug("failed to close stale MongoClient", exc_info=True)
+
+    def get_client(self) -> MongoClient:
+        holder = self._store.get()
+        pid = os.getpid()
+        if holder is None or holder[0] != pid:
+            with self._lock:
+                holder = self._store.get()
+                if holder is None or holder[0] != pid:
+                    self._refresh_client(holder)
+                    client = self._client_factory()
+                    holder = (pid, client)
+                    self._store.set(holder)
+        return holder[1]
+
+    def get_database(self):
+        return self.get_client()[self._db_name]
+
+    def clear(self) -> None:
+        holder = self._store.pop()
+        if holder is None:
+            return
+        _, client = holder
+        try:
+            client.close()
+        except Exception:
+            LOGGER.debug("failed to close MongoClient during clear", exc_info=True)
+
+
+class RedisDispatcher:
+    def __init__(self, redis_factory: Callable[[], Redis]):
+        self._redis_factory = redis_factory
+        self._store = _ResourceStore("redis_client")
+        self._lock = threading.Lock()
+
+    def _refresh_client(self, holder):
+        if holder is not None:
+            _, client = holder
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    LOGGER.debug("failed to close stale Redis client", exc_info=True)
+
+    def get_client(self) -> Redis:
+        holder = self._store.get()
+        pid = os.getpid()
+        if holder is None or holder[0] != pid:
+            with self._lock:
+                holder = self._store.get()
+                if holder is None or holder[0] != pid:
+                    self._refresh_client(holder)
+                    client = self._redis_factory()
+                    holder = (pid, client)
+                    self._store.set(holder)
+        return holder[1]
+
+    def clear(self) -> None:
+        holder = self._store.pop()
+        if holder is None:
+            return
+        _, client = holder
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                LOGGER.debug("failed to close Redis client during clear", exc_info=True)
+
+
+class SongScannerProvider:
+    def __init__(self, factory: Callable[[], SongScanner]):
+        self._factory = factory
+        self._store = _ResourceStore("song_scanner")
+        self._lock = threading.Lock()
+
+    def get(self) -> SongScanner:
+        holder = self._store.get()
+        pid = os.getpid()
+        if holder is None or holder[0] != pid:
+            with self._lock:
+                holder = self._store.get()
+                if holder is None or holder[0] != pid:
+                    scanner = self._factory()
+                    holder = (pid, scanner)
+                    self._store.set(holder)
+        return holder[1]
+
+    def clear(self) -> None:
+        holder = self._store.pop()
+        if holder is None:
+            return
+        _, scanner = holder
+        closer = getattr(scanner, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                LOGGER.debug("failed to close SongScanner during clear", exc_info=True)
+
+
+_mongo_dispatcher: Optional[MongoDispatcher] = None
+_redis_dispatcher: Optional[RedisDispatcher] = None
+_song_scanner_provider: Optional[SongScannerProvider] = None
+
+
+def setup_stdout_logging() -> None:
+    root = logging.getLogger()
+    server_software = os.getenv("SERVER_SOFTWARE", "")
+    is_gunicorn = "gunicorn" in server_software.lower()
+
+    if not is_gunicorn:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        handler = logging.StreamHandler(stream=sys.stdout)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
+        root.addHandler(handler)
+
+    root.setLevel(logging.DEBUG)
+    for name in ("taiko.scanner", "taiko.scanner.summary"):
+        logging.getLogger(name).propagate = True
+
+
+client = None
+db = None
+basedir = '/'
+SCAN_ON_START = False
+ENABLE_SONG_WATCHER = True
+SCAN_IGNORE_GLOBS: list[str] = []
+ADMIN_SCAN_TOKEN = ''
+SONGS_BASEURL_VALUE = ''
+COERCE_UNKNOWN_COURSE = None
+SONGS_DIR_PATH = Path('.')
+song_scanner: Optional[SongScanner] = None
+_song_watcher_handle = None
+
+
+def _resolve_baseurl(value):
+    if not value:
+        return '/songs/'
+    if value.startswith('http://') or value.startswith('https://') or value.startswith('/'):
+        return value if value.endswith('/') else value + '/'
+    resolved = basedir + value
+    return resolved if resolved.endswith('/') else resolved + '/'
 
 
 _FEATURE_MODES_MANIFEST_ENV = "FEATURE_MODES_MANIFEST"
@@ -262,124 +506,133 @@ def take_config(name, required=False):
         raise ValueError('Required option is not defined in the config.py file: {}'.format(name))
     return None
 
-app = Flask(__name__)
-app.config.setdefault('COMPRESS_MIN_SIZE', 1024)
 compress = Compress()
-compress.init_app(app)
-
-mongo_config = take_config('MONGO') or {}
-mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
-mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
-
-if mongo_uri:
-    client = MongoClient(mongo_uri)
-else:
-    if not mongo_host:
-        mongo_host = ['127.0.0.1:27017']
-    client = MongoClient(host=mongo_host)
-
-basedir = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
-
-app.secret_key = take_config('SECRET_KEY') or 'change-me'
-app.config['SESSION_TYPE'] = 'redis'
-redis_config = dict(take_config('REDIS', required=True))
-redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
-if redis_host_env:
-    redis_config['CACHE_REDIS_HOST'] = redis_host_env
-redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
-if redis_port_env:
-    redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
-redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
-if redis_password_env is not None:
-    redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
-redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
-if redis_db_env is not None:
-    redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
-app.config['SESSION_REDIS'] = Redis(
-    host=redis_config['CACHE_REDIS_HOST'],
-    port=redis_config['CACHE_REDIS_PORT'],
-    password=redis_config.get('CACHE_REDIS_PASSWORD'),
-    db=redis_config.get('CACHE_REDIS_DB'),
-)
-app.cache = Cache(app, config=redis_config)
 sess = Session()
-sess.init_app(app)
-#csrf = CSRFProtect(app)
 
-db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
-db = client[db_name]
-db.users.create_index('username', unique=True)
-try:
-    db.songs.drop_index('id_1')
-except Exception:
-    pass
-try:
-    db.songs.drop_index('songs_id_unique')
-except Exception:
-    pass
-id_string_partial_filter = {'id': {'$type': 'string'}}
-db.songs.create_index(
-    'id',
-    unique=True,
-    name='songs_id_unique',
-    partialFilterExpression=id_string_partial_filter,
-)
-try:
-    db.songs.drop_index('group_key_1')
-except Exception:
-    pass
-try:
-    db.songs.drop_index('songs_group_key_unique')
-except Exception:
-    pass
-scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
-try:
-    db.songs.create_index(
-        [('group_key', 1), ('scanner_stable_id', 1)],
-        unique=True,
-        name='songs_group_key_scanner_unique',
-        partialFilterExpression=scanner_stable_string_partial_filter,
+
+def create_app():
+    global client, db, basedir, SCAN_ON_START, ENABLE_SONG_WATCHER, SCAN_IGNORE_GLOBS
+    global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
+    global song_scanner, _song_watcher_handle
+    global _mongo_dispatcher, _redis_dispatcher, _song_scanner_provider
+
+    setup_stdout_logging()
+
+    app_instance = Flask(__name__)
+    app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
+    compress.init_app(app_instance)
+
+    mongo_config = take_config('MONGO') or {}
+    mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
+    mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
+
+    mongo_hosts = mongo_host or ['127.0.0.1:27017']
+
+    def _create_mongo_client() -> MongoClient:
+        if mongo_uri:
+            return MongoClient(mongo_uri)
+        return MongoClient(host=mongo_hosts)
+
+    basedir_value = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
+
+    app_instance.secret_key = take_config('SECRET_KEY') or 'change-me'
+    app_instance.config['SESSION_TYPE'] = 'redis'
+    redis_config = dict(take_config('REDIS', required=True))
+    redis_host_env = os.environ.get("TAIKO_WEB_REDIS_HOST")
+    if redis_host_env:
+        redis_config['CACHE_REDIS_HOST'] = redis_host_env
+    redis_port_env = os.environ.get("TAIKO_WEB_REDIS_PORT")
+    if redis_port_env:
+        redis_config['CACHE_REDIS_PORT'] = int(redis_port_env)
+    redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
+    if redis_password_env is not None:
+        redis_config['CACHE_REDIS_PASSWORD'] = redis_password_env or None
+    redis_db_env = os.environ.get("TAIKO_WEB_REDIS_DB")
+    if redis_db_env is not None:
+        redis_config['CACHE_REDIS_DB'] = int(redis_db_env)
+    db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
+
+    def _create_redis_client() -> Redis:
+        return Redis(
+            host=redis_config['CACHE_REDIS_HOST'],
+            port=redis_config['CACHE_REDIS_PORT'],
+            password=redis_config.get('CACHE_REDIS_PASSWORD'),
+            db=redis_config.get('CACHE_REDIS_DB'),
+        )
+
+    _mongo_dispatcher = MongoDispatcher(_create_mongo_client, db_name)
+    _redis_dispatcher = RedisDispatcher(_create_redis_client)
+
+    session_redis = _LazyResourceProxy(_redis_dispatcher.get_client)
+    app_instance.config['SESSION_REDIS'] = session_redis
+    app_instance.cache = Cache(app_instance, config=redis_config)
+    sess.init_app(app_instance)
+    #csrf = CSRFProtect(app)
+
+    db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
+    if os.getenv('TAIKO_INIT_INDEXES') == '1':
+        init_db_schema(_mongo_dispatcher.get_database())
+
+    basedir = basedir_value
+    client = _LazyResourceProxy(_mongo_dispatcher.get_client)
+    db = _LazyResourceProxy(_mongo_dispatcher.get_database)
+
+    SONGS_DIR_PATH = Path(
+        os.environ.get('SONGS_DIR')
+        or take_config('SONGS_DIR')
+        or os.path.join(os.getcwd(), 'public', 'songs')
+    ).expanduser().resolve()
+
+    SCAN_ON_START = take_config('SCAN_ON_START')
+    ENABLE_SONG_WATCHER_DEFAULT = True
+
+    def _coerce_bool(value, default):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        return text not in {'0', 'false', 'no', 'off'}
+
+    ENABLE_SONG_WATCHER = _coerce_bool(
+        os.environ.get('ENABLE_SONG_WATCHER'),
+        _coerce_bool(take_config('ENABLE_SONG_WATCHER'), ENABLE_SONG_WATCHER_DEFAULT),
     )
-except Exception:
-    app.logger.debug('Could not ensure compound group/stable index')
-try:
-    db.songs.drop_index('songs_scanner_stable_unique')
-except Exception:
-    pass
-try:
-    db.songs.create_index(
-        'scanner_stable_id',
-        unique=True,
-        name='songs_scanner_stable_id_unique',
-        partialFilterExpression=scanner_stable_string_partial_filter,
-    )
-except Exception:
-    app.logger.debug('Could not ensure scanner stable id index')
-try:
-    db.songs.create_index('group_key', name='songs_group_key_lookup')
-except Exception:
-    app.logger.debug('Could not ensure group_key lookup index')
-try:
-    db.songs.create_index([('audioHash', 1), ('titleNormalized', 1)], unique=True, sparse=True)
-except Exception:
-    app.logger.debug('Could not ensure audioHash/titleNormalized index')
-try:
-    db.songs.create_index('title_lc', name='songs_title_lc_index')
-except Exception:
-    app.logger.debug('Could not ensure title_lc index')
-try:
-    db.songs.create_index('category', name='songs_category_index')
-except Exception:
-    app.logger.debug('Could not ensure category index')
-db.scores.create_index('username')
-try:
-    db.song_scanner_state.create_index('tja_path', unique=True)
-except Exception:
-    app.logger.debug('Could not ensure song_scanner_state index')
-try:
-    db.counters.update_one({'_id': 'songs'}, {'$setOnInsert': {'seq': 0}}, upsert=True)
-except Exception:
-    app.logger.debug('Could not ensure songs counter document')
+    scan_env = os.environ.get('SCAN_ON_START')
+    if scan_env is not None:
+        SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
+    elif SCAN_ON_START is None:
+        SCAN_ON_START = True
+    SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
+    ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
+    SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
+    COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
+
+    def _create_song_scanner() -> SongScanner:
+        return SongScanner(
+            db=_mongo_dispatcher.get_database(),
+            songs_dir=SONGS_DIR_PATH,
+            songs_baseurl=SONGS_BASEURL_VALUE,
+            ignore_globs=SCAN_IGNORE_GLOBS,
+            coerce_unknown_course=COERCE_UNKNOWN_COURSE,
+        )
+
+    _song_scanner_provider = SongScannerProvider(_create_song_scanner)
+    song_scanner = _LazyResourceProxy(_song_scanner_provider.get)
+
+    logging.getLogger('taiko.scanner.summary').info('scan:boot marker')
+    logging.getLogger('taiko.scanner').info('scanner:boot marker')
+
+    _song_watcher_handle = None
+
+    return app_instance
+
+
+app = create_app()
 
 
 @app.route('/healthz')
@@ -402,57 +655,6 @@ def route_healthcheck():
         status['redis'] = 'error'
         return jsonify(status), 503
     return jsonify(status)
-
-def _resolve_baseurl(value):
-    if not value:
-        return '/songs/'
-    if value.startswith('http://') or value.startswith('https://') or value.startswith('/'):
-        return value if value.endswith('/') else value + '/'
-    resolved = basedir + value
-    return resolved if resolved.endswith('/') else resolved + '/'
-
-
-SONGS_DIR_PATH = Path(os.environ.get('SONGS_DIR') or take_config('SONGS_DIR') or os.path.join(os.getcwd(), 'public', 'songs')).expanduser().resolve()
-SCAN_ON_START = take_config('SCAN_ON_START')
-ENABLE_SONG_WATCHER_DEFAULT = True
-
-
-def _coerce_bool(value, default):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if not text:
-        return default
-    return text not in {'0', 'false', 'no', 'off'}
-
-
-ENABLE_SONG_WATCHER = _coerce_bool(
-    os.environ.get('ENABLE_SONG_WATCHER'),
-    _coerce_bool(take_config('ENABLE_SONG_WATCHER'), ENABLE_SONG_WATCHER_DEFAULT),
-)
-scan_env = os.environ.get('SCAN_ON_START')
-if scan_env is not None:
-    SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
-elif SCAN_ON_START is None:
-    SCAN_ON_START = True
-SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
-ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
-SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
-COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
-
-song_scanner = SongScanner(
-    db=db,
-    songs_dir=SONGS_DIR_PATH,
-    songs_baseurl=SONGS_BASEURL_VALUE,
-    ignore_globs=SCAN_IGNORE_GLOBS,
-    coerce_unknown_course=COERCE_UNKNOWN_COURSE,
-)
-
-_song_watcher_handle = None
 
 
 class HashException(Exception):
