@@ -95,6 +95,7 @@ assert data.get("status") == "ok", f"Unexpected health status: {data}"
 assert data.get("mongo") == "ok", f"Mongo not ready: {data}"
 assert data.get("redis") == "ok", f"Redis not ready: {data}"
 PY
+|| { echo "[smoke] health payload validation failed" >&2; exit 1; }
 
 echo "Checking CSRF token endpoint..."
 csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
@@ -119,6 +120,7 @@ except json.JSONDecodeError as exc:
 assert data.get("status") == "ok", f"Unexpected csrftoken status: {data}"
 assert isinstance(data.get("token"), str) and data["token"], "CSRF token is empty"
 PY
+|| { echo "[smoke] csrftoken payload validation failed" >&2; exit 1; }
 
 echo "Checking songs catalog endpoint..."
 songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
@@ -143,5 +145,6 @@ except json.JSONDecodeError as exc:
 if not isinstance(data, list):
     raise SystemExit(f"Expected list payload, got {type(data)!r}")
 PY
+|| { echo "[smoke] songs payload validation failed" >&2; exit 1; }
 
 echo "Smoke tests passed."
