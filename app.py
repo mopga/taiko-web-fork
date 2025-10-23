@@ -1828,9 +1828,9 @@ def perform_song_scan(*, full: bool = False):
         invalidate_category_cache()
     if leader:
         app.logger.info("Song scan finished: %s", summary)
+        _maybe_log_startup_duration(fast_path=fast_path)
     else:
         app.logger.info("Song scan skipped (no leader): %s", summary)
-    _maybe_log_startup_duration(fast_path=fast_path)
     return summary
 
 

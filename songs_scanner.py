@@ -4602,8 +4602,8 @@ class SongScanner:
                 if not self._acquire_leader_lock():
                     summary['leader'] = False
                     summary['skipped_due_to_leader'] = True
-                else:
-                    summary['leader'] = True
+                    return summary
+                summary['leader'] = True
                 LOGGER.info('scan: fast-path (no changes)')
                 return summary
 
@@ -5131,6 +5131,7 @@ class SongScanner:
             acquired = client.set(self._leader_lock_key, new_token, nx=True, ex=self._leader_lock_ttl)
         except Exception:  # pragma: no cover - redis access best effort
             LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
+            self._leader_lock_token = None
             return False
         if acquired:
             self._leader_lock_token = new_token
