@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple, Callable
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlparse
 import unicodedata
 
@@ -93,10 +93,56 @@ VALIDATION_ERROR_ISSUE = "strict-validation-error"
 from tja_validator import get_tja_validator
 
 
+if TYPE_CHECKING:  # pragma: no cover - optional Redis dependency
+    from redis import Redis
+
+
 TJA_VALIDATOR = get_tja_validator()
 
 
 _HANG_WATCHDOG_ARMED = False
+
+
+def compute_fs_digest(root: Path) -> Tuple[str, int]:
+    """Return a checksum and file count for ``root`` without reading file bodies."""
+
+    try:
+        root_path = Path(root).resolve()
+    except FileNotFoundError:
+        root_path = Path(root)
+
+    if not root_path.exists():
+        return hashlib.sha1(b"").hexdigest(), 0
+
+    hasher = hashlib.sha1()
+    files = 0
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames.sort()
+        filenames.sort()
+        base = Path(dirpath)
+        for name in filenames:
+            candidate = base / name
+            try:
+                if candidate.is_symlink():
+                    continue
+                stat_result = candidate.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                LOGGER.debug("Failed to stat %s during digest", candidate, exc_info=True)
+                continue
+            try:
+                relative = candidate.relative_to(root_path)
+            except ValueError:
+                LOGGER.debug("Skipping file outside root during digest: %s", candidate)
+                continue
+            mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+            payload = f"{relative.as_posix()}\0{stat_result.st_size}\0{mtime_ns}\n"
+            hasher.update(payload.encode("utf-8", "surrogateescape"))
+            files += 1
+
+    return hasher.hexdigest(), files
 
 
 def _validation_warning(message: str, *args, **kwargs) -> None:
@@ -2372,6 +2418,7 @@ class SongScanner:
         songs_baseurl: str,
         ignore_globs: Optional[Iterable[str]] = None,
         coerce_unknown_course: Optional[str] = None,
+        redis_client: Optional["Redis"] = None,
     ) -> None:
         LOGGER.info("scanner worker online pid=%d", os.getpid())
         _maybe_enable_hang_watchdog()
@@ -2380,6 +2427,20 @@ class SongScanner:
         self._songs_root = songs_dir.resolve()
         self.songs_baseurl = songs_baseurl
         self.ignore_globs = list(ignore_globs or [])
+        validated_redis: Optional["Redis"] = None
+        if redis_client is not None:
+            try:
+                from redis import Redis as _Redis  # type: ignore
+            except Exception:  # pragma: no cover - redis optional at runtime
+                _Redis = None  # type: ignore[assignment]
+            if _Redis is not None and isinstance(redis_client, _Redis):
+                validated_redis = redis_client
+            else:
+                LOGGER.debug(
+                    "scanner redis client rejected: type=%s",
+                    type(redis_client).__name__,
+                )
+        self._redis: Optional["Redis"] = validated_redis
         self._coerce_unknown_course: Optional[str] = None
         if coerce_unknown_course:
             token = coerce_unknown_course.strip()
@@ -2394,8 +2455,12 @@ class SongScanner:
         self._group_locks_guard = threading.Lock()
         self._state_collection = getattr(self.db, 'song_scanner_state', None)
         self._manifest_collection = getattr(self.db, 'songs_manifest', None)
+        self._meta_collection = getattr(self.db, 'meta', None)
         self._manifest_checksum: Optional[str] = None
         self._active_summary: Optional[Dict[str, int]] = None
+        self._leader_lock_token: Optional[str] = None
+        self._leader_lock_key = 'taiko:scanner:leader'
+        self._leader_lock_ttl = 600
         db_name = getattr(self.db, 'name', None)
         client = getattr(self.db, 'client', None)
         host_label: Optional[str] = None
@@ -4511,6 +4576,47 @@ class SongScanner:
             'skipped': 0,
         }
         self._active_summary = summary
+        performed_scan = False
+        manifest_meta = self._load_manifest_meta()
+        if manifest_meta is None:
+            full = True
+        elif bool(manifest_meta.get('force')):
+            full = True
+
+        checksum, files_count = compute_fs_digest(self.songs_dir)
+        summary['files_count'] = files_count
+        summary['fs_checksum'] = checksum
+
+        if not self.songs_dir.exists():
+            LOGGER.warning("Songs directory %s does not exist", self.songs_dir)
+            summary['leader'] = self.has_leader_lock()
+            return summary
+
+        if not full:
+            stored_checksum = manifest_meta.get('checksum') if isinstance(manifest_meta, dict) else None
+            stored_count = manifest_meta.get('files_count') if isinstance(manifest_meta, dict) else None
+            if stored_checksum == checksum and stored_count == files_count:
+                if stored_checksum:
+                    summary['manifest_checksum'] = stored_checksum
+                summary['fast_path'] = True
+                if not self._acquire_leader_lock():
+                    summary['leader'] = False
+                    summary['skipped_due_to_leader'] = True
+                    return summary
+                summary['leader'] = True
+                LOGGER.info('scan: fast-path (no changes)')
+                return summary
+
+        if not self._acquire_leader_lock():
+            if isinstance(manifest_meta, dict) and manifest_meta.get('checksum'):
+                summary['manifest_checksum'] = manifest_meta.get('checksum')
+            summary['leader'] = False
+            summary['skipped_due_to_leader'] = True
+            return summary
+
+        summary['leader'] = True
+        performed_scan = True
+
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
         managed_songs: Dict[int, bool] = {}
@@ -4547,10 +4653,6 @@ class SongScanner:
             doc_id = doc.get('id')
             if isinstance(doc_id, int):
                 managed_songs[doc_id] = bool(doc.get('enabled', True))
-
-        if not self.songs_dir.exists():
-            LOGGER.warning("Songs directory %s does not exist", self.songs_dir)
-            return summary
 
         aggregated_records: Dict[str, List[TjaImportRecord]] = defaultdict(list)
         records_by_path: Dict[str, TjaImportRecord] = {}
@@ -4955,6 +5057,9 @@ class SongScanner:
             if previous_enabled:
                 summary['disabled'] += 1
 
+        if performed_scan:
+            self._update_manifest_meta(checksum, files_count)
+
         self._metrics.flush()
 
         return summary
@@ -4962,6 +5067,107 @@ class SongScanner:
     @property
     def watchdog_supported(self) -> bool:
         return self._watchdog_supported
+
+    def has_leader_lock(self) -> bool:
+        client = self._redis
+        if client is None:
+            if self._leader_lock_token is not None:
+                LOGGER.debug('scanner leader lock unavailable: redis client missing')
+            self._leader_lock_token = None
+            return False
+        token = self._leader_lock_token
+        if token is None:
+            LOGGER.debug('scanner leader lock unavailable: token missing')
+            return False
+        try:
+            value = client.get(self._leader_lock_key)
+        except Exception:  # pragma: no cover - redis access best effort
+            LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
+            self._leader_lock_token = None
+            return False
+        if value is None:
+            LOGGER.debug('scanner leader lock unavailable: key missing on redis')
+            self._leader_lock_token = None
+            return False
+        if isinstance(value, bytes):
+            try:
+                value = value.decode('utf-8')
+            except Exception:
+                value = None
+        if value == token:
+            return True
+        LOGGER.debug('scanner leader lock unavailable: token mismatch')
+        self._leader_lock_token = None
+        return False
+
+    def _acquire_leader_lock(self) -> bool:
+        token = self._leader_lock_token
+        client = self._redis
+        if client is None:
+            if token is None:
+                self._leader_lock_token = f"local-{os.getpid()}"
+            return True
+        if token is not None:
+            try:
+                current = client.get(self._leader_lock_key)
+            except Exception:  # pragma: no cover - redis access best effort
+                LOGGER.debug('Failed to refresh scanner leader lock', exc_info=True)
+                self._leader_lock_token = None
+                return False
+            if isinstance(current, bytes):
+                try:
+                    current = current.decode('utf-8')
+                except Exception:
+                    current = None
+            if current == token:
+                try:
+                    client.expire(self._leader_lock_key, self._leader_lock_ttl)
+                except Exception:  # pragma: no cover - ttl refresh best effort
+                    LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
+                return True
+            self._leader_lock_token = None
+        new_token = f"{os.getpid()}-{time.time():.6f}-{random.randint(0, 1_000_000)}"
+        try:
+            acquired = client.set(self._leader_lock_key, new_token, nx=True, ex=self._leader_lock_ttl)
+        except Exception:  # pragma: no cover - redis access best effort
+            LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
+            self._leader_lock_token = None
+            return False
+        if acquired:
+            self._leader_lock_token = new_token
+            return True
+        return False
+
+    def _load_manifest_meta(self) -> Optional[Dict[str, object]]:
+        collection = self._meta_collection
+        if collection is None:
+            return None
+        try:
+            doc = collection.find_one({'_id': 'songs_manifest'})
+        except Exception:  # pragma: no cover - tolerate transient meta errors
+            LOGGER.debug('Failed to load songs manifest meta document', exc_info=True)
+            return None
+        if isinstance(doc, dict):
+            return dict(doc)
+        return None
+
+    def _update_manifest_meta(self, checksum: str, files_count: int) -> None:
+        collection = self._meta_collection
+        if collection is None:
+            return
+        payload = {
+            'checksum': checksum,
+            'files_count': files_count,
+            'updated_at': datetime.now(UTC),
+        }
+        update = {
+            '$set': payload,
+            '$unset': {'force': ''},
+        }
+        try:
+            collection.update_one({'_id': 'songs_manifest'}, update, upsert=True)
+        except Exception:  # pragma: no cover - tolerate transient meta errors
+            LOGGER.debug('Failed to update songs manifest meta document', exc_info=True)
 
     def _ensure_manifest_indexes(self) -> None:
         collection = self._manifest_collection

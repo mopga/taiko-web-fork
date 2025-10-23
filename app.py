@@ -58,6 +58,10 @@ from tools.init_db_schema import init_db_schema
 LOGGER = logging.getLogger(__name__)
 
 
+_startup_scan_started_at: Optional[float] = None
+_startup_scan_logged = False
+
+
 class _ResourceStore:
     def __init__(self, key: str):
         self._key = key
@@ -270,7 +274,7 @@ def setup_stdout_logging() -> None:
 client = None
 db = None
 basedir = '/'
-SCAN_ON_START = False
+SCAN_ON_START = 'auto'
 ENABLE_SONG_WATCHER = True
 SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
@@ -515,8 +519,12 @@ def create_app():
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
     global song_scanner, _song_watcher_handle
     global _mongo_dispatcher, _redis_dispatcher, _song_scanner_provider
+    global _startup_scan_started_at, _startup_scan_logged
 
     setup_stdout_logging()
+
+    _startup_scan_started_at = time.monotonic()
+    _startup_scan_logged = False
 
     app_instance = Flask(__name__)
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
@@ -583,7 +591,23 @@ def create_app():
         or os.path.join(os.getcwd(), 'public', 'songs')
     ).expanduser().resolve()
 
-    SCAN_ON_START = take_config('SCAN_ON_START')
+    def _normalise_scan_mode(value) -> str:
+        if value is None:
+            return 'auto'
+        if isinstance(value, bool):
+            return 'force' if value else 'skip'
+        text = str(value).strip().lower()
+        if not text:
+            return 'auto'
+        if text in {'auto', 'force', 'skip'}:
+            return text
+        if text in {'1', 'true', 'yes', 'on', 'full'}:
+            return 'force'
+        if text in {'0', 'false', 'no', 'off', 'none'}:
+            return 'skip'
+        return 'auto'
+
+    SCAN_ON_START = _normalise_scan_mode(take_config('SCAN_ON_START'))
     ENABLE_SONG_WATCHER_DEFAULT = True
 
     def _coerce_bool(value, default):
@@ -604,9 +628,7 @@ def create_app():
     )
     scan_env = os.environ.get('SCAN_ON_START')
     if scan_env is not None:
-        SCAN_ON_START = scan_env.lower() in ('1', 'true', 'yes', 'on')
-    elif SCAN_ON_START is None:
-        SCAN_ON_START = True
+        SCAN_ON_START = _normalise_scan_mode(scan_env)
     SCAN_IGNORE_GLOBS = take_config('SCAN_IGNORE_GLOBS') or ['**/.DS_Store', '**/Thumbs.db']
     ADMIN_SCAN_TOKEN = os.environ.get('ADMIN_SCAN_TOKEN') or take_config('ADMIN_SCAN_TOKEN') or 'change-me'
     SONGS_BASEURL_VALUE = _resolve_baseurl(os.environ.get('SONGS_BASEURL') or take_config('SONGS_BASEURL'))
@@ -619,6 +641,7 @@ def create_app():
             songs_baseurl=SONGS_BASEURL_VALUE,
             ignore_globs=SCAN_IGNORE_GLOBS,
             coerce_unknown_course=COERCE_UNKNOWN_COURSE,
+            redis_client=app_instance.config.get('SESSION_REDIS'),
         )
 
     _song_scanner_provider = SongScannerProvider(_create_song_scanner)
@@ -633,6 +656,16 @@ def create_app():
 
 
 app = create_app()
+
+
+def _maybe_log_startup_duration(*, fast_path: bool) -> None:
+    global _startup_scan_started_at, _startup_scan_logged
+    if _startup_scan_started_at is None or _startup_scan_logged:
+        return
+    duration = time.monotonic() - _startup_scan_started_at
+    logger = app.logger if 'app' in globals() else LOGGER
+    logger.info('Song scan startup_duration_seconds=%.3f fast_path=%s', duration, fast_path)
+    _startup_scan_logged = True
 
 
 @app.route('/healthz')
@@ -1788,8 +1821,16 @@ def invalidate_category_cache():
 
 def perform_song_scan(*, full: bool = False):
     summary = song_scanner.scan(full=full)
-    invalidate_category_cache()
-    app.logger.info("Song scan finished: %s", summary)
+    summary_dict = summary if isinstance(summary, dict) else {}
+    leader = bool(summary_dict.get('leader', True))
+    fast_path = summary_dict.get('fast_path') is True
+    if leader and not fast_path:
+        invalidate_category_cache()
+    if leader:
+        app.logger.info("Song scan finished: %s", summary)
+        _maybe_log_startup_duration(fast_path=fast_path)
+    else:
+        app.logger.info("Song scan skipped (no leader): %s", summary)
     return summary
 
 
@@ -2119,12 +2160,6 @@ def send_songs(ref):
 def send_manifest():
     return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
 
-if SCAN_ON_START:
-    try:
-        perform_song_scan()
-    except Exception:
-        app.logger.exception('Automatic song scan failed')
-
 
 def _start_song_directory_watcher():
     global _song_watcher_handle
@@ -2139,6 +2174,9 @@ def _start_song_directory_watcher():
     if not SONGS_DIR_PATH.exists():
         app.logger.warning('Songs directory %s missing; live song updates disabled', SONGS_DIR_PATH)
         return
+    if hasattr(song_scanner, 'has_leader_lock') and not song_scanner.has_leader_lock():
+        app.logger.info('Song directory watcher not started: scanner is not leader')
+        return
 
     def _run_scan():
         with app.app_context():
@@ -2150,7 +2188,7 @@ def _start_song_directory_watcher():
     try:
         handle = song_scanner.start_watcher(callback=_run_scan, debounce_seconds=0.75)
         if handle:
-            app.logger.info('Song directory watcher started')
+            app.logger.info('Song directory watcher started (pid=%s)', os.getpid())
             _song_watcher_handle = handle
     except KeyboardInterrupt:
         raise
@@ -2158,6 +2196,18 @@ def _start_song_directory_watcher():
         app.logger.error('Failed to start song directory watcher (exiting): %s', exc, exc_info=True)
     except Exception:
         app.logger.exception('Failed to start song directory watcher')
+
+
+# Run an eager scan at startup when configured and immediately start the
+# directory watcher if this process currently owns the scanner leader lock.
+if SCAN_ON_START != 'skip':
+    try:
+        perform_song_scan(full=SCAN_ON_START == 'force')
+    except Exception:
+        app.logger.exception('Automatic song scan failed')
+    else:
+        if song_scanner.has_leader_lock():
+            _start_song_directory_watcher()
 
 
 # Flask 3 removed the ``before_serving`` decorator. Provide a compatible fallback
