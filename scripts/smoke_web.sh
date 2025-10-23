@@ -22,17 +22,17 @@ need jq
 COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 SONGS_DIR="$REPO_ROOT/songs"
 TMP_HEALTH="$(mktemp)"
-TMP_HEALTH_ERR="${TMP_HEALTH}.err"
+TMP_HEALTH_ERR="$(mktemp)"
 
 mkdir -p "$SONGS_DIR"
 
 cleanup() {
   local exit_code="$1"
   if [[ -f "$TMP_HEALTH" ]]; then
-    rm -f "$TMP_HEALTH"
+    rm -f "$TMP_HEALTH" || true
   fi
   if [[ -f "$TMP_HEALTH_ERR" ]]; then
-    rm -f "$TMP_HEALTH_ERR"
+    rm -f "$TMP_HEALTH_ERR" || true
   fi
   if [[ "${SMOKE_WEB_DEBUG:-}" != "" || "$exit_code" -ne 0 ]]; then
     echo "\n--- docker compose logs (tail) ---"
@@ -81,7 +81,12 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
-python3 - "$TMP_HEALTH" <<'PY'
+if ! python3 - "$TMP_HEALTH" <<'PY'; then
+    echo "[smoke] healthz validation failed" >&2
+    echo "---- response body ----" >&2
+    cat "$TMP_HEALTH" >&2 || true
+    exit 1
+fi
 import json
 import sys
 from pathlib import Path
@@ -95,7 +100,6 @@ assert data.get("status") == "ok", f"Unexpected health status: {data}"
 assert data.get("mongo") == "ok", f"Mongo not ready: {data}"
 assert data.get("redis") == "ok", f"Redis not ready: {data}"
 PY
-|| { echo "[smoke] health payload validation failed" >&2; exit 1; }
 
 echo "Checking CSRF token endpoint..."
 csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
@@ -110,7 +114,12 @@ csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csr
   fi
   exit 1
 }
-printf '%s' "$csrf_payload" | python3 - <<'PY'
+if ! printf '%s' "$csrf_payload" | python3 - <<'PY'; then
+    echo "[smoke] csrftoken payload validation failed" >&2
+    echo "---- response body ----" >&2
+    printf '%s' "$csrf_payload" >&2
+    exit 1
+fi
 import json, sys
 payload = sys.stdin.read()
 try:
@@ -120,7 +129,6 @@ except json.JSONDecodeError as exc:
 assert data.get("status") == "ok", f"Unexpected csrftoken status: {data}"
 assert isinstance(data.get("token"), str) and data["token"], "CSRF token is empty"
 PY
-|| { echo "[smoke] csrftoken payload validation failed" >&2; exit 1; }
 
 echo "Checking songs catalog endpoint..."
 songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
@@ -135,7 +143,12 @@ songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/so
   fi
   exit 1
 }
-printf '%s' "$songs_payload" | python3 - <<'PY'
+if ! printf '%s' "$songs_payload" | python3 - <<'PY'; then
+    echo "[smoke] songs payload validation failed" >&2
+    echo "---- response body ----" >&2
+    printf '%s' "$songs_payload" >&2
+    exit 1
+fi
 import json, sys
 payload = sys.stdin.read()
 try:
@@ -145,6 +158,5 @@ except json.JSONDecodeError as exc:
 if not isinstance(data, list):
     raise SystemExit(f"Expected list payload, got {type(data)!r}")
 PY
-|| { echo "[smoke] songs payload validation failed" >&2; exit 1; }
 
 echo "Smoke tests passed."
