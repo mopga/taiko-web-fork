@@ -77,6 +77,14 @@ class MongoSongStore(SongStore):
     def delete_many(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         return self._collection().delete_many(filter, *args, **kwargs)
 
+    def bulk_write(
+        self,
+        operations: Sequence[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return self._collection().bulk_write(operations, *args, **kwargs)
+
     def count_documents(
         self,
         filter: Mapping[str, Any],

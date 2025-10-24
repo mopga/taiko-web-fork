@@ -20,7 +20,19 @@ from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 from urllib.parse import unquote, urlparse
 import unicodedata
 
@@ -4818,18 +4830,40 @@ class SongScanner:
         )
 
         songs_count_value = self._count_enabled_songs()
+        if songs_count_value is not None:
+            summary['songs_count_before'] = songs_count_value
+
+        if (
+            digest_equal
+            and manifest_documents == 0
+            and (songs_count_value is None or songs_count_value == 0)
+        ):
+            summary['fast_path'] = True
+            summary['reason'] = 'digest_equal_empty'
+            self._log_scan_outcome(summary, fast_path=True, reason='digest_equal_empty')
+            refresher_stack.close()
+            self._active_refresher_stack = None
+            return summary
+
         manifest_has_documents = manifest_documents > 0
         safe_fast_path = (
             digest_equal
             and manifest_has_documents
             and songs_count_value is not None
-            and songs_count_value > 0
+            and songs_count_value >= manifest_documents
+            and manifest_documents > 0
         )
-        rehydrate_needed = (
+
+        rehydrate_mode: Optional[str] = None
+        if (
             digest_equal
             and manifest_has_documents
-            and songs_count_value == 0
-        )
+            and songs_count_value is not None
+        ):
+            if songs_count_value <= 0:
+                rehydrate_mode = 'full'
+            elif songs_count_value < manifest_documents:
+                rehydrate_mode = 'missing'
 
         if safe_fast_path:
             summary['fast_path'] = True
@@ -4844,22 +4878,54 @@ class SongScanner:
             self._active_refresher_stack = None
             return summary
 
-        if rehydrate_needed:
+        if rehydrate_mode is not None:
             if redis_available and not self._acquire_leader_lock():
                 summary['skipped_due_to_leader'] = True
                 self._log_scan_outcome(summary, fast_path=False, reason='lock_miss')
                 refresher_stack.close()
                 self._active_refresher_stack = None
                 return summary
-            LOGGER.info(
-                'Songs collection is empty while manifest exists; materializing songs from manifest...'
+            summary['rehydrate_mode'] = rehydrate_mode
+            summary.setdefault('rehydrated', 0)
+            if rehydrate_mode == 'full':
+                LOGGER.info(
+                    'Songs collection is empty while manifest exists; materializing songs from manifest...'
+                )
+            else:
+                LOGGER.info(
+                    'Songs collection partially diverged from manifest (songs=%s < manifest=%s); '
+                    'rehydrating missing entries...',
+                    songs_count_value,
+                    manifest_documents,
+                )
+            rehydrate_result = self._materialize_songs_from_manifest(
+                summary,
+                mode=rehydrate_mode,
+                manifest_documents=manifest_documents,
+                songs_count_before=songs_count_value,
             )
-            if self._materialize_songs_from_manifest(summary):
-                self._log_scan_outcome(summary, fast_path=False, reason='rehydrate_from_manifest')
-                refresher_stack.close()
-                self._active_refresher_stack = None
-                return summary
-            LOGGER.info('Manifest rehydration unavailable or incomplete; running full scan...')
+            if rehydrate_result is not None:
+                summary['reason'] = 'rehydrate_from_manifest'
+                songs_count_after = rehydrate_result.get('songs_count_after')
+                summary['songs_count_after'] = songs_count_after
+                consistent = rehydrate_result.get('consistent')
+                rehydrated_total = rehydrate_result.get('rehydrated', 0)
+                if consistent:
+                    if manifest_checksum and files_count is not None:
+                        self._update_manifest_meta(manifest_checksum, files_count, manifest_documents)
+                    LOGGER.info(
+                        'Songs collection reconciled with manifest (mode=%s, rehydrated=%s, total=%s)',
+                        rehydrate_mode,
+                        rehydrated_total,
+                        songs_count_after,
+                    )
+                    self._log_scan_outcome(summary, fast_path=False, reason='rehydrate_from_manifest')
+                    refresher_stack.close()
+                    self._active_refresher_stack = None
+                    return summary
+                LOGGER.info('Manifest rehydration incomplete; running full scan...')
+            else:
+                LOGGER.info('Manifest rehydration unavailable; running full scan...')
 
         if redis_available:
             if not self._acquire_leader_lock():
@@ -5584,7 +5650,14 @@ class SongScanner:
             return None
         return value
 
-    def _materialize_songs_from_manifest(self, summary: Dict[str, int]) -> bool:
+    def _materialize_songs_from_manifest(
+        self,
+        summary: Dict[str, object],
+        *,
+        mode: str,
+        manifest_documents: int,
+        songs_count_before: Optional[int],
+    ) -> Optional[Dict[str, object]]:
         song_store = self._song_store
         manifest_store = self._manifest_store
         if song_store is None or manifest_store is None:
@@ -5593,23 +5666,87 @@ class SongScanner:
                 song_store,
                 manifest_store,
             )
-            return False
+            return None
         try:
             cursor = manifest_store.find({'_id': {'$ne': '__meta__'}})
         except Exception:  # pragma: no cover - tolerate manifest enumeration errors
             LOGGER.debug('Failed to enumerate manifest entries for rehydration', exc_info=True)
-            return False
+            return None
+
+        existing_enabled_ids: Set[str] = set()
+        if mode == 'missing':
+            try:
+                existing_cursor = song_store.find(
+                    {'scanner_stable_id': {'$type': 'string'}},
+                    {'scanner_stable_id': 1, 'disabled': 1},
+                )
+                for raw_doc in existing_cursor:
+                    if not isinstance(raw_doc, Mapping):
+                        continue
+                    stable_id = raw_doc.get('scanner_stable_id')
+                    if not isinstance(stable_id, str) or not stable_id:
+                        continue
+                    disabled_flag = raw_doc.get('disabled')
+                    if disabled_flag is True:
+                        continue
+                    existing_enabled_ids.add(stable_id)
+            except Exception:  # pragma: no cover - tolerate storage access failures
+                LOGGER.debug('Failed to enumerate existing songs for missing rehydrate', exc_info=True)
+
         processed = 0
         inserted = 0
         updated = 0
         errors = 0
+        operations: List[Tuple[Mapping[str, object], Mapping[str, object]]] = []
         now = datetime.now(UTC)
+
+        def _flush_operations() -> None:
+            nonlocal operations, inserted, updated, errors
+            if not operations:
+                return
+            op_payloads = [
+                UpdateOne(filter_doc, update_doc, upsert=True)
+                for filter_doc, update_doc in operations
+            ]
+            bulk_callable = getattr(song_store, 'bulk_write', None)
+            if callable(bulk_callable):
+                try:
+                    bulk_result = bulk_callable(op_payloads, ordered=False)
+                except Exception:  # pragma: no cover - fall back on sequential execution
+                    LOGGER.warning('Bulk rehydrate write failed; falling back to sequential mode', exc_info=True)
+                else:
+                    batch_inserted = int(getattr(bulk_result, 'upserted_count', 0) or getattr(bulk_result, 'inserted_count', 0) or 0)
+                    batch_modified = int(getattr(bulk_result, 'modified_count', 0) or 0)
+                    inserted += batch_inserted
+                    updated += batch_modified
+                    operations = []
+                    return
+            # Sequential fallback path
+            for filter_doc, update_doc in operations:
+                try:
+                    result = song_store.update_one(filter_doc, update_doc, upsert=True)
+                except Exception:  # pragma: no cover - tolerate transient write issues
+                    LOGGER.warning(
+                        'Failed to rehydrate song %s from manifest',
+                        filter_doc.get('scanner_stable_id'),
+                        exc_info=True,
+                    )
+                    errors += 1
+                    continue
+                if getattr(result, 'upserted_id', None) is not None:
+                    inserted += 1
+                elif getattr(result, 'matched_count', 0) and getattr(result, 'modified_count', 0):
+                    updated += 1
+            operations = []
+
         for raw_entry in cursor:
             if not isinstance(raw_entry, dict):
                 continue
             entry = dict(raw_entry)
             stable_id = entry.get('id') or entry.get('_id')
             if not isinstance(stable_id, str) or not stable_id:
+                continue
+            if mode == 'missing' and stable_id in existing_enabled_ids:
                 continue
             entry.pop('_id', None)
             raw_difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
@@ -5674,40 +5811,50 @@ class SongScanner:
                 '$set': update_payload,
                 '$setOnInsert': set_on_insert,
             }
-            try:
-                result = song_store.update_one(
-                    {'scanner_stable_id': stable_id},
-                    update_document,
-                    upsert=True,
-                )
-            except Exception:  # pragma: no cover - tolerate transient write issues
-                LOGGER.warning('Failed to rehydrate song %s from manifest', stable_id, exc_info=True)
-                errors += 1
-                continue
+            operations.append(({'scanner_stable_id': stable_id}, update_document))
             processed += 1
-            if getattr(result, 'upserted_id', None) is not None:
-                inserted += 1
-            elif getattr(result, 'matched_count', 0):
-                if getattr(result, 'modified_count', 0):
-                    updated += 1
-            else:
-                inserted += 1
-        if not processed:
-            return False
+            if len(operations) >= 500:
+                _flush_operations()
+
+        _flush_operations()
+
         total_upserts = inserted + updated
         if total_upserts:
             self._metrics.increment('songs_upserted_total', total_upserts)
         if inserted:
             self._metrics.increment('songs_inserted_total', inserted)
+
+        if songs_count_before is not None:
+            summary.setdefault('songs_count_before', songs_count_before)
+
+        songs_count_after = self._count_enabled_songs()
+        if songs_count_after is not None:
+            summary['songs_count_after'] = songs_count_after
+
         summary['found'] = processed
         summary['inserted'] = inserted
         summary['updated'] = updated
-        summary['manifest_documents'] = processed
+        summary['rehydrated'] = total_upserts
+        summary['manifest_documents'] = manifest_documents
         summary['errors'] = summary.get('errors', 0) + errors
         summary.setdefault('disabled', 0)
         summary.setdefault('skipped', 0)
-        summary['reason'] = 'rehydrate_from_manifest'
-        return True
+
+        consistent = (
+            songs_count_after is None
+            or manifest_documents == 0
+            or (songs_count_after >= manifest_documents and manifest_documents > 0)
+        )
+
+        return {
+            'processed': processed,
+            'rehydrated': total_upserts,
+            'inserted': inserted,
+            'updated': updated,
+            'errors': errors,
+            'songs_count_after': songs_count_after,
+            'consistent': consistent,
+        }
 
     def _ensure_manifest_indexes(self) -> None:
         store = self._manifest_store

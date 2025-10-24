@@ -36,6 +36,25 @@ class _DummyUpdateResult:
         self.acknowledged = True
 
 
+class _DummyBulkWriteResult:
+    def __init__(
+        self,
+        *,
+        matched: int,
+        modified: int,
+        upserted: int,
+    ) -> None:
+        self.matched_count = matched
+        self.modified_count = modified
+        self.upserted_count = upserted
+        self.inserted_count = upserted
+        self.bulk_api_result = {
+            'nMatched': matched,
+            'nModified': modified,
+            'nUpserted': upserted,
+        }
+
+
 class _MemoryCollection:
     def __init__(self):
         self._docs = []
@@ -140,6 +159,37 @@ class _MemoryCollection:
                             else:
                                 doc[key] = self._clone(value)
         return _DummyUpdateResult(matched, matched, None)
+
+    def bulk_write(self, operations, ordered=False):
+        matched = 0
+        modified = 0
+        upserted = 0
+        for op in operations:
+            filter_ = None
+            update = None
+            upsert = False
+            if hasattr(op, 'args') and op.args:
+                filter_ = op.args[0]
+                update = op.args[1] if len(op.args) > 1 else None
+                upsert = bool(getattr(op, 'kwargs', {}).get('upsert'))
+            else:
+                filter_ = getattr(op, '_filter', None)
+                if filter_ is None:
+                    filter_ = getattr(op, 'filter', None)
+                update = getattr(op, '_doc', None)
+                if update is None:
+                    update = getattr(op, 'doc', None)
+                if update is None:
+                    update = getattr(op, 'update', None)
+                upsert = bool(getattr(op, '_upsert', getattr(op, 'upsert', False)))
+            if filter_ is None or update is None:
+                continue
+            result = self.update_one(filter_, update, upsert=upsert)
+            matched += result.matched_count
+            modified += result.modified_count
+            if result.upserted_id is not None:
+                upserted += 1
+        return _DummyBulkWriteResult(matched=matched, modified=modified, upserted=upserted)
 
     def _parse_array_filters(self, array_filters):
         mapping = {}
@@ -3668,8 +3718,12 @@ LEVEL:7
 
         self.assertFalse(summary.get('fast_path'))
         self.assertEqual(summary.get('reason'), 'rehydrate_from_manifest')
+        self.assertEqual(summary.get('rehydrate_mode'), 'full')
         self.assertEqual(summary.get('inserted'), 1)
         self.assertEqual(summary.get('found'), 1)
+        self.assertEqual(summary.get('rehydrated'), 1)
+        self.assertEqual(summary.get('songs_count_before'), 0)
+        self.assertEqual(summary.get('songs_count_after'), 1)
 
         songs_docs = list(db.songs.find())
         self.assertEqual(len(songs_docs), 1)
@@ -3678,6 +3732,98 @@ LEVEL:7
         self.assertTrue(song_doc.get('managed_by_scanner'))
         self.assertTrue(song_doc.get('enabled'))
         self.assertEqual(song_doc.get('title'), 'Alpha')
+
+    def test_scan_rehydrates_missing_manifest_gap(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        db.meta._docs.append({
+            '_id': 'songs_manifest',
+            'manifest_checksum': 'rehydrate-checksum',
+            'files_count': 2,
+            'manifest_documents': 2,
+        })
+        db.songs_manifest._docs.extend(
+            [
+                {
+                    '_id': 'alpha-stable',
+                    'id': 'alpha-stable',
+                    'title': 'Alpha',
+                    'subtitle': '',
+                    'category': 'General',
+                    'difficulties': {
+                        'easy': True,
+                        'normal': False,
+                        'hard': False,
+                        'oni': False,
+                        'ura': False,
+                    },
+                    'paths': {'audio_url': '/songs/alpha/main.ogg'},
+                    'preview_available': True,
+                    'source_type': 'tja',
+                    'duration_ms': 1200,
+                    'sha1': 'sha1-alpha',
+                },
+                {
+                    '_id': 'beta-stable',
+                    'id': 'beta-stable',
+                    'title': 'Beta',
+                    'subtitle': '',
+                    'category': 'General',
+                    'difficulties': {
+                        'easy': True,
+                        'normal': False,
+                        'hard': False,
+                        'oni': False,
+                        'ura': False,
+                    },
+                    'paths': {'audio_url': '/songs/beta/main.ogg'},
+                    'preview_available': False,
+                    'source_type': 'tja',
+                    'duration_ms': 900,
+                    'sha1': 'sha1-beta',
+                },
+            ]
+        )
+
+        db.songs.insert_one(
+            {
+                'scanner_stable_id': 'alpha-stable',
+                'title': 'Alpha',
+                'disabled': False,
+                'enabled': True,
+                'managed_by_scanner': True,
+            }
+        )
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 2)):
+            summary = scanner.scan(full=False)
+
+        self.assertFalse(summary.get('fast_path'))
+        self.assertEqual(summary.get('reason'), 'rehydrate_from_manifest')
+        self.assertEqual(summary.get('rehydrate_mode'), 'missing')
+        self.assertEqual(summary.get('rehydrated'), 1)
+        self.assertEqual(summary.get('inserted'), 1)
+        self.assertEqual(summary.get('found'), 1)
+        self.assertEqual(summary.get('songs_count_before'), 1)
+        self.assertEqual(summary.get('songs_count_after'), 2)
+
+        songs_docs = sorted(db.songs.find(), key=lambda doc: doc.get('scanner_stable_id'))
+        self.assertEqual(len(songs_docs), 2)
+        self.assertEqual(
+            {doc.get('scanner_stable_id') for doc in songs_docs},
+            {'alpha-stable', 'beta-stable'},
+        )
 
     def test_has_leader_lock_false_without_redis(self):
         tmp_dir = Path(self._tmp_dir())

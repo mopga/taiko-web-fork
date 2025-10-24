@@ -60,6 +60,14 @@ class SongStore(Protocol):
     ) -> Any:
         ...
 
+    def bulk_write(
+        self,
+        operations: Sequence[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
     def delete_one(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         ...
 
