@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import unicodedata
-from typing import Callable, Optional, cast
+from typing import Callable, Mapping, Optional, cast
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -340,18 +340,14 @@ def _get_manifest_store() -> Optional[ManifestStoreInterface]:
     return MANIFEST_STORE
 
 
-def _get_manifest_collection():  # backward compatibility for tests
-    return _get_manifest_store()
-
-
 def _load_manifest_meta() -> Optional[dict]:
-    store = _get_manifest_collection()
+    store = _get_manifest_store()
     if store is None:
         return None
     try:
         meta = store.find_one({'_id': '__meta__'})
-        if isinstance(meta, dict):
-            return meta
+        if isinstance(meta, Mapping):
+            return dict(meta)
     except Exception:
         app.logger.debug('Failed to load songs manifest meta', exc_info=True)
     return None
@@ -641,6 +637,7 @@ def create_app():
         mongo_database_factory=_mongo_dispatcher.get_database,
         redis_client_factory=_redis_dispatcher.get_client,
     )
+    LOGGER.info('storage bundle initialized')
     SONG_STORE = _storage_bundle.song_store
     MANIFEST_STORE = _storage_bundle.manifest_store
     LEADER_LOCK = _storage_bundle.leader_lock
@@ -2365,7 +2362,7 @@ _SONG_DETAIL_PROJECTION = {
 
 
 def _load_manifest_entries_for_ids(ids: list[str]) -> dict[str, dict]:
-    store = _get_manifest_collection()
+    store = _get_manifest_store()
     if store is None or not ids:
         return {}
     unique_ids = sorted({identifier for identifier in ids if isinstance(identifier, str) and identifier})
