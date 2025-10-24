@@ -21,6 +21,7 @@ need jq
 
 COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 SONGS_DIR="$REPO_ROOT/songs"
+# Temporary files for payload capture
 TMP_HEALTH="$(mktemp)"
 TMP_HEALTH_ERR="$(mktemp)"
 
@@ -81,6 +82,9 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
+#
+# Validate /healthz JSON (нельзя вешать `|| {...}` после heredoc!)
+#
 if ! python3 - "$TMP_HEALTH" <<'PY'; then
     echo "[smoke] healthz validation failed" >&2
     echo "---- response body ----" >&2
