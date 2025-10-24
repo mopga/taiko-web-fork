@@ -19,11 +19,13 @@ from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
 from urllib.parse import unquote, urlparse
 import unicodedata
 
 from pymongo.database import Database
+
+from storage.interfaces import LeaderLock, ManifestStore, SongStore
 
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReturnDocument, UpdateOne
@@ -2459,10 +2461,25 @@ class SongScanner:
         ignore_globs: Optional[Iterable[str]] = None,
         coerce_unknown_course: Optional[str] = None,
         redis_client: Optional["Redis"] = None,
+        song_store: Optional[SongStore] = None,
+        manifest_store: Optional[ManifestStore] = None,
+        leader_lock: Optional[LeaderLock] = None,
     ) -> None:
         LOGGER.info("scanner worker online pid=%d", os.getpid())
         _maybe_enable_hang_watchdog()
         self.db = db
+        raw_song_store = song_store if song_store is not None else getattr(db, 'songs', None)
+        self._song_store: Optional[SongStore]
+        if raw_song_store is not None:
+            self._song_store = cast(SongStore, raw_song_store)
+        else:
+            self._song_store = None
+        raw_manifest_store = manifest_store if manifest_store is not None else getattr(db, 'songs_manifest', None)
+        self._manifest_store: Optional[ManifestStore]
+        if raw_manifest_store is not None:
+            self._manifest_store = cast(ManifestStore, raw_manifest_store)
+        else:
+            self._manifest_store = None
         self.songs_dir = songs_dir
         self._songs_root = songs_dir.resolve()
         self.songs_baseurl = songs_baseurl
@@ -2508,6 +2525,7 @@ class SongScanner:
                 if parsed_ttl > 0:
                     ttl_default = parsed_ttl
         self._leader_lock_ttl = ttl_default
+        self._leader_lock: Optional[LeaderLock] = leader_lock
         db_name = getattr(self.db, 'name', None)
         client = getattr(self.db, 'client', None)
         host_label: Optional[str] = None
@@ -2570,7 +2588,10 @@ class SongScanner:
                 LOGGER.debug('Failed to ensure unique index for song_scanner_state collection')
 
         def _index_present() -> bool:
-            song_index_names = _collection_index_names(self.db.songs, 'songs')
+            song_store = self._song_store
+            if song_store is None:
+                return False
+            song_index_names = _collection_index_names(song_store, 'songs')
             if not song_index_names or not required_song_indexes.issubset(song_index_names):
                 return False
             if self._state_collection is not None:
@@ -2589,17 +2610,20 @@ class SongScanner:
 
         def _run_index_migration() -> None:
             _ensure_state_unique_index()
+            song_store = self._song_store
+            if song_store is None:
+                return
             try:
-                self.db.songs.drop_index('id_1')
+                song_store.drop_index('id_1')
             except Exception:  # pragma: no cover - tolerate legacy index absence
                 pass
             try:
-                self.db.songs.drop_index('songs_id_unique')
+                song_store.drop_index('songs_id_unique')
             except Exception:  # pragma: no cover - tolerate missing index
                 pass
             try:
                 id_string_partial_filter = {'id': {'$type': 'string'}}
-                self.db.songs.create_index(
+                song_store.create_index(
                     'id',
                     name='songs_id_unique',
                     unique=True,
@@ -2608,16 +2632,16 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure partial unique index for songs.id')
             try:
-                self.db.songs.drop_index('group_key_1')
+                song_store.drop_index('group_key_1')
             except Exception:  # pragma: no cover - tolerate legacy index absence
                 pass
             try:
-                self.db.songs.drop_index('songs_group_key_unique')
+                song_store.drop_index('songs_group_key_unique')
             except Exception:
                 pass
             scanner_stable_string_partial_filter = {'scanner_stable_id': {'$type': 'string'}}
             try:
-                self.db.songs.create_index(
+                song_store.create_index(
                     [('group_key', 1), ('scanner_stable_id', 1)],
                     name=ensure_indexes_target,
                     unique=True,
@@ -2626,11 +2650,11 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure compound unique index for songs group key')
             try:
-                self.db.songs.drop_index('songs_scanner_stable_unique')
+                song_store.drop_index('songs_scanner_stable_unique')
             except Exception:  # pragma: no cover - tolerate legacy index absence
                 pass
             try:
-                self.db.songs.create_index(
+                song_store.create_index(
                     'scanner_stable_id',
                     name='songs_scanner_stable_id_unique',
                     unique=True,
@@ -2639,7 +2663,7 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate missing create_index
                 LOGGER.debug('Failed to ensure unique index for scanner stable id')
             try:
-                self.db.songs.create_index(
+                song_store.create_index(
                     'group_key',
                     name='songs_group_key_lookup',
                 )
@@ -2656,10 +2680,10 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate best effort counter initialisation
                 LOGGER.debug('Failed to ensure songs counter document')
 
-            songs_collection = getattr(self.db, 'songs', None)
-            if songs_collection is not None:
+            song_store = self._song_store
+            if song_store is not None:
                 try:
-                    songs_collection.update_many(
+                    song_store.update_many(
                         {
                             'source_type': 'dan_dojo',
                             '$or': [
@@ -3273,6 +3297,12 @@ class SongScanner:
 
         insert_document.setdefault('scanner_stable_id', stable_song_id)
 
+        song_store = self._song_store
+        if song_store is None:
+            LOGGER.error('Song store unavailable during upsert for %s', key)
+            summary['errors'] += 1
+            return None
+
         stable_group_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id, 'group_key': key}
         stable_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
         legacy_filter: Dict[str, object] = {'group_key': key, 'scanner_stable_id': {'$exists': False}}
@@ -3350,9 +3380,13 @@ class SongScanner:
             duplicate_retry_update: Optional[Dict[str, object]] = None,
         ):
             nonlocal result_doc_override
+            store = self._song_store
+            if store is None:
+                LOGGER.error('Song store unavailable during %s phase', phase)
+                return None
             for attempt in range(3):
                 try:
-                    return self.db.songs.update_one(filter_doc, update_doc, upsert=upsert)
+                    return store.update_one(filter_doc, update_doc, upsert=upsert)
                 except Exception as exc:  # pragma: no cover - defensive around DB driver
                     if WriteError and isinstance(exc, WriteError):
                         if getattr(exc, 'code', None) == 40:
@@ -3368,7 +3402,7 @@ class SongScanner:
                         _log_duplicate(exc, attempt, phase)
                         if duplicate_retry_filter is not None:
                             try:
-                                retry_doc = self.db.songs.find_one_and_update(
+                                retry_doc = store.find_one_and_update(
                                     duplicate_retry_filter,
                                     duplicate_retry_update or update_doc,
                                     upsert=False,
@@ -3452,7 +3486,7 @@ class SongScanner:
                 result_doc = result_doc_override
             else:
                 try:
-                    result_doc = self.db.songs.find_one({'scanner_stable_id': stable_song_id})
+                    result_doc = song_store.find_one({'scanner_stable_id': stable_song_id})
                 except Exception:  # pragma: no cover - tolerate lookup issues
                     result_doc = None
 
@@ -3501,7 +3535,7 @@ class SongScanner:
             for attempt in range(3):
                 new_id = self._get_next_song_id()
                 try:
-                    self.db.songs.update_one(
+                    song_store.update_one(
                         assignment_filter,
                         {'$set': {'id': new_id, 'order': new_id}},
                     )
@@ -3526,7 +3560,7 @@ class SongScanner:
                     return None
                 latest_doc = None
                 try:
-                    latest_doc = self.db.songs.find_one(song_filter)
+                    latest_doc = song_store.find_one(song_filter)
                 except Exception:  # pragma: no cover - tolerate missing find support
                     latest_doc = None
                 if isinstance(latest_doc, dict) and isinstance(latest_doc.get('id'), int):
@@ -3549,7 +3583,7 @@ class SongScanner:
 
         if needs_refresh:
             try:
-                self.db.songs.update_one(song_filter, {'$set': base_document})
+                song_store.update_one(song_filter, {'$set': base_document})
                 if key in dirty_groups and not inserted:
                     summary['updated'] += 1
             except Exception as exc:  # pragma: no cover - tolerate transient driver issues
@@ -3599,11 +3633,11 @@ class SongScanner:
             return None
 
     def _cleanup_invalid_group_keys(self) -> None:
-        songs_collection = getattr(self.db, 'songs', None)
-        if songs_collection is None:
+        song_store = self._song_store
+        if song_store is None:
             return
         try:
-            candidates = list(songs_collection.find())
+            candidates = list(song_store.find())
         except Exception:  # pragma: no cover - tolerate missing find support
             LOGGER.debug('Failed to enumerate songs for invalid group key cleanup')
             return
@@ -3625,9 +3659,9 @@ class SongScanner:
             else:
                 delete_filter = {'group_key': group_key}
             try:
-                songs_collection.delete_many(delete_filter)
+                song_store.delete_many(delete_filter)
             except TypeError:
-                songs_collection.delete_many({'group_key': group_key})
+                song_store.delete_many({'group_key': group_key})
             except Exception:  # pragma: no cover - tolerate transient issues
                 LOGGER.debug('Failed to delete invalid song document for %s', group_key)
         if self._state_collection is not None and invalid_keys:
@@ -3644,9 +3678,13 @@ class SongScanner:
         song_filter: Dict[str, object],
         charts: List[Dict[str, object]],
     ) -> None:
+        song_store = self._song_store
+        if song_store is None:
+            LOGGER.debug('Song store unavailable while syncing charts for %s', song_filter)
+            return
         if not charts:
             try:
-                self.db.songs.update_one(song_filter, {'$set': {'charts': []}})
+                song_store.update_one(song_filter, {'$set': {'charts': []}})
             except Exception:  # pragma: no cover - collection issues are non-fatal
                 LOGGER.debug('Failed to reset charts for %s', song_filter)
             return
@@ -3679,21 +3717,21 @@ class SongScanner:
             array_filters = [match_filter]
 
             try:
-                self.db.songs.update_one(
+                song_store.update_one(
                     song_filter,
                     {'$set': {'charts.$[c]': chart_doc}},
                     array_filters=array_filters,
                 )
             except TypeError:  # pragma: no cover - fallback for in-memory tests
-                self.db.songs.update_one(song_filter, {'$set': {'charts': charts}})
+                song_store.update_one(song_filter, {'$set': {'charts': charts}})
                 return
             except Exception:  # pragma: no cover - tolerate transient issues
                 LOGGER.debug('Failed to refresh chart %s for %s', course_name, song_filter)
 
             try:
-                self.db.songs.update_one(song_filter, {'$addToSet': {'charts': chart_doc}})
+                song_store.update_one(song_filter, {'$addToSet': {'charts': chart_doc}})
             except TypeError:  # pragma: no cover - fallback for in-memory tests
-                self.db.songs.update_one(song_filter, {'$set': {'charts': charts}})
+                song_store.update_one(song_filter, {'$set': {'charts': charts}})
                 return
             except Exception:  # pragma: no cover - tolerate transient issues
                 LOGGER.debug('Failed to add chart %s for %s', course_name, song_filter)
@@ -3701,7 +3739,7 @@ class SongScanner:
         if desired_courses:
             keep_courses = sorted(desired_courses)
             try:
-                self.db.songs.update_one(
+                song_store.update_one(
                     song_filter,
                     {'$pull': {'charts': {'course': {'$nin': keep_courses}}}},
                 )
@@ -3712,7 +3750,7 @@ class SongScanner:
 
         if unknown_raw_courses:
             try:
-                self.db.songs.update_one(
+                song_store.update_one(
                     song_filter,
                     {
                         '$pull': {
@@ -4179,13 +4217,13 @@ class SongScanner:
         return hashlib.sha1(checksum_source.encode('utf-8')).hexdigest()
 
     def _sync_manifest_entries(self, entries: Dict[str, Dict[str, object]]) -> Optional[str]:
-        collection = self._manifest_collection
-        if collection is None:
+        store = self._manifest_store
+        if store is None:
             return None
         now = datetime.now(UTC)
         existing_ids: Set[str] = set()
         try:
-            cursor = collection.find({'_id': {'$ne': '__meta__'}}, {'_id': 1})
+            cursor = store.find({'_id': {'$ne': '__meta__'}}, {'_id': 1})
         except Exception:
             cursor = []
         for doc in cursor:
@@ -4198,7 +4236,7 @@ class SongScanner:
         stale_ids = existing_ids - desired_ids
         if stale_ids:
             try:
-                collection.delete_many({'_id': {'$in': list(stale_ids)}})
+                store.delete_many({'_id': {'$in': list(stale_ids)}})
             except Exception:  # pragma: no cover - best effort cleanup
                 LOGGER.debug('Failed to prune %d stale songs manifest entries', len(stale_ids))
 
@@ -4212,14 +4250,14 @@ class SongScanner:
             operations.append(UpdateOne({'_id': entry_id}, {'$set': payload}, upsert=True))
             if len(operations) >= 500:
                 try:
-                    collection.bulk_write(operations, ordered=False)
+                    store.bulk_write(operations, ordered=False)
                 except Exception:  # pragma: no cover - tolerate bulk write failures
                     LOGGER.debug('Failed to bulk write songs manifest chunk size=%d', len(operations), exc_info=True)
                 operations = []
 
         if operations:
             try:
-                collection.bulk_write(operations, ordered=False)
+                store.bulk_write(operations, ordered=False)
             except Exception:  # pragma: no cover - tolerate bulk write failures
                 LOGGER.debug('Failed to bulk write songs manifest final chunk', exc_info=True)
 
@@ -4228,7 +4266,7 @@ class SongScanner:
         previous_checksum = self._manifest_checksum
         if previous_checksum is None:
             try:
-                meta_doc = collection.find_one(
+                meta_doc = store.find_one(
                     {'_id': '__meta__'},
                     {'manifestChecksum': 1, 'manifest_checksum': 1, 'checksum': 1},
                 )
@@ -4244,7 +4282,7 @@ class SongScanner:
 
         if previous_checksum != checksum:
             try:
-                collection.update_one(
+                store.update_one(
                     {'_id': '__meta__'},
                     {
                         '$set': {
@@ -4264,11 +4302,11 @@ class SongScanner:
         return checksum
 
     def _seed_legacy_scanner_ids(self) -> None:
-        songs_collection = getattr(self.db, 'songs', None)
-        if songs_collection is None:
+        song_store = self._song_store
+        if song_store is None:
             return
         try:
-            cursor = songs_collection.find({'scanner_stable_id': {'$exists': False}})
+            cursor = song_store.find({'scanner_stable_id': {'$exists': False}})
         except Exception:  # pragma: no cover - tolerate driver absence
             LOGGER.debug('Failed to enumerate legacy songs without stable id')
             return
@@ -4287,7 +4325,7 @@ class SongScanner:
             else:
                 continue
             try:
-                result = songs_collection.update_one(update_filter, {'$set': {'scanner_stable_id': stable_id}})
+                result = song_store.update_one(update_filter, {'$set': {'scanner_stable_id': stable_id}})
             except Exception:  # pragma: no cover - tolerate update issues
                 LOGGER.debug('Failed to seed stable id for legacy song %r', document.get('group_key'))
                 continue
@@ -4348,9 +4386,13 @@ class SongScanner:
                 seq_doc = None
             if seq_doc and isinstance(seq_doc.get('value'), int):
                 current = max(current, int(seq_doc['value']))
-        try:
-            max_song = self.db.songs.find_one(sort=[('id', -1)])
-        except Exception:  # pragma: no cover - tolerate driver errors
+        song_store = self._song_store
+        if song_store is not None:
+            try:
+                max_song = song_store.find_one(sort=[('id', -1)])
+            except Exception:  # pragma: no cover - tolerate driver errors
+                max_song = None
+        else:
             max_song = None
         if max_song and isinstance(max_song.get('id'), int):
             current = max(current, int(max_song['id']))
@@ -4423,7 +4465,13 @@ class SongScanner:
             try:
                 current = self._current_song_id_ceiling()
                 seq_doc = seq.find_one({'name': 'songs'})
-                max_song = self.db.songs.find_one(sort=[('id', -1)])
+                song_store = self._song_store
+                max_song = None
+                if song_store is not None:
+                    try:
+                        max_song = song_store.find_one(sort=[('id', -1)])
+                    except Exception:
+                        max_song = None
                 if seq_doc and isinstance(seq_doc.get('value'), int):
                     current = max(current, seq_doc['value'])
                 if max_song and isinstance(max_song.get('id'), int):
@@ -4434,7 +4482,13 @@ class SongScanner:
             except Exception:  # pragma: no cover - tolerate legacy sequence failures
                 LOGGER.debug('Falling back to on-demand song id allocation')
 
-        max_song = self.db.songs.find_one(sort=[('id', -1)])
+        song_store = self._song_store
+        max_song = None
+        if song_store is not None:
+            try:
+                max_song = song_store.find_one(sort=[('id', -1)])
+            except Exception:
+                max_song = None
         if max_song and isinstance(max_song.get('id'), int):
             return int(max_song['id']) + 1
         return 1
@@ -4720,12 +4774,16 @@ class SongScanner:
             except Exception:
                 return None
 
-        try:
-            cursor = self.db.songs.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
-        except AttributeError:
-            cursor = []
-        except Exception:  # pragma: no cover - defensive when find unsupported
-            LOGGER.debug("songs.find is not available on db collection")
+        song_store = self._song_store
+        if song_store is not None:
+            try:
+                cursor = song_store.find({'managed_by_scanner': True}, {'id': 1, 'enabled': 1})
+            except AttributeError:
+                cursor = []
+            except Exception:  # pragma: no cover - defensive when find unsupported
+                LOGGER.debug("songs.find is not available on song store")
+                cursor = []
+        else:
             cursor = []
 
         for doc in cursor:
@@ -5137,7 +5195,11 @@ class SongScanner:
         missing_ids = set(managed_songs.keys()) - seen_song_ids
         for missing_id in sorted(missing_ids):
             previous_enabled = managed_songs.get(missing_id, True)
-            self.db.songs.update_one({'id': missing_id}, {'$set': {'enabled': False}})
+            if song_store is not None:
+                try:
+                    song_store.update_one({'id': missing_id}, {'$set': {'enabled': False}})
+                except Exception:
+                    LOGGER.debug('Failed to disable missing song %d', missing_id)
             if previous_enabled:
                 summary['disabled'] += 1
 
@@ -5165,6 +5227,23 @@ class SongScanner:
         return self._leader_lock_key
 
     def has_leader_lock(self) -> bool:
+        lock = self._leader_lock
+        if lock is not None:
+            token = self._leader_lock_token
+            if token is None:
+                LOGGER.debug('scanner leader lock unavailable: token missing')
+                return False
+            try:
+                owner = lock.get_owner()
+            except Exception:  # pragma: no cover - storage access best effort
+                LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
+                self._leader_lock_token = None
+                return False
+            if owner == token:
+                return True
+            LOGGER.debug('scanner leader lock unavailable: token mismatch')
+            self._leader_lock_token = None
+            return False
         client = self._redis
         if client is None:
             if self._leader_lock_token is not None:
@@ -5197,12 +5276,40 @@ class SongScanner:
         return False
 
     def _acquire_leader_lock(self) -> bool:
+        lock = self._leader_lock
+        token = self._leader_lock_token
+        if lock is not None:
+            if token is not None:
+                try:
+                    owner = lock.get_owner()
+                except Exception:  # pragma: no cover - storage access best effort
+                    LOGGER.debug('Failed to refresh scanner leader lock', exc_info=True)
+                    self._leader_lock_token = None
+                    return False
+                if owner == token:
+                    try:
+                        if lock.refresh(token, self._leader_lock_ttl):
+                            return True
+                    except Exception:  # pragma: no cover - ttl refresh best effort
+                        LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
+                    self._leader_lock_token = None
+                else:
+                    self._leader_lock_token = None
+            new_token = f"{os.getpid()}-{time.time():.6f}-{random.randint(0, 1_000_000)}"
+            try:
+                if lock.acquire(new_token, self._leader_lock_ttl):
+                    self._leader_lock_token = new_token
+                    return True
+            except Exception:  # pragma: no cover - storage access best effort
+                LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
+                self._leader_lock_token = None
+                return False
+            return False
         client = self._redis
         if client is None:
             LOGGER.debug('scanner leader lock unavailable: redis client missing')
             self._leader_lock_token = None
             return False
-        token = self._leader_lock_token
         if token is not None:
             try:
                 current = client.get(self._leader_lock_key)
@@ -5285,19 +5392,19 @@ class SongScanner:
         )
 
     def _ensure_manifest_indexes(self) -> None:
-        collection = self._manifest_collection
-        if collection is None:
+        store = self._manifest_store
+        if store is None:
             return
         try:
-            collection.create_index('title_lc', name='songs_manifest_title_lc')
+            store.create_index('title_lc', name='songs_manifest_title_lc')
         except Exception:  # pragma: no cover - index creation is best-effort
             LOGGER.debug('Failed to ensure songs manifest title index', exc_info=True)
         try:
-            collection.create_index('category', name='songs_manifest_category')
+            store.create_index('category', name='songs_manifest_category')
         except Exception:  # pragma: no cover - index creation is best-effort
             LOGGER.debug('Failed to ensure songs manifest category index', exc_info=True)
         try:
-            collection.create_index('id', unique=True, name='songs_manifest_id_unique')
+            store.create_index('id', unique=True, name='songs_manifest_id_unique')
         except Exception:  # pragma: no cover - tolerate index errors
             LOGGER.debug('Failed to ensure songs manifest id index', exc_info=True)
 

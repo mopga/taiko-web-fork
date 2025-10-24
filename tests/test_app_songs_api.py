@@ -227,7 +227,7 @@ class SongsApiTestCase(unittest.TestCase):
         songs_collection = _SongsCollection(songs_docs)
         return mock.patch.multiple(
             taiko_app,
-            _get_manifest_collection=mock.Mock(return_value=manifest_collection),
+            _get_manifest_store=mock.Mock(return_value=manifest_collection),
             db=mock.Mock(songs=songs_collection),
         )
 
@@ -562,7 +562,7 @@ class SongsApiTestCase(unittest.TestCase):
 
         with mock.patch.multiple(
             taiko_app,
-            _get_manifest_collection=mock.Mock(return_value=manifest_collection),
+            _get_manifest_store=mock.Mock(return_value=manifest_collection),
             db=failing_db,
         ):
             response = self.client.get('/api/songs/details?ids=song-1,song-2&notes=none')
