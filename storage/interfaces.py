@@ -51,6 +51,15 @@ class SongStore(Protocol):
     ) -> Any:
         ...
 
+    def replace_one(
+        self,
+        filter: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
     def update_many(
         self,
         filter: Mapping[str, Any],
@@ -60,10 +69,26 @@ class SongStore(Protocol):
     ) -> Any:
         ...
 
+    def bulk_write(
+        self,
+        operations: Sequence[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
     def delete_one(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         ...
 
     def delete_many(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    def count_documents(
+        self,
+        filter: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
         ...
 
     def create_index(self, keys: Any, *args: Any, **kwargs: Any) -> Any:

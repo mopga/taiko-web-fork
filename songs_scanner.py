@@ -20,7 +20,19 @@ from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 from urllib.parse import unquote, urlparse
 import unicodedata
 
@@ -29,20 +41,33 @@ from pymongo.database import Database
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 
 try:  # pragma: no cover - pymongo always available in production
-    from pymongo import ReturnDocument, UpdateOne
-    from pymongo.errors import DuplicateKeyError, PyMongoError, WriteError
+    from pymongo import ReplaceOne, ReturnDocument, UpdateOne
+    from pymongo.errors import BulkWriteError, DuplicateKeyError, PyMongoError, WriteError
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
     class _ReturnDocumentFallback:
         BEFORE = 0
         AFTER = 1
 
     ReturnDocument = _ReturnDocumentFallback()  # type: ignore[assignment]
+    class _ReplaceOneFallback:  # pragma: no cover - simple shim for tests
+        def __init__(self, filter, replacement, upsert=False):
+            self.filter = filter
+            self.replacement = replacement
+            self.upsert = upsert
+
+    ReplaceOne = _ReplaceOneFallback  # type: ignore[assignment]
     class _UpdateOneFallback:  # pragma: no cover - simple shim for tests
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
     UpdateOne = _UpdateOneFallback  # type: ignore[assignment]
+    class _BulkWriteErrorFallback(Exception):
+        def __init__(self, details=None):
+            super().__init__('bulk write error')
+            self.details = details or {}
+
+    BulkWriteError = _BulkWriteErrorFallback  # type: ignore[assignment]
     DuplicateKeyError = None  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
     WriteError = None  # type: ignore[assignment]
@@ -4817,7 +4842,65 @@ class SongScanner:
             and stored_manifest_files == files_count
         )
 
-        if digest_equal:
+        songs_count_value = self._count_enabled_songs()
+        if songs_count_value is not None:
+            summary['songs_count_before'] = songs_count_value
+
+        if (
+            digest_equal
+            and manifest_documents == 0
+            and (songs_count_value is None or songs_count_value == 0)
+        ):
+            LOGGER.info(
+                'Fast-path decision: digest_equal=%s manifest_documents=%d songs_count=%s mode=%s',
+                digest_equal,
+                manifest_documents,
+                songs_count_value if songs_count_value is not None else 'unknown',
+                'fast_empty',
+            )
+            summary['fast_path'] = True
+            summary['reason'] = 'digest_equal_empty'
+            self._log_scan_outcome(summary, fast_path=True, reason='digest_equal_empty')
+            refresher_stack.close()
+            self._active_refresher_stack = None
+            return summary
+
+        manifest_has_documents = manifest_documents > 0
+        safe_fast_path = (
+            digest_equal
+            and manifest_has_documents
+            and songs_count_value is not None
+            and songs_count_value >= manifest_documents
+            and manifest_documents > 0
+        )
+
+        rehydrate_mode: Optional[str] = None
+        if (
+            digest_equal
+            and manifest_has_documents
+            and songs_count_value is not None
+        ):
+            if songs_count_value <= 0:
+                rehydrate_mode = 'full'
+            elif songs_count_value < manifest_documents:
+                rehydrate_mode = 'missing'
+
+        decision_mode = 'full_scan'
+        if safe_fast_path:
+            decision_mode = 'fast'
+        elif rehydrate_mode == 'full':
+            decision_mode = 'rehydrate_full'
+        elif rehydrate_mode == 'missing':
+            decision_mode = 'rehydrate_missing'
+        LOGGER.info(
+            'Fast-path decision: digest_equal=%s manifest_documents=%d songs_count=%s mode=%s',
+            digest_equal,
+            manifest_documents,
+            songs_count_value if songs_count_value is not None else 'unknown',
+            decision_mode,
+        )
+
+        if safe_fast_path:
             summary['fast_path'] = True
             if redis_available and not self._acquire_leader_lock():
                 summary['skipped_due_to_leader'] = True
@@ -4829,6 +4912,68 @@ class SongScanner:
             refresher_stack.close()
             self._active_refresher_stack = None
             return summary
+
+        if rehydrate_mode is not None:
+            if redis_available and not self._acquire_leader_lock():
+                summary['skipped_due_to_leader'] = True
+                self._log_scan_outcome(summary, fast_path=False, reason='lock_miss')
+                refresher_stack.close()
+                self._active_refresher_stack = None
+                return summary
+            summary['rehydrate_mode'] = rehydrate_mode
+            summary.setdefault('rehydrated', 0)
+            if rehydrate_mode == 'full':
+                LOGGER.info(
+                    'Songs collection is empty while manifest exists; materializing songs from manifest...'
+                )
+            else:
+                LOGGER.info(
+                    'Songs collection partially diverged from manifest (songs=%s < manifest=%s); '
+                    'rehydrating missing entries...',
+                    songs_count_value,
+                    manifest_documents,
+                )
+            rehydrate_result = self._materialize_songs_from_manifest(
+                summary,
+                mode=rehydrate_mode,
+                manifest_documents=manifest_documents,
+                songs_count_before=songs_count_value,
+            )
+            if rehydrate_result is not None:
+                summary['reason'] = 'rehydrate_from_manifest'
+                songs_count_after = rehydrate_result.get('songs_count_after')
+                summary['songs_count_after'] = songs_count_after
+                consistent = rehydrate_result.get('consistent')
+                rehydrated_total = rehydrate_result.get('rehydrated', 0)
+                if (
+                    songs_count_after is not None
+                    and manifest_documents > 0
+                    and songs_count_after < manifest_documents
+                ):
+                    LOGGER.warning(
+                        'Manifest rehydrate incomplete: mode=%s rehydrated=%s songs_after=%s manifest=%s errors=%s',
+                        rehydrate_mode,
+                        rehydrated_total,
+                        songs_count_after,
+                        manifest_documents,
+                        rehydrate_result.get('errors', 0),
+                    )
+                if consistent:
+                    if manifest_checksum and files_count is not None:
+                        self._update_manifest_meta(manifest_checksum, files_count, manifest_documents)
+                    LOGGER.info(
+                        'Songs collection reconciled with manifest (mode=%s, rehydrated=%s, total=%s)',
+                        rehydrate_mode,
+                        rehydrated_total,
+                        songs_count_after,
+                    )
+                    self._log_scan_outcome(summary, fast_path=False, reason='rehydrate_from_manifest')
+                    refresher_stack.close()
+                    self._active_refresher_stack = None
+                    return summary
+                LOGGER.info('Manifest rehydration incomplete; running full scan...')
+            else:
+                LOGGER.info('Manifest rehydration unavailable; running full scan...')
 
         if redis_available:
             if not self._acquire_leader_lock():
@@ -5522,6 +5667,368 @@ class SongScanner:
             files_count_value,
             manifest_documents_value,
         )
+
+    def _count_enabled_songs(self) -> Optional[int]:
+        song_store = self._song_store
+        if song_store is None:
+            return None
+        try:
+            count_enabled = getattr(song_store, 'count_enabled', None)
+            if callable(count_enabled):
+                raw_count = count_enabled()  # type: ignore[misc]
+            else:
+                counter = getattr(song_store, 'count_documents', None)
+                if not callable(counter):
+                    return None
+                filter_doc = {
+                    '$or': [
+                        {'disabled': False},
+                        {'disabled': {'$exists': False}},
+                    ]
+                }
+                raw_count = counter(filter_doc)
+        except Exception:  # pragma: no cover - tolerate storage access failures
+            LOGGER.debug('Failed to count enabled songs', exc_info=True)
+            return None
+        try:
+            value = int(raw_count)
+        except (TypeError, ValueError):
+            return None
+        if value < 0:
+            return None
+        return value
+
+    def _validate_manifest_entry(self, entry: Mapping[str, object]) -> Optional[str]:
+        title = entry.get('title')
+        if not isinstance(title, str) or not title.strip():
+            return 'missing title'
+        category = entry.get('category')
+        if not isinstance(category, str) or not category.strip():
+            return 'missing category'
+        difficulties_payload = entry.get('difficulties')
+        playable_count = 0
+        if isinstance(difficulties_payload, Mapping):
+            for value in difficulties_payload.values():
+                if bool(value):
+                    playable_count += 1
+        charts_value = entry.get('charts')
+        charts_valid = False
+        if isinstance(charts_value, Mapping):
+            charts_valid = any(bool(payload) for payload in charts_value.values())
+        elif isinstance(charts_value, (list, tuple)):
+            charts_valid = any(bool(item) for item in charts_value)
+        if playable_count <= 0 and not charts_valid:
+            return 'no playable charts'
+        audio_present = False
+        audio_value = entry.get('audio')
+        if isinstance(audio_value, str) and audio_value.strip():
+            audio_present = True
+        paths_value = entry.get('paths')
+        if not audio_present and isinstance(paths_value, Mapping):
+            for key in (
+                'audio',
+                'audio_url',
+                'audioUrl',
+                'audioPath',
+                'audio_file',
+                'audioFile',
+            ):
+                candidate = paths_value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    audio_present = True
+                    break
+        if not audio_present:
+            return 'missing audio path'
+        return None
+
+    def _materialize_songs_from_manifest(
+        self,
+        summary: Dict[str, object],
+        *,
+        mode: str,
+        manifest_documents: int,
+        songs_count_before: Optional[int],
+    ) -> Optional[Dict[str, object]]:
+        song_store = self._song_store
+        manifest_store = self._manifest_store
+        if song_store is None or manifest_store is None:
+            LOGGER.debug(
+                'Skipping manifest materialization: song_store=%s manifest_store=%s',
+                song_store,
+                manifest_store,
+            )
+            return None
+        projection_fields = {
+            '_id': 1,
+            'id': 1,
+            'title': 1,
+            'subtitle': 1,
+            'category': 1,
+            'difficulties': 1,
+            'paths': 1,
+            'disabled': 1,
+            'source_type': 1,
+            'duration_ms': 1,
+            'sha1': 1,
+            'charts': 1,
+            'audio': 1,
+            'mtime': 1,
+        }
+        try:
+            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}}, projection_fields)
+        except TypeError:
+            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}})
+        except Exception:  # pragma: no cover - tolerate manifest enumeration errors
+            LOGGER.debug('Failed to enumerate manifest entries for rehydration', exc_info=True)
+            return None
+        else:
+            batch_size_method = getattr(cursor, 'batch_size', None)
+            if callable(batch_size_method):
+                with contextlib.suppress(Exception):
+                    cursor = batch_size_method(500)
+
+        existing_enabled_ids: Set[str] = set()
+        if mode == 'missing':
+            try:
+                existing_cursor = song_store.find(
+                    {'scanner_stable_id': {'$type': 'string'}},
+                    {'scanner_stable_id': 1, 'disabled': 1},
+                )
+                for raw_doc in existing_cursor:
+                    if not isinstance(raw_doc, Mapping):
+                        continue
+                    stable_id = raw_doc.get('scanner_stable_id')
+                    if not isinstance(stable_id, str) or not stable_id:
+                        continue
+                    disabled_flag = raw_doc.get('disabled')
+                    if disabled_flag is True:
+                        continue
+                    existing_enabled_ids.add(stable_id)
+            except Exception:  # pragma: no cover - tolerate storage access failures
+                LOGGER.debug('Failed to enumerate existing songs for missing rehydrate', exc_info=True)
+
+        processed = 0
+        inserted = 0
+        updated = 0
+        errors = 0
+        operations: List[
+            Tuple[Mapping[str, object], Mapping[str, object], Mapping[str, object]]
+        ] = []
+        now = datetime.now(UTC)
+
+        def _flush_operations() -> None:
+            nonlocal operations, inserted, updated, errors
+            if not operations:
+                return
+            replace_payloads = [
+                ReplaceOne(filter_doc, replace_doc, upsert=True)
+                for filter_doc, _, replace_doc in operations
+            ]
+            bulk_callable = getattr(song_store, 'bulk_write', None)
+            bulk_completed = False
+            if callable(bulk_callable):
+                try:
+                    bulk_result = bulk_callable(replace_payloads, ordered=False)
+                except BulkWriteError as exc:  # pragma: no cover - tolerate partial failures
+                    details = getattr(exc, 'details', None)
+                    write_errors: Sequence[Mapping[str, object]] = []
+                    if isinstance(details, Mapping):
+                        candidate_errors = details.get('writeErrors')
+                        if isinstance(candidate_errors, Sequence):
+                            write_errors = [
+                                error for error in candidate_errors if isinstance(error, Mapping)
+                            ]
+                    errors += len(write_errors)
+                    LOGGER.warning(
+                        'Bulk rehydrate write encountered %s errors; retrying sequentially',
+                        len(write_errors),
+                        exc_info=True,
+                    )
+                except Exception:  # pragma: no cover - fall back on sequential execution
+                    LOGGER.warning('Bulk rehydrate write failed; falling back to sequential mode', exc_info=True)
+                else:
+                    batch_inserted = int(
+                        getattr(bulk_result, 'upserted_count', 0)
+                        or getattr(bulk_result, 'inserted_count', 0)
+                        or 0
+                    )
+                    batch_modified = int(getattr(bulk_result, 'modified_count', 0) or 0)
+                    inserted += batch_inserted
+                    updated += batch_modified
+                    operations = []
+                    bulk_completed = True
+            if bulk_completed:
+                return
+            # Sequential fallback path
+            for filter_doc, update_doc, replace_doc in operations:
+                stable_identifier = filter_doc.get('_id')
+                if not stable_identifier and isinstance(update_doc, Mapping):
+                    set_payload = update_doc.get('$set')
+                    if isinstance(set_payload, Mapping):
+                        stable_identifier = set_payload.get('scanner_stable_id')
+                replace_callable = getattr(song_store, 'replace_one', None)
+                if callable(replace_callable):
+                    try:
+                        result = replace_callable(filter_doc, replace_doc, upsert=True)
+                    except Exception:  # pragma: no cover - tolerate transient write issues
+                        LOGGER.warning(
+                            'Failed to rehydrate song %s from manifest',
+                            stable_identifier,
+                            exc_info=True,
+                        )
+                        errors += 1
+                        continue
+                else:
+                    try:
+                        result = song_store.update_one(filter_doc, update_doc, upsert=True)
+                    except Exception:  # pragma: no cover - tolerate transient write issues
+                        LOGGER.warning(
+                            'Failed to rehydrate song %s from manifest',
+                            stable_identifier,
+                            exc_info=True,
+                        )
+                        errors += 1
+                        continue
+                if getattr(result, 'upserted_id', None) is not None:
+                    inserted += 1
+                elif getattr(result, 'matched_count', 0) and getattr(result, 'modified_count', 0):
+                    updated += 1
+            operations = []
+
+
+        for raw_entry in cursor:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = dict(raw_entry)
+            stable_id = entry.get('id') or entry.get('_id')
+            if not isinstance(stable_id, str) or not stable_id:
+                continue
+            if mode == 'missing' and stable_id in existing_enabled_ids:
+                continue
+            validation_error = self._validate_manifest_entry(entry)
+            if validation_error:
+                errors += 1
+                LOGGER.error(
+                    'Skipping manifest entry %s during rehydrate: %s',
+                    stable_id,
+                    validation_error,
+                )
+                continue
+            entry.pop('_id', None)
+            raw_difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
+            normalized_difficulties = {
+                legacy: {'valid': bool(raw_difficulties.get(legacy))}
+                for legacy in ('easy', 'normal', 'hard', 'oni', 'ura')
+            }
+            playable_count = sum(1 for payload in normalized_difficulties.values() if payload['valid'])
+            category_value = entry.get('category')
+            if not isinstance(category_value, str) or not category_value.strip():
+                category_value = DEFAULT_CATEGORY_TITLE
+            else:
+                category_value = category_value.strip()
+            title_value = str(entry.get('title') or '')
+            subtitle_value = str(entry.get('subtitle') or '')
+            raw_paths = entry.get('paths') if isinstance(entry.get('paths'), dict) else {}
+            paths_payload: Dict[str, object] = {}
+            for key, value in raw_paths.items():
+                if value is None:
+                    continue
+                paths_payload[str(key)] = value
+            enabled = not bool(entry.get('disabled', False))
+            sha1_value = entry.get('sha1') if isinstance(entry.get('sha1'), str) else None
+            hash_value = sha1_value or stable_id
+            sanitized_entry = {key: value for key, value in entry.items() if key != '_id'}
+            update_payload: Dict[str, object] = {
+                'scanner_stable_id': stable_id,
+                'title': title_value,
+                'title_lc': title_value.casefold() if title_value else '',
+                'subtitle': subtitle_value,
+                'category': category_value,
+                'category_id': 0,
+                'type': str(entry.get('source_type') or 'tja'),
+                'paths': paths_payload,
+                'managed_by_scanner': True,
+                'enabled': enabled,
+                'disabled': not enabled,
+                'is_playable': playable_count > 0,
+                'valid_chart_count': playable_count,
+                'valid_charts': playable_count,
+                'difficulties': normalized_difficulties,
+                'preview_available': bool(entry.get('preview_available')),
+                'sha1': sha1_value,
+                'hash': hash_value,
+                'fingerprint': hash_value,
+                'mtime': entry.get('mtime'),
+                'duration_ms': int(entry.get('duration_ms') or 0),
+                'titleNormalized': _normalise_title_key(title_value) if title_value else '',
+                'scanner_manifest_snapshot': sanitized_entry,
+                'scanner_rehydrated_at': now,
+                'scanner_rehydrated_placeholder': True,
+                'updated_at': now,
+            }
+            charts_on_insert: List[object] = []
+            raw_charts = entry.get('charts')
+            if isinstance(raw_charts, list):
+                charts_on_insert = list(raw_charts)
+            set_on_insert: Dict[str, object] = {
+                '_id': stable_id,
+                'group_key': f'manifest:{stable_id}',
+                'charts': charts_on_insert,
+                'courses': {legacy: None for legacy in COURSE_LEGACY_MAP.values()},
+                'import_issues': [],
+                'managed_by_scanner': True,
+            }
+            update_document = {
+                '$set': update_payload,
+                '$setOnInsert': set_on_insert,
+            }
+            replace_document: Dict[str, object] = dict(set_on_insert)
+            replace_document.update(update_payload)
+            replace_document['_id'] = stable_id
+            operations.append(({'_id': stable_id}, update_document, replace_document))
+            processed += 1
+            if len(operations) >= 500:
+                _flush_operations()
+
+        _flush_operations()
+
+        total_upserts = inserted + updated
+        if total_upserts:
+            self._metrics.increment('songs_upserted_total', total_upserts)
+        if inserted:
+            self._metrics.increment('songs_inserted_total', inserted)
+
+        if songs_count_before is not None:
+            summary.setdefault('songs_count_before', songs_count_before)
+
+        songs_count_after = self._count_enabled_songs()
+        if songs_count_after is not None:
+            summary['songs_count_after'] = songs_count_after
+
+        summary['found'] = processed
+        summary['inserted'] = inserted
+        summary['updated'] = updated
+        summary['rehydrated'] = total_upserts
+        summary['manifest_documents'] = manifest_documents
+        summary['errors'] = summary.get('errors', 0) + errors
+        summary.setdefault('disabled', 0)
+        summary.setdefault('skipped', 0)
+
+        consistent = (
+            songs_count_after is None
+            or manifest_documents == 0
+            or (songs_count_after >= manifest_documents and manifest_documents > 0)
+        )
+
+        return {
+            'processed': processed,
+            'rehydrated': total_upserts,
+            'inserted': inserted,
+            'updated': updated,
+            'errors': errors,
+            'songs_count_after': songs_count_after,
+            'consistent': consistent,
+        }
 
     def _ensure_manifest_indexes(self) -> None:
         store = self._manifest_store

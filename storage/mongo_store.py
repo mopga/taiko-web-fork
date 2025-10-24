@@ -62,6 +62,15 @@ class MongoSongStore(SongStore):
     ) -> Any:
         return self._collection().update_one(filter, update, *args, **kwargs)
 
+    def replace_one(
+        self,
+        filter: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return self._collection().replace_one(filter, replacement, *args, **kwargs)
+
     def update_many(
         self,
         filter: Mapping[str, Any],
@@ -76,6 +85,22 @@ class MongoSongStore(SongStore):
 
     def delete_many(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         return self._collection().delete_many(filter, *args, **kwargs)
+
+    def bulk_write(
+        self,
+        operations: Sequence[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return self._collection().bulk_write(operations, *args, **kwargs)
+
+    def count_documents(
+        self,
+        filter: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        return int(self._collection().count_documents(filter, *args, **kwargs))
 
     def create_index(self, keys: Any, *args: Any, **kwargs: Any) -> Any:
         return self._collection().create_index(keys, *args, **kwargs)
