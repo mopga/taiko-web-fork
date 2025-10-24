@@ -106,21 +106,12 @@ csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csr
   fi
   exit 1
 }
-if ! printf '%s' "$csrf_payload" | python3 - <<'PY'; then
-    echo "[smoke] csrftoken payload validation failed" >&2
-    echo "---- response body ----" >&2
-    printf '%s' "$csrf_payload" >&2
-    exit 1
+if ! printf '%s' "$csrf_payload" | jq -e '.status=="ok" and (.token | type=="string" and length>0)' >/dev/null; then
+  echo "[smoke] csrftoken payload validation failed" >&2
+  echo "---- response body ----" >&2
+  printf '%s' "$csrf_payload" >&2
+  exit 1
 fi
-import json, sys
-payload = sys.stdin.read()
-try:
-    data = json.loads(payload)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"csrftoken payload is not JSON: {exc}\n{payload}")
-assert data.get("status") == "ok", f"Unexpected csrftoken status: {data}"
-assert isinstance(data.get("token"), str) and data["token"], "CSRF token is empty"
-PY
 
 echo "Checking songs catalog endpoint..."
 songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
@@ -135,20 +126,11 @@ songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/so
   fi
   exit 1
 }
-if ! printf '%s' "$songs_payload" | python3 - <<'PY'; then
-    echo "[smoke] songs payload validation failed" >&2
-    echo "---- response body ----" >&2
-    printf '%s' "$songs_payload" >&2
-    exit 1
+if ! printf '%s' "$songs_payload" | jq -e 'type=="array"' >/dev/null; then
+  echo "[smoke] songs payload validation failed" >&2
+  echo "---- response body ----" >&2
+  printf '%s' "$songs_payload" >&2
+  exit 1
 fi
-import json, sys
-payload = sys.stdin.read()
-try:
-    data = json.loads(payload)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"songs payload is not JSON: {exc}\n{payload}")
-if not isinstance(data, list):
-    raise SystemExit(f"Expected list payload, got {type(data)!r}")
-PY
 
 echo "Smoke tests passed."
