@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
 
+from lock.interfaces import LeaderLock
+
+
+__all__ = ['SongStore', 'ManifestStore', 'LeaderLock']
+
 
 class SongStore(Protocol):
     """Data access abstraction for song documents."""
@@ -114,17 +119,3 @@ class ManifestStore(Protocol):
         ...
 
 
-class LeaderLock(Protocol):
-    """Distributed leader election lock abstraction."""
-
-    def get_owner(self) -> Optional[str]:
-        ...
-
-    def acquire(self, token: str, ttl_seconds: int) -> bool:
-        ...
-
-    def refresh(self, token: str, ttl_seconds: int) -> bool:
-        ...
-
-    def release(self, token: str) -> bool:
-        ...
