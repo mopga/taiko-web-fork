@@ -83,27 +83,15 @@ if [[ "$ready" -ne 1 ]]; then
 fi
 
 #
-# Validate /healthz JSON (нельзя вешать `|| {...}` после heredoc!)
+# Validate /healthz JSON: минимальный обязательный набор полей.
+# Без heredoc — на jq. Это надёжнее и прозрачнее в CI.
 #
-if ! python3 - "$TMP_HEALTH" <<'PY'; then
-    echo "[smoke] healthz validation failed" >&2
-    echo "---- response body ----" >&2
-    cat "$TMP_HEALTH" >&2 || true
-    exit 1
+if ! jq -e '.status=="ok" and .mongo=="ok" and .redis=="ok"' "$TMP_HEALTH" >/dev/null; then
+  echo "[smoke] healthz validation failed" >&2
+  echo "---- response body ----" >&2
+  cat "$TMP_HEALTH" >&2 || true
+  exit 1
 fi
-import json
-import sys
-from pathlib import Path
-
-payload = Path(sys.argv[1]).read_text(encoding="utf-8")
-try:
-    data = json.loads(payload)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"Health payload is not JSON: {exc}\n{payload}")
-assert data.get("status") == "ok", f"Unexpected health status: {data}"
-assert data.get("mongo") == "ok", f"Mongo not ready: {data}"
-assert data.get("redis") == "ok", f"Redis not ready: {data}"
-PY
 
 echo "Checking CSRF token endpoint..."
 csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
