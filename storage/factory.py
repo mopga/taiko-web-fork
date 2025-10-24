@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional, Union
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from storage.mongo_store import MongoManifestStore, MongoSongStore
 
-from lock.redis_lock import RedisLeaderLock
+from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ def create_storage_bundle(
     run_profile: str,
     mongo_database_factory: Callable[[], Any],
     redis_client_factory: Optional[Callable[[], Any]] = None,
-    leader_lock_key: str = 'taiko:scanner:leader',
+    leader_lock_key: str = SCAN_LEADER_KEY,
     file_leader_lock_path: Optional[Union[str, Path]] = None,
 ) -> StorageBundle:
     """Create a ``StorageBundle`` for the configured runtime profile."""
@@ -69,15 +69,31 @@ def _create_leader_lock_for_profile(
     *,
     run_profile: str,
     redis_factory: Optional[Callable[[], Any]] = None,
-    leader_lock_key: str = 'taiko:scanner:leader',
+    leader_lock_key: str = SCAN_LEADER_KEY,
     file_leader_lock_path: Optional[Union[str, Path]] = None,
 ) -> Optional[LeaderLock]:
     if run_profile == 'web':
         if redis_factory is not None:
+            try:
+                test_client = redis_factory()
+                if test_client is None:
+                    raise RuntimeError('Redis client factory returned None')
+                test_client.ping()
+            except Exception:
+                from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
+
+                LOGGER.warning(
+                    'falling back to DummyLeaderLock (web profile); redis unavailable for leader lock',
+                    exc_info=True,
+                )
+                LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
+                return DummyLeaderLock()
+            LOGGER.info('Leader lock configured: RedisLeaderLock key=%s', leader_lock_key)
             return RedisLeaderLock(redis_factory, leader_lock_key)
         from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
 
-        LOGGER.warning('No Redis factory for web profile — falling back to DummyLeaderLock')
+        LOGGER.warning('falling back to DummyLeaderLock (web profile); redis factory unavailable')
+        LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
         return DummyLeaderLock()
 
     if run_profile == 'desktop':
@@ -91,6 +107,7 @@ def _create_leader_lock_for_profile(
         return FileLeaderLock(file_leader_lock_path)
 
     if redis_factory is not None:
+        LOGGER.info('Leader lock configured: RedisLeaderLock key=%s', leader_lock_key)
         return RedisLeaderLock(redis_factory, leader_lock_key)
 
     LOGGER.info(
