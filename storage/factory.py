@@ -1,6 +1,7 @@
 """Factories for constructing storage implementations."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -9,6 +10,9 @@ from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from storage.mongo_store import MongoManifestStore, MongoSongStore
 
 from lock.redis_lock import RedisLeaderLock
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,9 @@ def create_storage_bundle(
     def _create_leader_lock() -> Optional[LeaderLock]:
         if run_profile == 'desktop':
             if file_leader_lock_path is None:
+                LOGGER.info(
+                    'Leader lock disabled: file_leader_lock_path not provided for desktop profile.',
+                )
                 return None
             from lock.file_lock import FileLeaderLock  # lazy import for optional dependency
 
@@ -56,6 +63,10 @@ def create_storage_bundle(
         if redis_client_factory is not None:
             return RedisLeaderLock(redis_client_factory, leader_lock_key)
 
+        LOGGER.info(
+            'Leader lock disabled: Redis client factory is not available for run_profile=%s.',
+            run_profile,
+        )
         return None
 
     leader_lock = _create_leader_lock()
