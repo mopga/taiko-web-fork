@@ -4,15 +4,18 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 try:  # pragma: no cover - redis optional at runtime
-    from redis import Redis
+    from redis import Redis, WatchError
 except Exception:  # pragma: no cover - fallback when redis is unavailable
     Redis = Any  # type: ignore[misc,assignment]
+    WatchError = Exception  # type: ignore[assignment]
 
 from lock.interfaces import LeaderLock
 
 
 class RedisLeaderLock(LeaderLock):
     """``LeaderLock`` backed by a Redis key."""
+
+    DEFAULT_TTL = 300
 
     def __init__(self, client_factory: Callable[[], Redis], key: str) -> None:
         self._client_factory = client_factory
@@ -35,12 +38,21 @@ class RedisLeaderLock(LeaderLock):
             return value
         return None
 
+    @staticmethod
+    def _normalise_ttl(ttl_seconds: int) -> int:
+        ttl_value = int(ttl_seconds or 0)
+        if ttl_value <= 0:
+            ttl_value = RedisLeaderLock.DEFAULT_TTL
+        return ttl_value
+
     def acquire(self, token: str, ttl_seconds: int) -> bool:
-        result = self._client().set(self._key, token, nx=True, ex=ttl_seconds)
+        ttl_value = self._normalise_ttl(ttl_seconds)
+        result = self._client().set(self._key, token, nx=True, ex=ttl_value)
         return bool(result)
 
     def refresh(self, token: str, ttl_seconds: int) -> bool:
         client = self._client()
+        ttl_value = self._normalise_ttl(ttl_seconds)
         current = client.get(self._key)
         if isinstance(current, bytes):
             try:
@@ -49,7 +61,41 @@ class RedisLeaderLock(LeaderLock):
                 current = None
         if current != token:
             return False
-        return bool(client.expire(self._key, ttl_seconds))
+        refreshed = bool(client.expire(self._key, ttl_value))
+        if refreshed or ttl_value <= 0:
+            return refreshed
+        try:  # pragma: no cover - ttl best effort
+            ttl_state = client.ttl(self._key)
+        except Exception:
+            ttl_state = None
+        if ttl_state != -1:
+            return refreshed
+        try:
+            while True:
+                pipe = client.pipeline()
+                try:
+                    pipe.watch(self._key)
+                    owner = pipe.get(self._key)
+                    if isinstance(owner, bytes):
+                        try:
+                            owner = owner.decode('utf-8')
+                        except Exception:
+                            owner = None
+                    if owner != token:
+                        pipe.unwatch()
+                        break
+                    pipe.multi()
+                    pipe.set(self._key, token, xx=True, ex=ttl_value)
+                    pipe.execute()
+                    refreshed = True
+                    break
+                except WatchError:
+                    continue
+                finally:
+                    pipe.reset()
+        except Exception:
+            return refreshed
+        return refreshed
 
     def release(self, token: str) -> bool:
         client = self._client()
