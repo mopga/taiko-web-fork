@@ -10,6 +10,7 @@ import logging
 import random
 import re
 import signal
+import socket
 import sys
 import threading
 import time
@@ -105,6 +106,9 @@ TJA_VALIDATOR = get_tja_validator()
 _HANG_WATCHDOG_ARMED = False
 
 
+LEADER_LOCK_TTL_SECONDS = 300
+
+
 def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = None) -> Tuple[str, int]:
     """Return a checksum and file count for ``root`` without reading file bodies."""
 
@@ -185,6 +189,77 @@ def _coerce_int(value: object) -> Optional[int]:
             with contextlib.suppress(ValueError):
                 return int(float(token))
     return None
+
+
+class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
+    """Background TTL refresher for ``LeaderLock`` implementations."""
+
+    def __init__(
+        self,
+        lock: LeaderLock,
+        token: str,
+        ttl: int,
+        *,
+        period: int = 60,
+        on_release: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.lock = lock
+        self.token = token
+        self.ttl = ttl
+        self.period = period
+        self._on_release = on_release
+        self._stop_event = threading.Event()
+        self._worker: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "TTLRefresher":
+        if self.ttl > 0 and self.period > 0:
+            self._worker = threading.Thread(
+                target=self._refresh_loop,
+                name='scanner-lock-ttl-refresh',
+                daemon=True,
+            )
+            self._worker.start()
+        return self
+
+    def _refresh_loop(self) -> None:
+        while not self._stop_event.wait(self.period):
+            try:
+                if self.lock.refresh(self.token, self.ttl):
+                    continue
+            except Exception:  # pragma: no cover - ttl refresh best effort
+                LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
+                break
+            owner: Optional[str]
+            try:
+                owner = self.lock.get_owner()
+            except Exception:  # pragma: no cover - best effort owner lookup
+                LOGGER.debug('Failed to read scanner leader lock owner during refresh', exc_info=True)
+                owner = None
+            LOGGER.warning(
+                'scanner leader lock refresh lost: owner=%s token=%s',
+                owner or '<unknown>',
+                self.token,
+            )
+            break
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        worker = self._worker
+        if worker is not None:
+            worker.join(timeout=max(float(self.period), 1.0))
+            self._worker = None
+
+    def __exit__(self, exc_type, exc, tb) -> Optional[bool]:
+        self.stop()
+        try:
+            self.lock.release(self.token)
+        except Exception:  # pragma: no cover - release best effort
+            LOGGER.exception('Leader lock release failed')
+        finally:
+            if self._on_release is not None:
+                with contextlib.suppress(Exception):
+                    self._on_release()
+        return None
 
 
 def _validation_warning(message: str, *args, **kwargs) -> None:
@@ -2515,9 +2590,10 @@ class SongScanner:
         self._meta_collection = getattr(self.db, 'meta', None)
         self._manifest_checksum: Optional[str] = None
         self._active_summary: Optional[Dict[str, int]] = None
+        self._active_refresher_stack: Optional[contextlib.ExitStack] = None
         self._leader_lock_token: Optional[str] = None
         self._leader_lock_key = 'taiko:scanner:leader'
-        ttl_default = 1200
+        ttl_default = 300
         ttl_env = os.getenv('SCAN_LEADER_TTL_SECONDS')
         if ttl_env:
             with contextlib.suppress(ValueError):
@@ -4663,6 +4739,12 @@ class SongScanner:
                 except Exception as exc:  # pragma: no cover - defensive logging path
                     SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
 
+            active_stack = getattr(self, '_active_refresher_stack', None)
+            if active_stack is not None:
+                with contextlib.suppress(Exception):
+                    active_stack.close()
+            self._active_refresher_stack = None
+
             self._active_summary = None
 
         return summary
@@ -4678,6 +4760,8 @@ class SongScanner:
         }
         self._active_summary = summary
         performed_scan = False
+        refresher_stack = contextlib.ExitStack()
+        self._active_refresher_stack = refresher_stack
         manifest_meta = self._load_manifest_meta() or {}
         manifest_checksum: Optional[str] = None
         manifest_documents = 0
@@ -4715,12 +4799,14 @@ class SongScanner:
             reason = 'digest_equal' if manifest_checksum == checksum and manifest_documents == files_count else 'digest_changed'
             summary['fast_path'] = True
             self._log_scan_outcome(summary, fast_path=True, reason=reason)
+            refresher_stack.close()
+            self._active_refresher_stack = None
             return summary
 
         if force_scan:
             full = True
 
-        redis_available = self._redis is not None
+        redis_available = self._leader_lock is not None or self._redis is not None
 
         stored_manifest_files = manifest_files_count if manifest_files_count is not None else manifest_documents
 
@@ -4736,19 +4822,43 @@ class SongScanner:
             if redis_available and not self._acquire_leader_lock():
                 summary['skipped_due_to_leader'] = True
                 self._log_scan_outcome(summary, fast_path=True, reason='lock_miss')
+                refresher_stack.close()
+                self._active_refresher_stack = None
                 return summary
             self._log_scan_outcome(summary, fast_path=True, reason='digest_equal')
+            refresher_stack.close()
+            self._active_refresher_stack = None
             return summary
 
         if redis_available:
             if not self._acquire_leader_lock():
                 summary['skipped_due_to_leader'] = True
                 self._log_scan_outcome(summary, fast_path=False, reason='lock_miss')
+                refresher_stack.close()
+                self._active_refresher_stack = None
                 return summary
 
         performed_scan = True
         summary['fast_path'] = False
         summary['reason'] = 'digest_changed'
+
+        if self._leader_lock is not None:
+            token_for_refresh = self._leader_lock_token
+            if token_for_refresh:
+                ttl_value = LEADER_LOCK_TTL_SECONDS
+                def _clear_token(token_to_clear: str = token_for_refresh) -> None:
+                    if self._leader_lock_token == token_to_clear:
+                        self._leader_lock_token = None
+
+                refresher_stack.enter_context(
+                    TTLRefresher(
+                        self._leader_lock,
+                        token_for_refresh,
+                        ttl_value,
+                        period=60,
+                        on_release=_clear_token,
+                    )
+                )
 
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
@@ -5216,6 +5326,8 @@ class SongScanner:
         if performed_scan:
             self._log_scan_outcome(summary, fast_path=False, reason=summary.get('reason', 'digest_changed'))
 
+        refresher_stack.close()
+        self._active_refresher_stack = None
         return summary
 
     @property
@@ -5275,41 +5387,60 @@ class SongScanner:
         self._leader_lock_token = None
         return False
 
+    def _ensure_leader_token(self) -> str:
+        token = self._leader_lock_token
+        if token:
+            return token
+        hostname = socket.gethostname() or 'localhost'
+        token = f"{hostname}:{os.getpid()}"
+        self._leader_lock_token = token
+        return token
+
     def _acquire_leader_lock(self) -> bool:
         lock = self._leader_lock
-        token = self._leader_lock_token
         if lock is not None:
-            if token is not None:
-                try:
-                    owner = lock.get_owner()
-                except Exception:  # pragma: no cover - storage access best effort
-                    LOGGER.debug('Failed to refresh scanner leader lock', exc_info=True)
-                    self._leader_lock_token = None
-                    return False
-                if owner == token:
-                    try:
-                        if lock.refresh(token, self._leader_lock_ttl):
-                            return True
-                    except Exception:  # pragma: no cover - ttl refresh best effort
-                        LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
-                    self._leader_lock_token = None
-                else:
-                    self._leader_lock_token = None
-            new_token = f"{os.getpid()}-{time.time():.6f}-{random.randint(0, 1_000_000)}"
+            ttl_value = LEADER_LOCK_TTL_SECONDS
+            token = self._ensure_leader_token()
+            owner: Optional[str] = None
             try:
-                if lock.acquire(new_token, self._leader_lock_ttl):
-                    self._leader_lock_token = new_token
+                owner = lock.get_owner()
+            except Exception:  # pragma: no cover - storage access best effort
+                LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
+            if owner == token:
+                try:
+                    if lock.refresh(token, ttl_value):
+                        return True
+                except Exception:  # pragma: no cover - ttl refresh best effort
+                    LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
+            try:
+                if lock.acquire(token, ttl_value):
+                    self._leader_lock_token = token
                     return True
             except Exception:  # pragma: no cover - storage access best effort
                 LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
                 self._leader_lock_token = None
                 return False
+            if owner != token:
+                owner_label = owner
+                if owner_label is None:
+                    try:
+                        owner_label = lock.get_owner()
+                    except Exception:  # pragma: no cover - storage access best effort
+                        LOGGER.debug('Failed to read scanner leader lock owner', exc_info=True)
+                        owner_label = None
+                LOGGER.info(
+                    'Song scanner leader lock miss: key=%s owner=%s',
+                    self._leader_lock_key,
+                    owner_label or '<unknown>',
+                )
+            self._leader_lock_token = None
             return False
         client = self._redis
         if client is None:
             LOGGER.debug('scanner leader lock unavailable: redis client missing')
             self._leader_lock_token = None
             return False
+        token = self._leader_lock_token
         if token is not None:
             try:
                 current = client.get(self._leader_lock_key)
@@ -5329,7 +5460,7 @@ class SongScanner:
                     LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
                 return True
             self._leader_lock_token = None
-        new_token = f"{os.getpid()}-{time.time():.6f}-{random.randint(0, 1_000_000)}"
+        new_token = self._ensure_leader_token()
         try:
             acquired = client.set(self._leader_lock_key, new_token, nx=True, ex=self._leader_lock_ttl)
         except Exception:  # pragma: no cover - redis access best effort
@@ -5339,6 +5470,7 @@ class SongScanner:
         if acquired:
             self._leader_lock_token = new_token
             return True
+        self._leader_lock_token = None
         return False
 
     def _load_manifest_meta(self) -> Optional[Dict[str, object]]:
