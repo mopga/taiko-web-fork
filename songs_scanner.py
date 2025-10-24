@@ -191,48 +191,75 @@ def _coerce_int(value: object) -> Optional[int]:
     return None
 
 
-@contextlib.contextmanager
-def _ttl_refresher(lock: LeaderLock, token: str, ttl: int, *, period: int = 60):
+class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
     """Background TTL refresher for ``LeaderLock`` implementations."""
 
-    if ttl <= 0 or period <= 0:
-        yield
-        return
+    def __init__(
+        self,
+        lock: LeaderLock,
+        token: str,
+        ttl: int,
+        *,
+        period: int = 60,
+        on_release: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.lock = lock
+        self.token = token
+        self.ttl = ttl
+        self.period = period
+        self._on_release = on_release
+        self._stop_event = threading.Event()
+        self._worker: Optional[threading.Thread] = None
 
-    stop_event = threading.Event()
+    def __enter__(self) -> "TTLRefresher":
+        if self.ttl > 0 and self.period > 0:
+            self._worker = threading.Thread(
+                target=self._refresh_loop,
+                name='scanner-lock-ttl-refresh',
+                daemon=True,
+            )
+            self._worker.start()
+        return self
 
-    def _refresh_loop() -> None:
-        while not stop_event.wait(period):
+    def _refresh_loop(self) -> None:
+        while not self._stop_event.wait(self.period):
             try:
-                if lock.refresh(token, ttl):
+                if self.lock.refresh(self.token, self.ttl):
                     continue
             except Exception:  # pragma: no cover - ttl refresh best effort
                 LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
                 break
             owner: Optional[str]
             try:
-                owner = lock.get_owner()
+                owner = self.lock.get_owner()
             except Exception:  # pragma: no cover - best effort owner lookup
                 LOGGER.debug('Failed to read scanner leader lock owner during refresh', exc_info=True)
                 owner = None
             LOGGER.warning(
                 'scanner leader lock refresh lost: owner=%s token=%s',
                 owner or '<unknown>',
-                token,
+                self.token,
             )
             break
 
-    worker = threading.Thread(
-        target=_refresh_loop,
-        name='scanner-lock-ttl-refresh',
-        daemon=True,
-    )
-    worker.start()
-    try:
-        yield
-    finally:
-        stop_event.set()
-        worker.join(timeout=max(float(period), 1.0))
+    def stop(self) -> None:
+        self._stop_event.set()
+        worker = self._worker
+        if worker is not None:
+            worker.join(timeout=max(float(self.period), 1.0))
+            self._worker = None
+
+    def __exit__(self, exc_type, exc, tb) -> Optional[bool]:
+        self.stop()
+        try:
+            self.lock.release(self.token)
+        except Exception:  # pragma: no cover - release best effort
+            LOGGER.exception('Leader lock release failed')
+        finally:
+            if self._on_release is not None:
+                with contextlib.suppress(Exception):
+                    self._on_release()
+        return None
 
 
 def _validation_warning(message: str, *args, **kwargs) -> None:
@@ -4819,18 +4846,19 @@ class SongScanner:
             token_for_refresh = self._leader_lock_token
             if token_for_refresh:
                 ttl_value = LEADER_LOCK_TTL_SECONDS
-                refresher_stack.enter_context(
-                    _ttl_refresher(self._leader_lock, token_for_refresh, ttl_value, period=60)
-                )
-                def _release_lock(token_to_release: str = token_for_refresh) -> None:
-                    lock = self._leader_lock
-                    if lock is not None:
-                        with contextlib.suppress(Exception):
-                            lock.release(token_to_release)
-                    if self._leader_lock_token == token_to_release:
+                def _clear_token(token_to_clear: str = token_for_refresh) -> None:
+                    if self._leader_lock_token == token_to_clear:
                         self._leader_lock_token = None
 
-                refresher_stack.callback(_release_lock)
+                refresher_stack.enter_context(
+                    TTLRefresher(
+                        self._leader_lock,
+                        token_for_refresh,
+                        ttl_value,
+                        period=60,
+                        on_release=_clear_token,
+                    )
+                )
 
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}

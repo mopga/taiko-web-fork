@@ -12,6 +12,15 @@ except Exception:  # pragma: no cover - fallback when redis is unavailable
 from lock.interfaces import LeaderLock
 
 
+_RELEASE_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+else
+  return 0
+end
+"""
+
+
 class RedisLeaderLock(LeaderLock):
     """``LeaderLock`` backed by a Redis key."""
 
@@ -20,6 +29,7 @@ class RedisLeaderLock(LeaderLock):
     def __init__(self, client_factory: Callable[[], Redis], key: str) -> None:
         self._client_factory = client_factory
         self._key = key
+        self._release_script: Optional[Callable[..., Any]] = None
 
     def _client(self) -> Redis:
         client = self._client_factory()
@@ -99,12 +109,9 @@ class RedisLeaderLock(LeaderLock):
 
     def release(self, token: str) -> bool:
         client = self._client()
-        current = client.get(self._key)
-        if isinstance(current, bytes):
-            try:
-                current = current.decode('utf-8')
-            except Exception:  # pragma: no cover
-                current = None
-        if current != token:
-            return False
-        return bool(client.delete(self._key))
+        script = self._release_script
+        if script is None:
+            script = client.register_script(_RELEASE_SCRIPT)
+            self._release_script = script
+        result = script(keys=[self._key], args=[token], client=client)
+        return bool(result)
