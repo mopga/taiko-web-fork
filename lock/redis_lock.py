@@ -66,7 +66,7 @@ class RedisLeaderLock(LeaderLock):
         try:
             result = self._client().set(self._key, token, nx=True, ex=ttl_value)
         except Exception:
-            LOGGER.warning('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
+            LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
             return False
         return bool(result)
 
@@ -91,6 +91,8 @@ class RedisLeaderLock(LeaderLock):
                 current = None
 
         if current != token:
+            # ``refresh`` is intentionally a no-op for foreign tokens so callers can
+            # detect leadership loss without extending another worker's lock.
             return False
 
         try:

@@ -69,6 +69,13 @@ Metadata about the last successful scan lives in the `meta` collection as the `_
 
 Leader election for incremental rescans uses Redis (`taiko:scanner:leader`). The TTL can be tuned with `SCAN_LEADER_TTL_SECONDS` to accommodate longer scans. When Redis is not configured, workers still perform scans but cannot claim leadership, so the filesystem watcher remains disabled; enable Redis to allow a single process to run the watcher.
 
+#### Scanner leader lifecycle
+
+* The worker that wins leadership first writes `taiko:scanner:leader` with the token `<hostname>:<pid>` before computing filesystem digests or parsing charts. Followers exit early without touching the filesystem when the key already exists.
+* Once leadership is established, a background refresher extends the TTL roughly every 60 seconds using `LeaderLock.refresh()`. The refresher treats mismatched tokens as a lock loss and leaves the key untouched to avoid extending another worker's lease.
+* `LeaderLock.ttl()` is optional and may return `None`; callers treat that as "TTL unknown" and fall back to the configured TTL when logging metrics.
+* When the scan completes—or if an exception aborts it—the refresher stops and `LeaderLock.release()` runs in a `finally` block to clean up Redis. Deployments without Lua support automatically fall back to a compare-and-delete release flow.
+
 ## Database maintenance
 
 Run the index initialization utility after provisioning a fresh MongoDB deployment to guarantee all required taiko-web collections have the expected indexes:
