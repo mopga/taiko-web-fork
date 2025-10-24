@@ -40,7 +40,7 @@ from pymongo.database import Database
 
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 
-from lock.redis_lock import SCAN_LEADER_KEY
+from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
 
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReplaceOne, ReturnDocument, UpdateOne
@@ -5609,10 +5609,18 @@ class SongScanner:
         ttl_value = self._leader_lock_ttl or LEADER_LOCK_TTL_SECONDS
         if token and self.has_leader_lock():
             refreshed = False
+            refresh_lock = self._leader_lock
+            if refresh_lock is None:
+                captured_client = client
+
+                def _client_factory(captured_client=captured_client):
+                    return captured_client
+
+                refresh_lock = RedisLeaderLock(_client_factory, self._leader_lock_key)
             try:
-                refreshed = bool(client.expire(self._leader_lock_key, ttl_value))
-            except Exception:  # pragma: no cover - redis access best effort
-                LOGGER.debug('Failed to refresh scanner leader lock ttl (Redis backend)', exc_info=True)
+                refreshed = refresh_lock.refresh(token, ttl_value)
+            except Exception:  # pragma: no cover - storage access best effort
+                LOGGER.debug('Failed to refresh scanner leader lock ttl (LeaderLock backend)', exc_info=True)
             LOGGER.info(
                 'LeaderLock refresh result: ok=%s key=%s token=%s reason=%s',
                 refreshed,
