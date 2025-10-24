@@ -50,24 +50,12 @@ def create_storage_bundle(
     manifest_store: ManifestStore = MongoManifestStore(_manifest_collection)
 
     def _create_leader_lock() -> Optional[LeaderLock]:
-        if run_profile == 'desktop':
-            if file_leader_lock_path is None:
-                LOGGER.info(
-                    'Leader lock disabled: file_leader_lock_path not provided for desktop profile.',
-                )
-                return None
-            from lock.file_lock import FileLeaderLock  # lazy import for optional dependency
-
-            return FileLeaderLock(file_leader_lock_path)
-
-        if redis_client_factory is not None:
-            return RedisLeaderLock(redis_client_factory, leader_lock_key)
-
-        LOGGER.info(
-            'Leader lock disabled: Redis client factory is not available for run_profile=%s.',
-            run_profile,
+        return _create_leader_lock_for_profile(
+            run_profile=run_profile,
+            redis_factory=redis_client_factory,
+            leader_lock_key=leader_lock_key,
+            file_leader_lock_path=file_leader_lock_path,
         )
-        return None
 
     leader_lock = _create_leader_lock()
 
@@ -75,3 +63,38 @@ def create_storage_bundle(
     # current implementation always returns the Mongo-backed stores while
     # letting the leader lock vary per profile.
     return StorageBundle(song_store=song_store, manifest_store=manifest_store, leader_lock=leader_lock)
+
+
+def _create_leader_lock_for_profile(
+    *,
+    run_profile: str,
+    redis_factory: Optional[Callable[[], Any]] = None,
+    leader_lock_key: str = 'taiko:scanner:leader',
+    file_leader_lock_path: Optional[Union[str, Path]] = None,
+) -> Optional[LeaderLock]:
+    if run_profile == 'web':
+        if redis_factory is not None:
+            return RedisLeaderLock(redis_factory, leader_lock_key)
+        from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
+
+        LOGGER.warning('No Redis factory for web profile — falling back to DummyLeaderLock')
+        return DummyLeaderLock()
+
+    if run_profile == 'desktop':
+        if file_leader_lock_path is None:
+            LOGGER.info(
+                'Leader lock disabled: file_leader_lock_path not provided for desktop profile.',
+            )
+            return None
+        from lock.file_lock import FileLeaderLock  # lazy import for optional dependency
+
+        return FileLeaderLock(file_leader_lock_path)
+
+    if redis_factory is not None:
+        return RedisLeaderLock(redis_factory, leader_lock_key)
+
+    LOGGER.info(
+        'Leader lock disabled: Redis client factory is not available for run_profile=%s.',
+        run_profile,
+    )
+    return None
