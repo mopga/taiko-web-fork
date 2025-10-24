@@ -166,30 +166,50 @@ class _MemoryCollection:
         upserted = 0
         for op in operations:
             filter_ = None
-            update = None
+            payload = None
             upsert = False
             if hasattr(op, 'args') and op.args:
                 filter_ = op.args[0]
-                update = op.args[1] if len(op.args) > 1 else None
-                upsert = bool(getattr(op, 'kwargs', {}).get('upsert'))
-            else:
-                filter_ = getattr(op, '_filter', None)
-                if filter_ is None:
-                    filter_ = getattr(op, 'filter', None)
-                update = getattr(op, '_doc', None)
-                if update is None:
-                    update = getattr(op, 'doc', None)
-                if update is None:
-                    update = getattr(op, 'update', None)
-                upsert = bool(getattr(op, '_upsert', getattr(op, 'upsert', False)))
-            if filter_ is None or update is None:
+                if len(op.args) > 1:
+                    payload = op.args[1]
+                upsert = bool(getattr(op, 'kwargs', {}).get('upsert', upsert))
+            if filter_ is None:
+                filter_ = getattr(op, '_filter', getattr(op, 'filter', None))
+            op_name = type(op).__name__.lower()
+            if payload is None and hasattr(op, 'replacement'):
+                payload = getattr(op, 'replacement')
+            if payload is None and hasattr(op, '_doc'):
+                payload = getattr(op, '_doc')
+            if payload is None and hasattr(op, 'doc'):
+                payload = getattr(op, 'doc')
+            if payload is None and hasattr(op, 'update'):
+                payload = getattr(op, 'update')
+            if payload is None and hasattr(op, 'kwargs'):
+                payload = op.kwargs.get('replacement') or op.kwargs.get('update')
+            if payload is None:
                 continue
-            result = self.update_one(filter_, update, upsert=upsert)
+            upsert = bool(getattr(op, '_upsert', getattr(op, 'upsert', upsert)))
+            if hasattr(op, 'kwargs'):
+                upsert = bool(op.kwargs.get('upsert', upsert))
+            is_replace = (
+                'replaceone' in op_name
+                or hasattr(op, 'replacement')
+                or (isinstance(payload, dict) and not any(key.startswith('$') for key in payload))
+            )
+            if isinstance(payload, dict) and any(key.startswith('$') for key in payload):
+                is_replace = False
+            if filter_ is None:
+                continue
+            if is_replace:
+                result = self.replace_one(filter_, payload, upsert=upsert)
+            else:
+                result = self.update_one(filter_, payload, upsert=upsert)
             matched += result.matched_count
             modified += result.modified_count
             if result.upserted_id is not None:
                 upserted += 1
         return _DummyBulkWriteResult(matched=matched, modified=modified, upserted=upserted)
+
 
     def _parse_array_filters(self, array_filters):
         mapping = {}
@@ -414,6 +434,31 @@ class _MemoryCollection:
             if hasattr(self, 'inserted'):
                 self.inserted.append(new_doc)
             return _DummyUpdateResult(0, 0, new_doc.get('_id'))
+        return _DummyUpdateResult(0, 0, None)
+
+    def replace_one(self, filter_, replacement, upsert=False):
+        with self._lock:
+            for index, doc in enumerate(self._docs):
+                if self._matches(doc, filter_ or {}):
+                    new_doc = self._clone(replacement)
+                    if '_id' not in new_doc:
+                        new_doc['_id'] = doc.get('_id', index + 1)
+                    modified = 1 if new_doc != doc else 0
+                    self._docs[index] = new_doc
+                    return _DummyUpdateResult(1, modified, None)
+            if upsert:
+                new_doc = self._clone(replacement)
+                if filter_:
+                    for key, value in filter_.items():
+                        if isinstance(value, dict):
+                            continue
+                        new_doc.setdefault(key, value)
+                if '_id' not in new_doc:
+                    new_doc['_id'] = len(self._docs) + 1
+                self._docs.append(new_doc)
+                if hasattr(self, 'inserted'):
+                    self.inserted.append(new_doc)
+                return _DummyUpdateResult(0, 0, new_doc.get('_id'))
         return _DummyUpdateResult(0, 0, None)
 
     def delete_many(self, filter_):

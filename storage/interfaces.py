@@ -51,6 +51,15 @@ class SongStore(Protocol):
     ) -> Any:
         ...
 
+    def replace_one(
+        self,
+        filter: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
     def update_many(
         self,
         filter: Mapping[str, Any],

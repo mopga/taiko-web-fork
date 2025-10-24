@@ -62,6 +62,15 @@ class MongoSongStore(SongStore):
     ) -> Any:
         return self._collection().update_one(filter, update, *args, **kwargs)
 
+    def replace_one(
+        self,
+        filter: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return self._collection().replace_one(filter, replacement, *args, **kwargs)
+
     def update_many(
         self,
         filter: Mapping[str, Any],
