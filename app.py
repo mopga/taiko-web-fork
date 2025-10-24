@@ -58,6 +58,9 @@ from tools.init_db_schema import init_db_schema
 LOGGER = logging.getLogger(__name__)
 
 
+RUN_PROFILE = os.getenv("RUN_PROFILE", "web")
+
+
 _startup_scan_started_at: Optional[float] = None
 _startup_scan_logged = False
 
@@ -527,6 +530,7 @@ def create_app():
     _startup_scan_logged = False
 
     app_instance = Flask(__name__)
+    app_instance.logger.info("run_profile=%s", RUN_PROFILE)
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
     compress.init_app(app_instance)
 
@@ -2274,7 +2278,7 @@ def _ensure_song_directory_watcher_started():
     _start_song_directory_watcher()
 
 if __name__ == '__main__':
-    import argparse
+    import argparse, sys
 
     parser = argparse.ArgumentParser(description='Run the taiko-web development server.')
     parser.add_argument('port', type=int, metavar='PORT', nargs='?', default=34801, help='Port to listen on.')
@@ -2282,7 +2286,16 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', action='store_true', help='Enable debug mode.')
     args = parser.parse_args()
 
-    app.run(host=args.bind_address, port=args.port, debug=args.debug)
+    run_profile = RUN_PROFILE
+
+    if run_profile == 'web':
+        app.run(host=args.bind_address, port=args.port, debug=args.debug)
+    elif run_profile == 'desktop':
+        LOGGER.info('RUN_PROFILE=desktop stub: exiting without starting the server.')
+        sys.exit(0)
+    else:
+        LOGGER.error('Unknown run_profile=%s; defaulting to web', run_profile)
+        app.run(host=args.bind_address, port=args.port, debug=args.debug)
 
 _SONG_DETAIL_PROJECTION = {
     '_id': False,

@@ -23,9 +23,17 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Install Python dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Shell syntax check
+        run: bash -n scripts/smoke_web.sh
 
       - name: Run smoke_web script
         run: ./scripts/smoke_web.sh
@@ -47,7 +55,7 @@ jobs:
 
       - name: Upload docker diagnostics
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: web-stack-diagnostics
           path: artifacts
