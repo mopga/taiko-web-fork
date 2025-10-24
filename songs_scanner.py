@@ -40,6 +40,8 @@ from pymongo.database import Database
 
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 
+from lock.redis_lock import SCAN_LEADER_KEY
+
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReplaceOne, ReturnDocument, UpdateOne
     from pymongo.errors import BulkWriteError, DuplicateKeyError, PyMongoError, WriteError
@@ -2618,7 +2620,7 @@ class SongScanner:
         self._active_summary: Optional[Dict[str, int]] = None
         self._active_refresher_stack: Optional[contextlib.ExitStack] = None
         self._leader_lock_token: Optional[str] = None
-        self._leader_lock_key = 'taiko:scanner:leader'
+        self._leader_lock_key = SCAN_LEADER_KEY
         ttl_default = 300
         ttl_env = os.getenv('SCAN_LEADER_TTL_SECONDS')
         if ttl_env:
@@ -5545,11 +5547,24 @@ class SongScanner:
     def _acquire_leader_lock(self) -> bool:
         lock = self._leader_lock
         if lock is not None:
-            if self.has_leader_lock():
+            ttl_value = self._leader_lock_ttl or LEADER_LOCK_TTL_SECONDS
+            existing_token = self._leader_lock_token
+            if existing_token and self.has_leader_lock():
+                refreshed = False
+                try:
+                    refreshed = lock.refresh(existing_token, ttl_value)
+                except Exception:  # pragma: no cover - storage access best effort
+                    LOGGER.debug('Failed to refresh scanner leader lock ttl (LeaderLock backend)', exc_info=True)
+                LOGGER.info(
+                    'LeaderLock refresh result: ok=%s key=%s token=%s reason=%s',
+                    refreshed,
+                    self._leader_lock_key,
+                    existing_token,
+                    'already_owner',
+                )
                 return True
 
-            ttl_value = LEADER_LOCK_TTL_SECONDS
-            token = self._ensure_leader_token()
+            token = existing_token or self._ensure_leader_token()
             attempts = 5
             for attempt in range(1, attempts + 1):
                 acquired = False
@@ -5591,10 +5606,23 @@ class SongScanner:
             self._leader_lock_token = None
             return False
         token = self._leader_lock_token
-        if token is not None and self.has_leader_lock():
+        ttl_value = self._leader_lock_ttl or LEADER_LOCK_TTL_SECONDS
+        if token and self.has_leader_lock():
+            refreshed = False
+            try:
+                refreshed = bool(client.expire(self._leader_lock_key, ttl_value))
+            except Exception:  # pragma: no cover - redis access best effort
+                LOGGER.debug('Failed to refresh scanner leader lock ttl (Redis backend)', exc_info=True)
+            LOGGER.info(
+                'LeaderLock refresh result: ok=%s key=%s token=%s reason=%s',
+                refreshed,
+                self._leader_lock_key,
+                token,
+                'already_owner',
+            )
             return True
 
-        new_token = self._ensure_leader_token()
+        new_token = self._leader_lock_token or self._ensure_leader_token()
         attempts = 5
         for attempt in range(1, attempts + 1):
             acquired = False

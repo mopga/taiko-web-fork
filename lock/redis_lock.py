@@ -15,6 +15,9 @@ from lock.interfaces import LeaderLock
 LOGGER = logging.getLogger(__name__)
 
 
+SCAN_LEADER_KEY = "taiko:scanner:leader"
+
+
 _RELEASE_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
   return redis.call('del', KEYS[1])
