@@ -1,6 +1,7 @@
 """Factories for constructing storage implementations."""
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,25 +76,33 @@ def _create_leader_lock_for_profile(
     if run_profile == 'web':
         if redis_factory is not None:
             try:
-                test_client = redis_factory()
-                if test_client is None:
+                client = redis_factory()
+                if client is None:
                     raise RuntimeError('Redis client factory returned None')
-                test_client.ping()
+                client.ping()
             except Exception:
                 from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
 
                 LOGGER.warning(
-                    'falling back to DummyLeaderLock (web profile); redis unavailable for leader lock',
+                    'LeaderLock backend unavailable; falling back to DummyLeaderLock.',
                     exc_info=True,
                 )
-                LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
+                LOGGER.info('LeaderLock backend: Dummy (fallback)')
                 return DummyLeaderLock()
-            LOGGER.info('Leader lock configured: RedisLeaderLock key=%s', leader_lock_key)
+
+            db_index = None
+            with contextlib.suppress(Exception):
+                pool = getattr(client, 'connection_pool', None)
+                if pool is not None:
+                    kwargs = getattr(pool, 'connection_kwargs', {})
+                    db_index = kwargs.get('db')
+            LOGGER.info('LeaderLock backend: Redis(db=%s)', db_index if db_index is not None else '?')
             return RedisLeaderLock(redis_factory, leader_lock_key)
+
         from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
 
-        LOGGER.warning('falling back to DummyLeaderLock (web profile); redis factory unavailable')
-        LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
+        LOGGER.warning('Redis factory unavailable for leader lock; using DummyLeaderLock fallback.')
+        LOGGER.info('LeaderLock backend: Dummy (fallback)')
         return DummyLeaderLock()
 
     if run_profile == 'desktop':

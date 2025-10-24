@@ -66,7 +66,7 @@ class RedisLeaderLock(LeaderLock):
         try:
             result = self._client().set(self._key, token, nx=True, ex=ttl_value)
         except Exception:
-            LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
+            LOGGER.warning('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
             return False
         return bool(result)
 
@@ -91,12 +91,6 @@ class RedisLeaderLock(LeaderLock):
                 current = None
 
         if current != token:
-            LOGGER.info(
-                'Redis leader lock refresh skipped (not owner): key=%s token=%s owner=%s',
-                self._key,
-                token,
-                current or '<unknown>',
-            )
             return False
 
         try:
@@ -116,15 +110,46 @@ class RedisLeaderLock(LeaderLock):
 
         script = self._release_script
         if script is None:
-            script = client.register_script(_RELEASE_SCRIPT)
-            self._release_script = script
+            register = getattr(client, 'register_script', None)
+            if callable(register):
+                script = register(_RELEASE_SCRIPT)
+                self._release_script = script
 
-        try:
-            result = script(keys=[self._key], args=[token], client=client)
-        except Exception:
-            LOGGER.debug('Redis leader lock release script failed: key=%s token=%s', self._key, token, exc_info=True)
-            return False
-
-        ok = bool(result)
+        if script is not None:
+            try:
+                result = script(keys=[self._key], args=[token], client=client)
+            except Exception:
+                LOGGER.debug('Redis leader lock release script failed: key=%s token=%s', self._key, token, exc_info=True)
+                return False
+            ok = bool(result)
+        else:
+            try:
+                current = client.get(self._key)
+            except Exception:
+                LOGGER.debug('Redis leader lock release fallback get failed: key=%s token=%s', self._key, token, exc_info=True)
+                return False
+            if isinstance(current, bytes):
+                try:
+                    current = current.decode('utf-8')
+                except Exception:
+                    current = None
+            if current != token:
+                return False
+            try:
+                deleted = client.delete(self._key)
+            except Exception:
+                LOGGER.debug('Redis leader lock release fallback delete failed: key=%s token=%s', self._key, token, exc_info=True)
+                return False
+            ok = bool(deleted)
         LOGGER.info('Leader lock release result: ok=%s key=%s token=%s', ok, self._key, token)
         return ok
+
+    def ttl(self) -> Optional[int]:
+        try:
+            result = self._client().ttl(self._key)
+        except Exception:
+            LOGGER.debug('Redis leader lock ttl lookup failed: key=%s', self._key, exc_info=True)
+            return None
+        if isinstance(result, int):
+            return result
+        return None

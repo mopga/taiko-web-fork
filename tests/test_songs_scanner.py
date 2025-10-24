@@ -3558,9 +3558,9 @@ LEVEL:7
             follower_summary = follower_scanner.scan(full=False)
 
         self.assertTrue(follower_summary.get('fast_path'))
-        self.assertFalse(follower_summary.get('leader'))
-        self.assertTrue(follower_summary.get('skipped_due_to_leader'))
-        self.assertEqual(follower_summary.get('reason'), 'lock_miss')
+        self.assertTrue(follower_summary.get('leader'))
+        self.assertFalse(follower_summary.get('skipped_due_to_leader'))
+        self.assertEqual(follower_summary.get('reason'), 'digest_equal')
 
     def test_digest_changed_leader_only(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3635,9 +3635,9 @@ LEVEL:7
             follower_summary = follower_scanner.scan(full=False)
 
         self.assertTrue(follower_summary.get('fast_path'))
-        self.assertFalse(follower_summary.get('leader'))
-        self.assertTrue(follower_summary.get('skipped_due_to_leader'))
-        self.assertEqual(follower_summary.get('reason'), 'lock_miss')
+        self.assertTrue(follower_summary.get('leader'))
+        self.assertFalse(follower_summary.get('skipped_due_to_leader'))
+        self.assertEqual(follower_summary.get('reason'), 'digest_equal')
 
     def test_no_redis_no_leader(self):
         tmp_dir = Path(self._tmp_dir())
