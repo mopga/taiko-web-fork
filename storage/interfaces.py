@@ -66,6 +66,14 @@ class SongStore(Protocol):
     def delete_many(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         ...
 
+    def count_documents(
+        self,
+        filter: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        ...
+
     def create_index(self, keys: Any, *args: Any, **kwargs: Any) -> Any:
         ...
 

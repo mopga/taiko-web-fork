@@ -4817,7 +4817,21 @@ class SongScanner:
             and stored_manifest_files == files_count
         )
 
-        if digest_equal:
+        songs_count_value = self._count_enabled_songs()
+        manifest_has_documents = manifest_documents > 0
+        safe_fast_path = (
+            digest_equal
+            and manifest_has_documents
+            and songs_count_value is not None
+            and songs_count_value > 0
+        )
+        rehydrate_needed = (
+            digest_equal
+            and manifest_has_documents
+            and songs_count_value == 0
+        )
+
+        if safe_fast_path:
             summary['fast_path'] = True
             if redis_available and not self._acquire_leader_lock():
                 summary['skipped_due_to_leader'] = True
@@ -4829,6 +4843,23 @@ class SongScanner:
             refresher_stack.close()
             self._active_refresher_stack = None
             return summary
+
+        if rehydrate_needed:
+            if redis_available and not self._acquire_leader_lock():
+                summary['skipped_due_to_leader'] = True
+                self._log_scan_outcome(summary, fast_path=False, reason='lock_miss')
+                refresher_stack.close()
+                self._active_refresher_stack = None
+                return summary
+            LOGGER.info(
+                'Songs collection is empty while manifest exists; materializing songs from manifest...'
+            )
+            if self._materialize_songs_from_manifest(summary):
+                self._log_scan_outcome(summary, fast_path=False, reason='rehydrate_from_manifest')
+                refresher_stack.close()
+                self._active_refresher_stack = None
+                return summary
+            LOGGER.info('Manifest rehydration unavailable or incomplete; running full scan...')
 
         if redis_available:
             if not self._acquire_leader_lock():
@@ -5522,6 +5553,161 @@ class SongScanner:
             files_count_value,
             manifest_documents_value,
         )
+
+    def _count_enabled_songs(self) -> Optional[int]:
+        song_store = self._song_store
+        if song_store is None:
+            return None
+        try:
+            count_enabled = getattr(song_store, 'count_enabled', None)
+            if callable(count_enabled):
+                raw_count = count_enabled()  # type: ignore[misc]
+            else:
+                counter = getattr(song_store, 'count_documents', None)
+                if not callable(counter):
+                    return None
+                filter_doc = {
+                    '$or': [
+                        {'disabled': False},
+                        {'disabled': {'$exists': False}},
+                    ]
+                }
+                raw_count = counter(filter_doc)
+        except Exception:  # pragma: no cover - tolerate storage access failures
+            LOGGER.debug('Failed to count enabled songs', exc_info=True)
+            return None
+        try:
+            value = int(raw_count)
+        except (TypeError, ValueError):
+            return None
+        if value < 0:
+            return None
+        return value
+
+    def _materialize_songs_from_manifest(self, summary: Dict[str, int]) -> bool:
+        song_store = self._song_store
+        manifest_store = self._manifest_store
+        if song_store is None or manifest_store is None:
+            LOGGER.debug(
+                'Skipping manifest materialization: song_store=%s manifest_store=%s',
+                song_store,
+                manifest_store,
+            )
+            return False
+        try:
+            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}})
+        except Exception:  # pragma: no cover - tolerate manifest enumeration errors
+            LOGGER.debug('Failed to enumerate manifest entries for rehydration', exc_info=True)
+            return False
+        processed = 0
+        inserted = 0
+        updated = 0
+        errors = 0
+        now = datetime.now(UTC)
+        for raw_entry in cursor:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = dict(raw_entry)
+            stable_id = entry.get('id') or entry.get('_id')
+            if not isinstance(stable_id, str) or not stable_id:
+                continue
+            entry.pop('_id', None)
+            raw_difficulties = entry.get('difficulties') if isinstance(entry.get('difficulties'), dict) else {}
+            normalized_difficulties = {
+                legacy: {'valid': bool(raw_difficulties.get(legacy))}
+                for legacy in ('easy', 'normal', 'hard', 'oni', 'ura')
+            }
+            playable_count = sum(1 for payload in normalized_difficulties.values() if payload['valid'])
+            category_value = entry.get('category')
+            if not isinstance(category_value, str) or not category_value.strip():
+                category_value = DEFAULT_CATEGORY_TITLE
+            else:
+                category_value = category_value.strip()
+            title_value = str(entry.get('title') or '')
+            subtitle_value = str(entry.get('subtitle') or '')
+            raw_paths = entry.get('paths') if isinstance(entry.get('paths'), dict) else {}
+            paths_payload: Dict[str, object] = {}
+            for key, value in raw_paths.items():
+                if value is None:
+                    continue
+                paths_payload[str(key)] = value
+            enabled = not bool(entry.get('disabled', False))
+            sha1_value = entry.get('sha1') if isinstance(entry.get('sha1'), str) else None
+            hash_value = sha1_value or stable_id
+            sanitized_entry = {key: value for key, value in entry.items() if key != '_id'}
+            update_payload: Dict[str, object] = {
+                'scanner_stable_id': stable_id,
+                'title': title_value,
+                'title_lc': title_value.casefold() if title_value else '',
+                'subtitle': subtitle_value,
+                'category': category_value,
+                'category_id': 0,
+                'type': str(entry.get('source_type') or 'tja'),
+                'paths': paths_payload,
+                'managed_by_scanner': True,
+                'enabled': enabled,
+                'disabled': not enabled,
+                'is_playable': playable_count > 0,
+                'valid_chart_count': playable_count,
+                'valid_charts': playable_count,
+                'difficulties': normalized_difficulties,
+                'preview_available': bool(entry.get('preview_available')),
+                'sha1': sha1_value,
+                'hash': hash_value,
+                'fingerprint': hash_value,
+                'mtime': entry.get('mtime'),
+                'duration_ms': int(entry.get('duration_ms') or 0),
+                'titleNormalized': _normalise_title_key(title_value) if title_value else '',
+                'scanner_manifest_snapshot': sanitized_entry,
+                'scanner_rehydrated_at': now,
+                'scanner_rehydrated_placeholder': True,
+                'updated_at': now,
+            }
+            set_on_insert: Dict[str, object] = {
+                'group_key': f'manifest:{stable_id}',
+                'charts': [],
+                'courses': {legacy: None for legacy in COURSE_LEGACY_MAP.values()},
+                'import_issues': [],
+                'managed_by_scanner': True,
+            }
+            update_document = {
+                '$set': update_payload,
+                '$setOnInsert': set_on_insert,
+            }
+            try:
+                result = song_store.update_one(
+                    {'scanner_stable_id': stable_id},
+                    update_document,
+                    upsert=True,
+                )
+            except Exception:  # pragma: no cover - tolerate transient write issues
+                LOGGER.warning('Failed to rehydrate song %s from manifest', stable_id, exc_info=True)
+                errors += 1
+                continue
+            processed += 1
+            if getattr(result, 'upserted_id', None) is not None:
+                inserted += 1
+            elif getattr(result, 'matched_count', 0):
+                if getattr(result, 'modified_count', 0):
+                    updated += 1
+            else:
+                inserted += 1
+        if not processed:
+            return False
+        total_upserts = inserted + updated
+        if total_upserts:
+            self._metrics.increment('songs_upserted_total', total_upserts)
+        if inserted:
+            self._metrics.increment('songs_inserted_total', inserted)
+        summary['found'] = processed
+        summary['inserted'] = inserted
+        summary['updated'] = updated
+        summary['manifest_documents'] = processed
+        summary['errors'] = summary.get('errors', 0) + errors
+        summary.setdefault('disabled', 0)
+        summary.setdefault('skipped', 0)
+        summary['reason'] = 'rehydrate_from_manifest'
+        return True
 
     def _ensure_manifest_indexes(self) -> None:
         store = self._manifest_store

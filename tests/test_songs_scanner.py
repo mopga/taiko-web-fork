@@ -293,6 +293,19 @@ class _MemoryCollection:
             if self._matches(doc, filter_ or {}):
                 yield self._project(doc, projection or {})
 
+    def count_documents(self, filter_=None, **kwargs):
+        with self._lock:
+            matches = [doc for doc in self._docs if self._matches(doc, filter_ or {})]
+        limit = kwargs.get('limit')
+        if limit is not None:
+            try:
+                limit_value = int(limit)
+            except (TypeError, ValueError):
+                limit_value = None
+            if limit_value is not None and limit_value >= 0:
+                return min(len(matches), limit_value)
+        return len(matches)
+
     def find_one_and_update(self, filter_, update, upsert=False, return_document=None, **kwargs):
         with self._lock:
             doc = None
@@ -3615,6 +3628,56 @@ LEVEL:7
 
         self.assertTrue(fast_summary.get('fast_path'))
         self.assertEqual(fast_summary.get('reason'), 'digest_equal')
+
+    def test_scan_rehydrates_from_manifest_when_songs_missing(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        db.meta._docs.append({
+            '_id': 'songs_manifest',
+            'manifest_checksum': 'rehydrate-checksum',
+            'files_count': 1,
+            'manifest_documents': 1,
+        })
+        db.songs_manifest._docs.append({
+            '_id': 'alpha-stable',
+            'id': 'alpha-stable',
+            'title': 'Alpha',
+            'subtitle': '',
+            'category': 'General',
+            'difficulties': {'easy': True, 'normal': False, 'hard': False, 'oni': False, 'ura': False},
+            'paths': {'audio_url': '/songs/alpha/main.ogg'},
+            'preview_available': True,
+            'source_type': 'tja',
+            'duration_ms': 1200,
+            'sha1': 'sha1-alpha',
+        })
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 1)):
+            summary = scanner.scan(full=False)
+
+        self.assertFalse(summary.get('fast_path'))
+        self.assertEqual(summary.get('reason'), 'rehydrate_from_manifest')
+        self.assertEqual(summary.get('inserted'), 1)
+        self.assertEqual(summary.get('found'), 1)
+
+        songs_docs = list(db.songs.find())
+        self.assertEqual(len(songs_docs), 1)
+        song_doc = songs_docs[0]
+        self.assertEqual(song_doc.get('scanner_stable_id'), 'alpha-stable')
+        self.assertTrue(song_doc.get('managed_by_scanner'))
+        self.assertTrue(song_doc.get('enabled'))
+        self.assertEqual(song_doc.get('title'), 'Alpha')
 
     def test_has_leader_lock_false_without_redis(self):
         tmp_dir = Path(self._tmp_dir())

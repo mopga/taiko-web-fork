@@ -77,6 +77,14 @@ class MongoSongStore(SongStore):
     def delete_many(self, filter: Mapping[str, Any], *args: Any, **kwargs: Any) -> Any:
         return self._collection().delete_many(filter, *args, **kwargs)
 
+    def count_documents(
+        self,
+        filter: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> int:
+        return int(self._collection().count_documents(filter, *args, **kwargs))
+
     def create_index(self, keys: Any, *args: Any, **kwargs: Any) -> Any:
         return self._collection().create_index(keys, *args, **kwargs)
 
