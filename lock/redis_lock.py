@@ -1,15 +1,18 @@
 """Redis-backed ``LeaderLock`` implementation."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional
 
 try:  # pragma: no cover - redis optional at runtime
-    from redis import Redis, WatchError
+    from redis import Redis
 except Exception:  # pragma: no cover - fallback when redis is unavailable
     Redis = Any  # type: ignore[misc,assignment]
-    WatchError = Exception  # type: ignore[assignment]
 
 from lock.interfaces import LeaderLock
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _RELEASE_SCRIPT = """
@@ -57,61 +60,68 @@ class RedisLeaderLock(LeaderLock):
 
     def acquire(self, token: str, ttl_seconds: int) -> bool:
         ttl_value = self._normalise_ttl(ttl_seconds)
-        result = self._client().set(self._key, token, nx=True, ex=ttl_value)
+        try:
+            result = self._client().set(self._key, token, nx=True, ex=ttl_value)
+        except Exception:
+            LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
+            return False
         return bool(result)
 
     def refresh(self, token: str, ttl_seconds: int) -> bool:
-        client = self._client()
         ttl_value = self._normalise_ttl(ttl_seconds)
-        current = client.get(self._key)
+        try:
+            client = self._client()
+        except Exception:
+            LOGGER.debug('Redis leader lock refresh failed to obtain client: key=%s token=%s', self._key, token, exc_info=True)
+            return False
+
+        try:
+            current = client.get(self._key)
+        except Exception:
+            LOGGER.debug('Redis leader lock refresh failed to read owner: key=%s token=%s', self._key, token, exc_info=True)
+            return False
+
         if isinstance(current, bytes):
             try:
                 current = current.decode('utf-8')
             except Exception:  # pragma: no cover - defensive decode
                 current = None
+
         if current != token:
+            LOGGER.info(
+                'Redis leader lock refresh skipped (not owner): key=%s token=%s owner=%s',
+                self._key,
+                token,
+                current or '<unknown>',
+            )
             return False
-        refreshed = bool(client.expire(self._key, ttl_value))
-        if refreshed or ttl_value <= 0:
-            return refreshed
-        try:  # pragma: no cover - ttl best effort
-            ttl_state = client.ttl(self._key)
-        except Exception:
-            ttl_state = None
-        if ttl_state != -1:
-            return refreshed
+
         try:
-            while True:
-                pipe = client.pipeline()
-                try:
-                    pipe.watch(self._key)
-                    owner = pipe.get(self._key)
-                    if isinstance(owner, bytes):
-                        try:
-                            owner = owner.decode('utf-8')
-                        except Exception:
-                            owner = None
-                    if owner != token:
-                        pipe.unwatch()
-                        break
-                    pipe.multi()
-                    pipe.set(self._key, token, xx=True, ex=ttl_value)
-                    pipe.execute()
-                    refreshed = True
-                    break
-                except WatchError:
-                    continue
-                finally:
-                    pipe.reset()
+            refreshed = bool(client.expire(self._key, ttl_value))
         except Exception:
-            return refreshed
+            LOGGER.debug('Redis leader lock expire failed: key=%s token=%s', self._key, token, exc_info=True)
+            return False
+
         return refreshed
 
     def release(self, token: str) -> bool:
-        client = self._client()
+        try:
+            client = self._client()
+        except Exception:
+            LOGGER.debug('Redis leader lock release failed to obtain client: key=%s token=%s', self._key, token, exc_info=True)
+            return False
+
         script = self._release_script
         if script is None:
             script = client.register_script(_RELEASE_SCRIPT)
             self._release_script = script
-        result = script(keys=[self._key], args=[token], client=client)
-        return bool(result)
+
+        try:
+            result = script(keys=[self._key], args=[token], client=client)
+        except Exception:
+            LOGGER.debug('Redis leader lock release script failed: key=%s token=%s', self._key, token, exc_info=True)
+            return False
+
+        ok = bool(result)
+        LOGGER.info('Leader lock release result: ok=%s key=%s token=%s', ok, self._key, token)
+        return ok

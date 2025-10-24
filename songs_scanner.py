@@ -238,6 +238,7 @@ class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
 
     def __enter__(self) -> "TTLRefresher":
         if self.ttl > 0 and self.period > 0:
+            self._stop_event.clear()
             self._worker = threading.Thread(
                 target=self._refresh_loop,
                 name='scanner-lock-ttl-refresh',
@@ -249,11 +250,12 @@ class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
     def _refresh_loop(self) -> None:
         while not self._stop_event.wait(self.period):
             try:
-                if self.lock.refresh(self.token, self.ttl):
-                    continue
+                refreshed = self.lock.refresh(self.token, self.ttl)
             except Exception:  # pragma: no cover - ttl refresh best effort
                 LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
-                break
+                continue
+            if refreshed:
+                continue
             owner: Optional[str]
             try:
                 owner = self.lock.get_owner()
@@ -261,11 +263,10 @@ class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
                 LOGGER.debug('Failed to read scanner leader lock owner during refresh', exc_info=True)
                 owner = None
             LOGGER.warning(
-                'scanner leader lock refresh lost: owner=%s token=%s',
+                'scanner leader lock refresh unsuccessful: owner=%s token=%s',
                 owner or '<unknown>',
                 self.token,
             )
-            break
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -5544,40 +5545,44 @@ class SongScanner:
     def _acquire_leader_lock(self) -> bool:
         lock = self._leader_lock
         if lock is not None:
+            if self.has_leader_lock():
+                return True
+
             ttl_value = LEADER_LOCK_TTL_SECONDS
             token = self._ensure_leader_token()
-            owner: Optional[str] = None
-            try:
-                owner = lock.get_owner()
-            except Exception:  # pragma: no cover - storage access best effort
-                LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
-            if owner == token:
+            attempts = 5
+            for attempt in range(1, attempts + 1):
+                acquired = False
                 try:
-                    if lock.refresh(token, ttl_value):
-                        return True
-                except Exception:  # pragma: no cover - ttl refresh best effort
-                    LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
-            try:
-                if lock.acquire(token, ttl_value):
+                    acquired = lock.acquire(token, ttl_value)
+                except Exception:  # pragma: no cover - storage access best effort
+                    LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
+                    acquired = False
+                LOGGER.info(
+                    'LeaderLock acquire result: ok=%s key=%s token=%s attempt=%d',
+                    acquired,
+                    self._leader_lock_key,
+                    token,
+                    attempt,
+                )
+                if acquired:
                     self._leader_lock_token = token
                     return True
+                if attempt < attempts:
+                    time.sleep(1.0)
+
+            owner_label: Optional[str] = None
+            try:
+                owner_label = lock.get_owner()
             except Exception:  # pragma: no cover - storage access best effort
-                LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
-                self._leader_lock_token = None
-                return False
-            if owner != token:
-                owner_label = owner
-                if owner_label is None:
-                    try:
-                        owner_label = lock.get_owner()
-                    except Exception:  # pragma: no cover - storage access best effort
-                        LOGGER.debug('Failed to read scanner leader lock owner', exc_info=True)
-                        owner_label = None
-                LOGGER.info(
-                    'Song scanner leader lock miss: key=%s owner=%s',
-                    self._leader_lock_key,
-                    owner_label or '<unknown>',
-                )
+                LOGGER.debug('Failed to read scanner leader lock owner', exc_info=True)
+            LOGGER.info(
+                'Song scanner leader lock miss: key=%s owner=%s ttl=%d reason=%s',
+                self._leader_lock_key,
+                owner_label or '<unknown>',
+                ttl_value,
+                'lock_miss',
+            )
             self._leader_lock_token = None
             return False
         client = self._redis
@@ -5586,35 +5591,54 @@ class SongScanner:
             self._leader_lock_token = None
             return False
         token = self._leader_lock_token
-        if token is not None:
-            try:
-                current = client.get(self._leader_lock_key)
-            except Exception:  # pragma: no cover - redis access best effort
-                LOGGER.debug('Failed to refresh scanner leader lock', exc_info=True)
-                self._leader_lock_token = None
-                return False
-            if isinstance(current, bytes):
-                try:
-                    current = current.decode('utf-8')
-                except Exception:
-                    current = None
-            if current == token:
-                try:
-                    client.expire(self._leader_lock_key, self._leader_lock_ttl)
-                except Exception:  # pragma: no cover - ttl refresh best effort
-                    LOGGER.debug('Failed to refresh scanner leader lock ttl', exc_info=True)
-                return True
-            self._leader_lock_token = None
-        new_token = self._ensure_leader_token()
-        try:
-            acquired = client.set(self._leader_lock_key, new_token, nx=True, ex=self._leader_lock_ttl)
-        except Exception:  # pragma: no cover - redis access best effort
-            LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
-            self._leader_lock_token = None
-            return False
-        if acquired:
-            self._leader_lock_token = new_token
+        if token is not None and self.has_leader_lock():
             return True
+
+        new_token = self._ensure_leader_token()
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            acquired = False
+            try:
+                acquired = bool(
+                    client.set(self._leader_lock_key, new_token, nx=True, ex=self._leader_lock_ttl)
+                )
+            except Exception:  # pragma: no cover - redis access best effort
+                LOGGER.debug('Failed to acquire scanner leader lock', exc_info=True)
+                acquired = False
+            LOGGER.info(
+                'LeaderLock acquire result: ok=%s key=%s token=%s attempt=%d',
+                acquired,
+                self._leader_lock_key,
+                new_token,
+                attempt,
+            )
+            if acquired:
+                self._leader_lock_token = new_token
+                return True
+            if attempt < attempts:
+                time.sleep(1.0)
+
+        owner_label: Optional[str] = None
+        ttl_state: Optional[int] = None
+        try:
+            current = client.get(self._leader_lock_key)
+            if isinstance(current, bytes):
+                current = current.decode('utf-8')
+            owner_label = current if isinstance(current, str) else None
+        except Exception:  # pragma: no cover - redis access best effort
+            LOGGER.debug('Failed to read scanner leader lock owner', exc_info=True)
+        try:
+            ttl_value = client.ttl(self._leader_lock_key)
+            ttl_state = ttl_value if isinstance(ttl_value, int) else None
+        except Exception:  # pragma: no cover - redis access best effort
+            LOGGER.debug('Failed to read scanner leader lock ttl', exc_info=True)
+        LOGGER.info(
+            'Song scanner leader lock miss: key=%s owner=%s ttl=%s reason=%s',
+            self._leader_lock_key,
+            owner_label or '<unknown>',
+            ttl_state if ttl_state is not None else '<unknown>',
+            'lock_miss',
+        )
         self._leader_lock_token = None
         return False
 

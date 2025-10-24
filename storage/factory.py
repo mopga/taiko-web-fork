@@ -74,10 +74,26 @@ def _create_leader_lock_for_profile(
 ) -> Optional[LeaderLock]:
     if run_profile == 'web':
         if redis_factory is not None:
+            try:
+                test_client = redis_factory()
+                if test_client is None:
+                    raise RuntimeError('Redis client factory returned None')
+                test_client.ping()
+            except Exception:
+                from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
+
+                LOGGER.warning(
+                    'Redis unavailable for leader lock; falling back to DummyLeaderLock for web profile',
+                    exc_info=True,
+                )
+                LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
+                return DummyLeaderLock()
+            LOGGER.info('Leader lock configured: RedisLeaderLock key=%s', leader_lock_key)
             return RedisLeaderLock(redis_factory, leader_lock_key)
         from lock.dummy_lock import DummyLeaderLock  # lazy import to avoid optional dependency
 
         LOGGER.warning('No Redis factory for web profile — falling back to DummyLeaderLock')
+        LOGGER.info('Leader lock configured: DummyLeaderLock used key=%s', leader_lock_key)
         return DummyLeaderLock()
 
     if run_profile == 'desktop':
@@ -91,6 +107,7 @@ def _create_leader_lock_for_profile(
         return FileLeaderLock(file_leader_lock_path)
 
     if redis_factory is not None:
+        LOGGER.info('Leader lock configured: RedisLeaderLock key=%s', leader_lock_key)
         return RedisLeaderLock(redis_factory, leader_lock_key)
 
     LOGGER.info(
