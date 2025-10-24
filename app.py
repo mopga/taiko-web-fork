@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import unicodedata
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -53,6 +53,12 @@ from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 from tools.init_db_schema import init_db_schema
+from storage.factory import StorageBundle, create_storage_bundle
+from storage.interfaces import (
+    LeaderLock as LeaderLockInterface,
+    ManifestStore as ManifestStoreInterface,
+    SongStore as SongStoreInterface,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -250,6 +256,11 @@ _mongo_dispatcher: Optional[MongoDispatcher] = None
 _redis_dispatcher: Optional[RedisDispatcher] = None
 _song_scanner_provider: Optional[SongScannerProvider] = None
 
+_storage_bundle: Optional[StorageBundle] = None
+SONG_STORE: Optional[SongStoreInterface] = None
+MANIFEST_STORE: Optional[ManifestStoreInterface] = None
+LEADER_LOCK: Optional[LeaderLockInterface] = None
+
 
 def setup_stdout_logging() -> None:
     root = logging.getLogger()
@@ -309,16 +320,36 @@ def _coerce_int(value: object, default: int = 0) -> int:
     return number
 
 
-def _get_manifest_collection():
-    return getattr(db, 'songs_manifest', None)
+def _get_song_store() -> Optional[SongStoreInterface]:
+    override_store = None
+    if not isinstance(db, _LazyResourceProxy):
+        override_store = getattr(db, 'songs', None)
+    if override_store is not None:
+        return cast(SongStoreInterface, override_store)
+    return SONG_STORE
+
+
+def _require_song_store() -> SongStoreInterface:
+    store = _get_song_store()
+    if store is None:
+        raise RuntimeError('Song store is not configured')
+    return store
+
+
+def _get_manifest_store() -> Optional[ManifestStoreInterface]:
+    return MANIFEST_STORE
+
+
+def _get_manifest_collection():  # backward compatibility for tests
+    return _get_manifest_store()
 
 
 def _load_manifest_meta() -> Optional[dict]:
-    collection = _get_manifest_collection()
-    if collection is None:
+    store = _get_manifest_collection()
+    if store is None:
         return None
     try:
-        meta = collection.find_one({'_id': '__meta__'})
+        meta = store.find_one({'_id': '__meta__'})
         if isinstance(meta, dict):
             return meta
     except Exception:
@@ -604,6 +635,16 @@ def create_app():
     _mongo_dispatcher = MongoDispatcher(_create_mongo_client, db_name)
     _redis_dispatcher = RedisDispatcher(_create_redis_client)
 
+    global _storage_bundle, SONG_STORE, MANIFEST_STORE, LEADER_LOCK
+    _storage_bundle = create_storage_bundle(
+        run_profile=RUN_PROFILE,
+        mongo_database_factory=_mongo_dispatcher.get_database,
+        redis_client_factory=_redis_dispatcher.get_client,
+    )
+    SONG_STORE = _storage_bundle.song_store
+    MANIFEST_STORE = _storage_bundle.manifest_store
+    LEADER_LOCK = _storage_bundle.leader_lock
+
     app_instance.cache = Cache(app_instance, config=redis_config)
     sess.init_app(app_instance)
     #csrf = CSRFProtect(app)
@@ -673,6 +714,9 @@ def create_app():
             ignore_globs=SCAN_IGNORE_GLOBS,
             coerce_unknown_course=COERCE_UNKNOWN_COURSE,
             redis_client=app_instance.config.get('SESSION_REDIS'),
+            song_store=SONG_STORE,
+            manifest_store=MANIFEST_STORE,
+            leader_lock=LEADER_LOCK,
         )
 
     _song_scanner_provider = SongScannerProvider(_create_song_scanner)
@@ -901,7 +945,8 @@ def route_admin():
 @app.route(basedir + 'admin/songs')
 @admin_required(level=50)
 def route_admin_songs():
-    songs = sorted(list(db.songs.find({})), key=lambda x: x['id'])
+    song_store = _require_song_store()
+    songs = sorted(list(song_store.find({})), key=lambda x: x['id'])
     categories = db.categories.find({})
     user = db.users.find_one({'username': session['username']})
     return render_template('admin_songs.html', songs=songs, admin=user, categories=list(categories), config=get_config())
@@ -910,7 +955,7 @@ def route_admin_songs():
 @app.route(basedir + 'admin/songs/<int:id>')
 @admin_required(level=50)
 def route_admin_songs_id(id):
-    song = db.songs.find_one({'id': id})
+    song = _require_song_store().find_one({'id': id})
     if not song:
         return abort(404)
 
@@ -943,7 +988,7 @@ def _current_song_id_ceiling(*, include_counter: bool = True) -> int:
         if seq_doc and isinstance(seq_doc.get('value'), int):
             current = max(current, seq_doc['value'])
     try:
-        highest_song = db.songs.find_one(sort=[('id', -1)])
+        highest_song = _require_song_store().find_one(sort=[('id', -1)])
     except Exception:
         highest_song = None
     if highest_song and isinstance(highest_song.get('id'), int):
@@ -1035,13 +1080,13 @@ def _get_next_song_id():
     if seq is not None:
         seq_doc = seq.find_one({'name': 'songs'})
         seq_value = seq_doc['value'] if seq_doc else 0
-        highest_song = db.songs.find_one(sort=[('id', -1)])
+        highest_song = _require_song_store().find_one(sort=[('id', -1)])
         if highest_song and highest_song['id'] > seq_value:
             seq_value = highest_song['id']
         next_value = seq_value + 1
         seq.update_one({'name': 'songs'}, {'$set': {'value': next_value}}, upsert=True)
         return next_value
-    highest_song = db.songs.find_one(sort=[('id', -1)])
+    highest_song = _require_song_store().find_one(sort=[('id', -1)])
     if highest_song and highest_song['id']:
         return highest_song['id'] + 1
     return 1
@@ -1100,7 +1145,7 @@ def route_admin_songs_new_post():
     output['id'] = seq_new
     output['order'] = seq_new
     
-    db.songs.insert_one(output)
+    _require_song_store().insert_one(output)
     if not hash_error:
         flash('Song created.')
     
@@ -1110,7 +1155,7 @@ def route_admin_songs_new_post():
 @app.route(basedir + 'admin/songs/<int:id>', methods=['POST'])
 @admin_required(level=50)
 def route_admin_songs_id_post(id):
-    song = db.songs.find_one({'id': id})
+    song = _require_song_store().find_one({'id': id})
     if not song:
         return abort(404)
 
@@ -1153,7 +1198,7 @@ def route_admin_songs_id_post(id):
             hash_error = True
             flash('An error occurred: %s' % str(e), 'error')
     
-    db.songs.update_one({'id': id}, {'$set': output})
+    _require_song_store().update_one({'id': id}, {'$set': output})
     if not hash_error:
         flash('Changes saved.')
     
@@ -1163,11 +1208,11 @@ def route_admin_songs_id_post(id):
 @app.route(basedir + 'admin/songs/<int:id>/delete', methods=['POST'])
 @admin_required(level=100)
 def route_admin_songs_id_delete(id):
-    song = db.songs.find_one({'id': id})
+    song = _require_song_store().find_one({'id': id})
     if not song:
         return abort(404)
 
-    db.songs.delete_one({'id': id})
+    _require_song_store().delete_one({'id': id})
     flash('Song deleted.')
     return redirect(basedir + 'admin/songs')
 
@@ -1220,7 +1265,7 @@ def route_api_preview():
         abort(400)
 
     song_id = int(song_id)
-    song = db.songs.find_one({'id': song_id})
+    song = _require_song_store().find_one({'id': song_id})
     if not song:
         abort(400)
 
@@ -1376,7 +1421,7 @@ def route_api_song_detail(song_id: str):
         projection['charts.chart_data'] = False
 
     try:
-        song_doc = db.songs.find_one({'scanner_stable_id': stable_id}, projection)
+        song_doc = _require_song_store().find_one({'scanner_stable_id': stable_id}, projection)
     except Exception:
         app.logger.exception('Failed to load song detail for %s', stable_id)
         abort(500)
@@ -1478,7 +1523,7 @@ def route_api_song_details() -> 'flask.Response':
     projection = dict(_SONG_DETAIL_PROJECTION)
 
     try:
-        cursor = db.songs.find({'scanner_stable_id': {'$in': ordered_ids}}, projection)
+        cursor = _require_song_store().find({'scanner_stable_id': {'$in': ordered_ids}}, projection)
         docs = [dict(raw_doc) for raw_doc in cursor if isinstance(raw_doc, dict)]
     except Exception as exc:
         app.logger.exception('Failed to load batch song details')
@@ -1563,10 +1608,10 @@ def route_api_tower_chart():
         mode_param = 'dandojo'
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
-    song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
+    song = _require_song_store().find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
     if song is None:
         normalised_title = title.casefold()
-        song = db.songs.find_one({'titleNormalized': normalised_title}, projection)
+        song = _require_song_store().find_one({'titleNormalized': normalised_title}, projection)
     if song is None:
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
@@ -1645,10 +1690,10 @@ def route_api_dan_chart():
     rank_param = rank_raw.casefold()
 
     projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
-    song = db.songs.find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
+    song = _require_song_store().find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
     if song is None:
         normalised_title = title.casefold()
-        song = db.songs.find_one({'titleNormalized': normalised_title}, projection)
+        song = _require_song_store().find_one({'titleNormalized': normalised_title}, projection)
     if song is None:
         return jsonify({'status': 'error', 'message': 'not_found'}), 404
 
@@ -2320,8 +2365,8 @@ _SONG_DETAIL_PROJECTION = {
 
 
 def _load_manifest_entries_for_ids(ids: list[str]) -> dict[str, dict]:
-    collection = _get_manifest_collection()
-    if collection is None or not ids:
+    store = _get_manifest_collection()
+    if store is None or not ids:
         return {}
     unique_ids = sorted({identifier for identifier in ids if isinstance(identifier, str) and identifier})
     if not unique_ids:
@@ -2334,7 +2379,7 @@ def _load_manifest_entries_for_ids(ids: list[str]) -> dict[str, dict]:
         'paths': True,
     }
     try:
-        cursor = collection.find({'_id': {'$in': unique_ids}}, projection)
+        cursor = store.find({'_id': {'$in': unique_ids}}, projection)
     except Exception:
         app.logger.debug('Failed to load manifest entries for %d ids', len(unique_ids), exc_info=True)
         return {}
