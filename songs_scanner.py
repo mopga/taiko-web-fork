@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from queue import Empty, Full, Queue
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -157,30 +158,34 @@ _HANG_WATCHDOG_ARMED = False
 LEADER_LOCK_TTL_SECONDS = 300
 
 
-def _posint_env(*names: str, default: int) -> int:
-    if not names:
-        return default
+def _posint_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        LOGGER.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return int(default)
+    if value <= 0:
+        LOGGER.warning("Non-positive %s=%r; using default %d", name, raw, default)
+        return int(default)
+    return int(value)
 
+
+def _posint_env_any(*names: str, default: int) -> int:
+    if not names:
+        return int(default)
     preferred = names[0]
     for name in names:
         raw = os.getenv(name)
-        if raw is None:
+        if raw is None or str(raw).strip() == "":
             continue
-        token = str(raw).strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except (TypeError, ValueError):
-            continue
-        if value <= 0:
-            continue
+        value = _posint_env(name, default)
         if name != preferred:
-            LOGGER.info(
-                "Using alias %s=%s for %s", name, value, preferred
-            )
+            LOGGER.info("Using alias %s=%s for %s", name, value, preferred)
         return value
-    return default
+    return int(default)
 
 
 def _nonnegative_env(*names: str, default: int = 0) -> int:
@@ -209,19 +214,37 @@ def _nonnegative_env(*names: str, default: int = 0) -> int:
     return max(0, default)
 
 
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        LOGGER.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return float(default)
+    if value <= 0:
+        LOGGER.warning("Non-positive %s=%r; using default %.2f", name, raw, default)
+        return float(default)
+    return float(value)
+
+
 def compute_fs_digest(
     root: Path,
     *,
     ignore_globs: Optional[Iterable[str]] = None,
     include_index: bool = True,
-) -> Tuple[str, int, Optional[Dict[str, Tuple[int, int]]]]:
-    """Return a deterministic checksum and lightweight index for ``root``.
+) -> Tuple[int, str, Optional[Dict[str, Tuple[int, int]]]]:
+    """Return file count, manifest checksum, and optional index for ``root``.
 
-    The implementation avoids touching file bodies by walking the directory tree
-    with :func:`os.scandir` and hashing a stable, sorted list of
-    ``"{relpath}|{size}|{mtime_ns}"`` strings.  The caller can request a full
-    index of file metadata by passing ``include_index=True`` (default).
+    The implementation walks the filesystem in a single thread to enumerate
+    candidate files, then parallelises stat/hashing work across a
+    :class:`ThreadPoolExecutor`.  The manifest checksum matches the historical
+    format (a SHA1 digest of ``"{path}|{size}|{mtime_ns}"`` payloads sorted by
+    path) but is computed incrementally as worker threads finish.
     """
+
+    start_time = time.perf_counter()
 
     try:
         root_path = Path(root).resolve()
@@ -229,9 +252,16 @@ def compute_fs_digest(
         root_path = Path(root)
 
     if not root_path.exists():
-        checksum = hashlib.sha1(b"").hexdigest()
+        empty_checksum = hashlib.sha1(b"").hexdigest()
         empty_index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
-        return checksum, 0, empty_index
+        LOGGER.info(
+            "compute_fs_digest: files=%d, io_threads=%d, duration=%.3fs, rate=%.1f files/s",
+            0,
+            1,
+            0.0,
+            0.0,
+        )
+        return 0, empty_checksum, empty_index
 
     ignore_patterns = tuple(pattern for pattern in (ignore_globs or []) if pattern)
 
@@ -241,10 +271,8 @@ def compute_fs_digest(
         relative_text = relative_path.as_posix()
         return any(fnmatch.fnmatch(relative_text, pattern) for pattern in ignore_patterns)
 
-    entries: List[str] = []
-    index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
-    files = 0
     stack: List[Tuple[Path, Path]] = [(Path("."), root_path)]
+    files_to_stat: List[Tuple[str, Path]] = []
 
     while stack:
         rel_dir, abs_dir = stack.pop()
@@ -282,29 +310,81 @@ def compute_fs_digest(
                     LOGGER.debug("Failed to classify entry %s during digest", entry.path, exc_info=True)
                     continue
 
-                try:
-                    stat_result = entry.stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    LOGGER.debug("Failed to stat file %s during digest", entry.path, exc_info=True)
-                    continue
-
-                mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
-                payload = f"{relative}|{int(stat_result.st_size)}|{int(mtime_ns)}"
-                entries.append(payload)
-                files += 1
-                if index is not None:
-                    index[relative] = (int(stat_result.st_size), int(mtime_ns))
+                files_to_stat.append((relative, abs_path))
 
             for sub_rel, sub_abs in sorted(subdirs, key=lambda item: item[0].as_posix()):
                 stack.append((sub_rel, sub_abs))
 
-    hasher = hashlib.sha1()
-    for payload in sorted(entries):
-        hasher.update(payload.encode("utf-8", "surrogateescape"))
+    files_count = len(files_to_stat)
+    index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
 
-    return hasher.hexdigest(), files, index
+    if not files_to_stat:
+        empty_checksum = hashlib.sha1(b"").hexdigest()
+        duration = time.perf_counter() - start_time
+        LOGGER.info(
+            "compute_fs_digest: files=%d, io_threads=%d, duration=%.3fs, rate=%.1f files/s",
+            0,
+            1,
+            duration,
+            0.0,
+        )
+        return 0, empty_checksum, index
+
+    cpu_count = os.cpu_count() or 1
+    io_threads_default = min(32, max(2, 2 * cpu_count))
+    io_threads = max(1, _posint_env("SCAN_IO_THREADS", io_threads_default))
+
+    def _stat_and_encode(payload: Tuple[str, Path]) -> Optional[Tuple[str, int, int]]:
+        relpath, absolute = payload
+        try:
+            stat_result = absolute.stat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            LOGGER.debug("Failed to stat file %s during digest", absolute, exc_info=True)
+            return None
+        mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+        size = int(stat_result.st_size)
+        return relpath, size, int(mtime_ns)
+
+    manifest_entries: List[Tuple[str, int, int]] = []
+
+    if io_threads <= 1:
+        for item in files_to_stat:
+            result = _stat_and_encode(item)
+            if result is None:
+                continue
+            manifest_entries.append(result)
+    else:
+        with ThreadPoolExecutor(max_workers=io_threads, thread_name_prefix="scan-io") as executor:
+            futures = {executor.submit(_stat_and_encode, item): item for item in files_to_stat}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is None:
+                    continue
+                manifest_entries.append(result)
+
+    manifest_entries.sort(key=lambda item: item[0])
+
+    hasher = hashlib.sha1()
+    for relpath, size, mtime_ns in manifest_entries:
+        payload = f"{relpath}|{size}|{mtime_ns}"
+        hasher.update(payload.encode("utf-8", "surrogateescape"))
+        if index is not None:
+            index[relpath] = (size, mtime_ns)
+
+    checksum = hasher.hexdigest()
+    duration = time.perf_counter() - start_time
+    rate = files_count / duration if duration > 0 else 0.0
+    LOGGER.info(
+        "compute_fs_digest: files=%d, io_threads=%d, duration=%.3fs, rate=%.1f files/s",
+        files_count,
+        io_threads,
+        duration,
+        rate,
+    )
+
+    return files_count, checksum, index
 
 
 def _encode_fs_index(index: Mapping[str, Tuple[int, int]]) -> List[Dict[str, int]]:
@@ -552,28 +632,100 @@ def scan_incremental(
     if not changed_paths:
         return summary
 
-    io_threads_default = min(32, max(2, 2 * (os.cpu_count() or 1)))
-    workers = max(1, int(io_threads or _posint_env('SCAN_IO_THREADS', default=io_threads_default)))
-    bulk_size = max(1, int(bulk_batch or _posint_env('MONGO_BULK_BATCH', default=800)))
-    leader_check = max(1, int(leader_check_interval or _posint_env('LEADER_CHECK_INTERVAL', default=200)))
-    progress_every = max(1, int(progress_interval or _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=5)))
+    cpu_count = os.cpu_count() or 1
+    io_threads_default = min(32, max(2, 2 * cpu_count))
+    workers = max(1, int(io_threads or _posint_env('SCAN_IO_THREADS', io_threads_default)))
+    batch_from_env = _posint_env_any('SCAN_BATCH_MAX_OPS', 'MONGO_BULK_BATCH', default=1000)
+    batch_max = max(1, int(bulk_batch or batch_from_env))
+    writer_threads = max(1, _posint_env('SCAN_WRITER_THREADS', 1)) if collection is not None else 0
+    queue_capacity = max(1, _posint_env('SCAN_OPS_QUEUE_MAX', 20000)) if collection is not None else 0
+    flush_seconds = _positive_float_env('SCAN_BATCH_FLUSH_SECONDS', 0.75)
+    leader_check = max(1, int(leader_check_interval or _posint_env('LEADER_CHECK_INTERVAL', 200)))
+    progress_every = max(1, int(progress_interval or _posint_env('SCAN_PROGRESS_EVERY_SECONDS', 5)))
     if progress_files is not None:
         progress_every_files = max(0, int(progress_files))
     else:
         progress_every_files = _nonnegative_env('SCAN_PROGRESS_EVERY_FILES', default=0)
     leader_cb = is_leader or (lambda: True)
 
-    start = time.monotonic()
-    last_progress = start
-    last_progress_count = 0
-    processed_since_check = 0
-    pending_ops: List[UpdateOne] = []
-
-    LOGGER.debug(
-        'scan_incremental: workers=%d batch=%d changed=%d',
+    LOGGER.info(
+        "scan_incremental config: workers=%d, writer_threads=%d, batch=%d, flush=%.2fs, queue=%d, leader_check=%d, progress=%ds/%dfiles",
         workers,
-        bulk_size,
-        len(changed_paths),
+        writer_threads,
+        batch_max,
+        flush_seconds,
+        queue_capacity,
+        leader_check,
+        progress_every,
+        progress_every_files,
+    )
+
+    start = time.monotonic()
+    last_progress = start - progress_every
+    last_progress_count = 0
+    lost_leadership = False
+    ops_queue: Optional[Queue] = None
+    stop_sentinel = object()
+    writer_threads_list: List[threading.Thread] = []
+
+    if collection is not None:
+        ops_queue = Queue(maxsize=queue_capacity)
+
+        def writer_worker() -> None:
+            batch: List[UpdateOne] = []
+            last_flush = time.monotonic()
+            while True:
+                try:
+                    item = ops_queue.get(timeout=0.2)  # type: ignore[union-attr]
+                except Empty:
+                    item = None
+                if item is stop_sentinel:
+                    break
+                if item is None:
+                    pass
+                elif isinstance(item, list):
+                    batch.extend(item)
+                else:
+                    batch.append(item)
+                now = time.monotonic()
+                if not batch:
+                    last_flush = now
+                    continue
+                if len(batch) >= batch_max or now - last_flush >= flush_seconds:
+                    ops_count = len(batch)
+                    flush_start = time.perf_counter()
+                    _flush_bulk_batch(collection, batch)
+                    flush_duration = (time.perf_counter() - flush_start) * 1000.0
+                    LOGGER.debug(
+                        "mongo bulk flush: ops=%d duration_ms=%d",
+                        ops_count,
+                        int(flush_duration),
+                    )
+                    batch.clear()
+                    last_flush = now
+            if batch:
+                flush_start = time.perf_counter()
+                ops_count = len(batch)
+                _flush_bulk_batch(collection, batch, force_log=True)
+                flush_duration = (time.perf_counter() - flush_start) * 1000.0
+                LOGGER.info(
+                    "mongo bulk write: ops=%d duration_ms=%d",
+                    ops_count,
+                    int(flush_duration),
+                )
+
+        for idx in range(max(writer_threads, 1)):
+            thread = threading.Thread(
+                target=writer_worker,
+                name=f"scan-writer-{idx}",
+                daemon=True,
+            )
+            writer_threads_list.append(thread)
+            thread.start()
+
+    LOGGER.info(
+        "Creating ThreadPoolExecutor(max_workers=%d) for parse stage",
+        workers,
     )
 
     def _submit(path: str) -> Dict[str, object]:
@@ -582,25 +734,27 @@ def scan_incremental(
         header['path'] = path
         return header
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan-io") as executor:
         futures = {executor.submit(_submit, path): path for path in changed_paths}
         for future in as_completed(futures):
             relpath = futures[future]
-            processed_since_check += 1
+            if lost_leadership:
+                break
 
-            if processed_since_check >= leader_check:
-                processed_since_check = 0
-                if not leader_cb():
-                    LOGGER.info(
-                        'lost leadership, aborting current scan pid=%d scanned=%d',
-                        os.getpid(),
-                        summary['scanned'],
-                    )
-                    for pending in futures:
-                        if pending is future:
-                            continue
-                        pending.cancel()
-                    break
+            processed_so_far = summary['scanned'] + summary['errors']
+            check_threshold = (processed_so_far + 1) % leader_check == 0
+            if check_threshold and not leader_cb():
+                LOGGER.info(
+                    'lost leadership, aborting current scan pid=%d scanned=%d',
+                    os.getpid(),
+                    summary['scanned'],
+                )
+                for pending in futures:
+                    if pending is future:
+                        continue
+                    pending.cancel()
+                lost_leadership = True
+                continue
 
             try:
                 header = future.result()
@@ -615,11 +769,29 @@ def scan_incremental(
                 {'$set': header},
                 upsert=True,
             )
-            pending_ops.append(operation)
             summary['updated'] += 1
 
-            if collection is not None and len(pending_ops) >= bulk_size:
-                _flush_bulk_batch(collection, pending_ops)
+            if ops_queue is not None:
+                while True:
+                    try:
+                        ops_queue.put(operation, timeout=0.5)
+                        break
+                    except Full:
+                        if not leader_cb():
+                            LOGGER.info(
+                                'lost leadership while awaiting queue capacity pid=%d scanned=%d',
+                                os.getpid(),
+                                summary['scanned'],
+                            )
+                            for pending in futures:
+                                if pending is future:
+                                    continue
+                                pending.cancel()
+                            lost_leadership = True
+                            break
+                        time.sleep(0.01)
+                if lost_leadership:
+                    break
 
             now = time.monotonic()
             should_log = False
@@ -632,20 +804,32 @@ def scan_incremental(
                 should_log = True
             if should_log and summary['scanned'] > last_progress_count:
                 elapsed = now - start
+                rate = summary['scanned'] / elapsed if elapsed > 0 else 0.0
+                queue_size = ops_queue.qsize() if ops_queue is not None else 0
                 LOGGER.info(
-                    'Song scan progress: scanned=%d/%d changed=%d inserted=%d updated=%d elapsed=%.1f',
+                    '[scan] progress: scanned=%d/%d, changed=%d, inserted=%d, updated=%d, elapsed=%.1fs, rate=%.1f/s, q=%d',
                     summary['scanned'],
                     len(changed_paths),
                     summary['changed'],
                     summary['inserted'],
                     summary['updated'],
                     elapsed,
+                    rate,
+                    queue_size,
                 )
                 last_progress = now
                 last_progress_count = summary['scanned']
 
-    if collection is not None and pending_ops:
-        _flush_bulk_batch(collection, pending_ops, force_log=True)
+    if ops_queue is not None:
+        for _ in writer_threads_list:
+            while True:
+                try:
+                    ops_queue.put(stop_sentinel, timeout=0.5)
+                    break
+                except Full:
+                    time.sleep(0.01)
+        for thread in writer_threads_list:
+            thread.join()
 
     return summary
 
@@ -3070,14 +3254,14 @@ class SongScanner:
         self._leader_lock_ephemeral = False
         self._leader_lock_key = SCAN_LEADER_KEY
         ttl_default = 300
-        ttl_value = _posint_env(
+        ttl_value = _posint_env_any(
             'SCAN_LEADER_TTL_SECONDS',
             'SCANNER_LEADER_TTL_SECONDS',
             'LEADER_TTL_SECONDS',
             default=ttl_default,
         )
         refresh_default = max(10, ttl_value // 4)
-        refresh_value = _posint_env(
+        refresh_value = _posint_env_any(
             'SCAN_LEADER_REFRESH_SECONDS',
             'SCANNER_LEADER_REFRESH_SECONDS',
             'LEADER_REFRESH_SECONDS',
@@ -3097,14 +3281,14 @@ class SongScanner:
         progress_default = 5
         self._scan_progress_interval = max(
             1,
-            _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=progress_default),
+            _posint_env('SCAN_PROGRESS_EVERY_SECONDS', progress_default),
         )
         self._scan_progress_files = _nonnegative_env('SCAN_PROGRESS_EVERY_FILES', default=0)
         cpu_count = os.cpu_count() or 1
         io_threads_default = min(32, max(2, 2 * cpu_count))
-        self._scan_io_threads = _posint_env('SCAN_IO_THREADS', default=io_threads_default)
-        self._mongo_bulk_batch = _posint_env('MONGO_BULK_BATCH', default=800)
-        self._leader_check_interval = _posint_env('LEADER_CHECK_INTERVAL', default=200)
+        self._scan_io_threads = _posint_env('SCAN_IO_THREADS', io_threads_default)
+        self._mongo_bulk_batch = _posint_env_any('SCAN_BATCH_MAX_OPS', 'MONGO_BULK_BATCH', default=800)
+        self._leader_check_interval = _posint_env('LEADER_CHECK_INTERVAL', 200)
         self._fast_path_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
         self._state_bulk_batch_size = 1000
         LOGGER.info(
@@ -5339,7 +5523,7 @@ class SongScanner:
             self._active_refresher_stack = None
             return summary
 
-        checksum, files_count, index_current = compute_fs_digest(
+        files_count, checksum, index_current = compute_fs_digest(
             self.songs_dir,
             ignore_globs=self.ignore_globs,
             include_index=True,
