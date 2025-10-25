@@ -5508,7 +5508,6 @@ class SongScanner:
                 ops.clear()
                 return
             duration_ms = (time.perf_counter() - start) * 1000.0
-            LOGGER.info('Mongo bulk: ops=%d, duration_ms=%.1f, target=%s', len(operations), duration_ms, label)
             ops.clear()
 
         progress_files_step = max(0, getattr(self, '_scan_progress_files', 0))
