@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import contextlib
@@ -4488,6 +4489,41 @@ LEVEL:7
 
         self.assertEqual(len(full_lines), 1)
         self.assertEqual(len(incremental_lines), 1)
+
+    def test_compute_fs_digest_missing_directory_returns_empty_index(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        missing_dir = tmp_dir / "missing"
+
+        checksum, count, index = songs_scanner.compute_fs_digest(
+            missing_dir,
+            include_index=True,
+        )
+
+        self.assertEqual(checksum, hashlib.sha1(b"").hexdigest())
+        self.assertEqual(count, 0)
+        self.assertEqual(index, {})
+
+    def test_scan_missing_directory_logs_warning(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        missing_dir = tmp_dir / "songs"
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=missing_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=True)
+
+        warning_messages = [record.getMessage() for record in captured.records if record.levelno >= logging.WARNING]
+        self.assertTrue(any('does not exist' in message for message in warning_messages))
+        self.assertEqual(summary.get('files_count'), 0)
+        self.assertTrue(summary.get('fast_path'))
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()

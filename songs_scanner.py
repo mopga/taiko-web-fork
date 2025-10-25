@@ -164,7 +164,9 @@ def compute_fs_digest(
         root_path = Path(root)
 
     if not root_path.exists():
-        return hashlib.sha1(b"").hexdigest(), 0
+        checksum = hashlib.sha1(b"").hexdigest()
+        empty_index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
+        return checksum, 0, empty_index
 
     ignore_patterns = [pattern for pattern in (ignore_globs or []) if pattern]
 
@@ -327,7 +329,11 @@ class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
                 continue
             if refreshed:
                 continue
-            LOGGER.debug('Leader lock refresh skipped (not owner?) token=%s', self.token)
+            try:
+                masked = RedisLeaderLock._mask_token(self.token)
+            except Exception:  # pragma: no cover - defensive mask fallback
+                masked = '***'
+            LOGGER.debug('Leader lock refresh skipped (not owner?) token=%s', masked)
 
     def stop(self) -> None:
         self._stop_event.set()
