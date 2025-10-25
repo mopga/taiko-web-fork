@@ -4773,6 +4773,56 @@ class TestScannerHelpers(unittest.TestCase):
         self.assertEqual(len(collector.calls), 2)
         self.assertEqual(sum(len(call) for call in collector.calls), 1200)
 
+    def test_flush_bulk_batch_retries_retryable_errors(self):
+        class _Retryable(Exception):
+            pass
+
+        original_retryable = songs_scanner.RETRYABLE_MONGO_ERRORS
+        songs_scanner.RETRYABLE_MONGO_ERRORS = (_Retryable,)
+        self.addCleanup(setattr, songs_scanner, 'RETRYABLE_MONGO_ERRORS', original_retryable)
+
+        class _FlakyCollection:
+            def __init__(self):
+                self.attempts = 0
+                self.last_ops: Optional[List[songs_scanner.UpdateOne]] = None
+
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                self.attempts += 1
+                if self.attempts < 3:
+                    raise _Retryable('temporary network blip')
+                self.last_ops = list(operations)
+
+        collection = _FlakyCollection()
+        batch = [
+            songs_scanner.UpdateOne({'_id': 1}, {'$set': {'value': 1}}, upsert=True)
+        ]
+
+        with self.assertLogs('taiko.scanner', level='WARNING') as captured:
+            songs_scanner._flush_bulk_batch(collection, batch, force_log=True)
+
+        self.assertEqual(collection.attempts, 3)
+        self.assertIsNotNone(collection.last_ops)
+        self.assertFalse(batch)
+        joined_logs = '\n'.join(captured.output)
+        self.assertIn('retrying', joined_logs)
+
+    def test_flush_bulk_batch_bulk_write_error_raises(self):
+        class _FailingCollection:
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                raise songs_scanner.BulkWriteError({'code': 42})
+
+        collection = _FailingCollection()
+        batch = [
+            songs_scanner.UpdateOne({'_id': 1}, {'$set': {'value': 1}}, upsert=True)
+        ]
+
+        with self.assertLogs('taiko.scanner', level='ERROR') as captured:
+            with self.assertRaises(songs_scanner.BulkWriteError):
+                songs_scanner._flush_bulk_batch(collection, batch)
+
+        self.assertFalse(batch)
+        self.assertTrue(any('BulkWriteError' in line for line in captured.output))
+
     def test_logs_mask_token_and_single_message(self):
         class _FailingClient:
             def set(self, *args, **kwargs):

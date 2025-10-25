@@ -60,6 +60,8 @@ The song scanner and validator can be controlled via environment variables:
 | `SCAN_PROGRESS_EVERY_FILES` | `0` | Optional file-count gate for progress logs; `0` disables file-based throttling. |
 | `LEADER_CHECK_INTERVAL` | `200` | How many files to process before re-checking leadership. |
 
+### Production hints
+
 When running in production the scanner persists a songs manifest with a deterministic `manifest_checksum`. The `/api/songs` endpoint exposes this checksum as an HTTP `ETag` header and accepts `If-None-Match` requests to serve `304 Not Modified` responses when the catalog has not changed.
 
 The new `/api/songs/details` endpoint accepts up to 50 comma-separated song identifiers and returns the detailed payloads in the same order. Pass `notes=none` to fetch metadata without full chart data.

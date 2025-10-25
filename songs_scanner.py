@@ -45,7 +45,15 @@ from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
 
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReplaceOne, ReturnDocument, UpdateOne
-    from pymongo.errors import BulkWriteError, DuplicateKeyError, PyMongoError, WriteError
+    from pymongo.errors import (
+        AutoReconnect,
+        BulkWriteError,
+        ConnectionFailure,
+        DuplicateKeyError,
+        NetworkTimeout,
+        PyMongoError,
+        WriteError,
+    )
 except Exception:  # pragma: no cover - fallback when pymongo unavailable
     class _ReturnDocumentFallback:
         BEFORE = 0
@@ -70,8 +78,14 @@ except Exception:  # pragma: no cover - fallback when pymongo unavailable
             super().__init__('bulk write error')
             self.details = details or {}
 
+    class _RetryableErrorFallback(Exception):
+        pass
+
+    AutoReconnect = _RetryableErrorFallback  # type: ignore[assignment]
     BulkWriteError = _BulkWriteErrorFallback  # type: ignore[assignment]
+    ConnectionFailure = _RetryableErrorFallback  # type: ignore[assignment]
     DuplicateKeyError = None  # type: ignore[assignment]
+    NetworkTimeout = _RetryableErrorFallback  # type: ignore[assignment]
     PyMongoError = None  # type: ignore[assignment]
     WriteError = None  # type: ignore[assignment]
 
@@ -129,6 +143,12 @@ if TYPE_CHECKING:  # pragma: no cover - optional Redis dependency
 
 
 TJA_VALIDATOR = get_tja_validator()
+
+RETRYABLE_MONGO_ERRORS: Tuple[type, ...] = tuple(
+    exc
+    for exc in (AutoReconnect, NetworkTimeout, ConnectionFailure)
+    if isinstance(exc, type)
+)
 
 
 _HANG_WATCHDOG_ARMED = False
@@ -435,17 +455,24 @@ def bulk_writer(collection, docs_iter: Iterable[UpdateOne], batch_size: int) -> 
         if len(batch) >= batch_size:
             _flush_bulk_batch(collection, batch)
     if batch:
-        _flush_bulk_batch(collection, batch)
+        _flush_bulk_batch(collection, batch, force_log=True)
 
 
-def _flush_bulk_batch(collection, batch: List[UpdateOne]) -> None:
+def _flush_bulk_batch(
+    collection,
+    batch: List[UpdateOne],
+    *,
+    force_log: bool = False,
+) -> None:
     operations = list(batch)
     batch.clear()
     if not operations:
         return
 
-    max_attempts = 3
     attempt = 0
+    retry_delays = (0.1, 0.5, 1.0)
+    max_attempts = len(retry_delays) + 1
+
     while attempt < max_attempts:
         attempt += 1
         start = time.perf_counter()
@@ -459,29 +486,33 @@ def _flush_bulk_batch(collection, batch: List[UpdateOne]) -> None:
             except TypeError:
                 collection.bulk_write(operations, ordered=False)
         except Exception as exc:
-            if isinstance(exc, BulkWriteError):  # pragma: no cover - best effort
-                LOGGER.warning('Mongo bulk write error: %s', getattr(exc, 'details', exc))
-                return
-            should_retry = False
-            mongo_error = PyMongoError if isinstance(PyMongoError, type) else None
-            if mongo_error is not None and isinstance(exc, mongo_error):
-                should_retry = attempt < max_attempts
-            elif isinstance(exc, OSError):
-                should_retry = attempt < max_attempts
-            if should_retry:
+            if isinstance(exc, BulkWriteError):
+                LOGGER.error(
+                    'Mongo bulk write failed with BulkWriteError: %s',
+                    getattr(exc, 'details', exc),
+                )
+                raise
+
+            retryable = RETRYABLE_MONGO_ERRORS
+            if retryable and isinstance(exc, retryable) and attempt < max_attempts:
+                delay = retry_delays[attempt - 1]
                 LOGGER.warning(
-                    'Mongo bulk write attempt %d/%d failed, retrying: %s',
+                    'Mongo bulk write attempt %d/%d failed (%s); retrying in %.1fs',
                     attempt,
                     max_attempts,
                     exc,
+                    delay,
                 )
-                time.sleep(min(0.5, 0.1 * attempt))
+                time.sleep(delay)
                 continue
-            LOGGER.exception('Mongo bulk write failed')
-            return
+
+            LOGGER.error('Mongo bulk write failed after %d attempts', attempt, exc_info=True)
+            raise
+
         duration_ms = (time.perf_counter() - start) * 1000.0
-        LOGGER.info(
-            'Mongo bulk write: ops=%d duration_ms=%.1f',
+        log_fn = LOGGER.info if force_log else LOGGER.debug
+        log_fn(
+            'Mongo bulk write success: ops=%d duration_ms=%.1f',
             len(operations),
             duration_ms,
         )
@@ -614,7 +645,7 @@ def scan_incremental(
                 last_progress_count = summary['scanned']
 
     if collection is not None and pending_ops:
-        _flush_bulk_batch(collection, pending_ops)
+        _flush_bulk_batch(collection, pending_ops, force_log=True)
 
     return summary
 
