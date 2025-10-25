@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional
 
 try:  # pragma: no cover - redis optional at runtime
@@ -32,12 +33,14 @@ class RedisLeaderLock(LeaderLock):
 
     DEFAULT_TTL = 300
     _ACQUIRE_WARNING_THRESHOLD = 10
+    _ACQUIRE_WARNING_COOLDOWN_SECONDS = 30
 
     def __init__(self, client_factory: Callable[[], Redis], key: str) -> None:
         self._client_factory = client_factory
         self._key = key
         self._release_script: Optional[Callable[..., Any]] = None
         self._consecutive_acquire_failures = 0
+        self._last_acquire_warning_monotonic = float('-inf')
 
     def _client(self) -> Redis:
         client = self._client_factory()
@@ -63,23 +66,43 @@ class RedisLeaderLock(LeaderLock):
             ttl_value = RedisLeaderLock.DEFAULT_TTL
         return ttl_value
 
+    @staticmethod
+    def _mask_token(token: str) -> str:
+        if len(token) <= 8:
+            return token
+        return f"{token[:6]}…"
+
     def acquire(self, token: str, ttl_seconds: int) -> bool:
         ttl_value = self._normalise_ttl(ttl_seconds)
         try:
             result = self._client().set(self._key, token, nx=True, ex=ttl_value)
         except Exception:
             self._consecutive_acquire_failures += 1
+            now = time.monotonic()
+            should_warn = False
             if self._consecutive_acquire_failures >= self._ACQUIRE_WARNING_THRESHOLD:
+                if now - self._last_acquire_warning_monotonic >= self._ACQUIRE_WARNING_COOLDOWN_SECONDS:
+                    should_warn = True
+                    self._last_acquire_warning_monotonic = now
+            masked_token = self._mask_token(token)
+            if should_warn:
                 LOGGER.warning(
                     'Redis leader lock acquire failing repeatedly: key=%s token=%s failures=%d',
                     self._key,
-                    token,
+                    masked_token,
                     self._consecutive_acquire_failures,
                     exc_info=True,
                 )
                 self._consecutive_acquire_failures = 0
             else:
-                LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
+                LOGGER.debug(
+                    'Redis leader lock acquire failed: key=%s token=%s',
+                    self._key,
+                    masked_token,
+                    exc_info=True,
+                )
+                if self._consecutive_acquire_failures > self._ACQUIRE_WARNING_THRESHOLD:
+                    self._consecutive_acquire_failures = self._ACQUIRE_WARNING_THRESHOLD
             return False
         self._consecutive_acquire_failures = 0
         return bool(result)
