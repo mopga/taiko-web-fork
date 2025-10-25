@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import contextlib
+import itertools
 import queue
 import re
 import sys
@@ -3907,7 +3908,7 @@ LEVEL:7
             ignore_globs=None,
         )
 
-        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 1, {})):
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=(1, 'rehydrate-checksum', {})):
             summary = scanner.scan(full=False)
 
         self.assertFalse(summary.get('fast_path'))
@@ -4000,7 +4001,7 @@ LEVEL:7
             ignore_globs=None,
         )
 
-        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 2, {})):
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=(2, 'rehydrate-checksum', {})):
             summary = scanner.scan(full=False)
 
         self.assertFalse(summary.get('fast_path'))
@@ -4496,11 +4497,123 @@ LEVEL:7
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
         missing_dir = tmp_dir / "missing"
 
-        checksum, count, index = songs_scanner.compute_fs_digest(missing_dir)
+        count, checksum, index = songs_scanner.compute_fs_digest(missing_dir)
 
         self.assertEqual(checksum, hashlib.sha1(b"").hexdigest())
         self.assertEqual(count, 0)
         self.assertEqual(index, {})
+
+    def test_compute_fs_digest_parallel_matches_reference(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        (songs_dir / "nested").mkdir(parents=True, exist_ok=True)
+        files = {
+            songs_dir / "a.tja": "TITLE:Song\n#START",  # noqa: FS003
+            songs_dir / "nested" / "b.tja": "TITLE:Other\n#START",
+        }
+        for path, payload in files.items():
+            path.write_text(payload, encoding="utf-8")
+
+        def reference_digest(root: Path) -> Tuple[int, str, Dict[str, Tuple[int, int]]]:
+            entries: List[str] = []
+            index: Dict[str, Tuple[int, int]] = {}
+            stack: List[Tuple[Path, Path]] = [(Path("."), root)]
+            files_seen = 0
+            while stack:
+                rel_dir, abs_dir = stack.pop()
+                with os.scandir(abs_dir) as iterator:
+                    subdirs: List[Tuple[Path, Path]] = []
+                    for entry in iterator:
+                        if entry.is_dir(follow_symlinks=False):
+                            subdirs.append((rel_dir / entry.name, Path(entry.path)))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat_result = entry.stat(follow_symlinks=False)
+                        mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+                        relative = (rel_dir / entry.name).as_posix()
+                        entries.append(f"{relative}|{int(stat_result.st_size)}|{int(mtime_ns)}")
+                        index[relative] = (int(stat_result.st_size), int(mtime_ns))
+                        files_seen += 1
+                    for sub_rel, sub_abs in sorted(subdirs, key=lambda item: item[0].as_posix()):
+                        stack.append((sub_rel, sub_abs))
+            hasher = hashlib.sha1()
+            for payload in sorted(entries):
+                hasher.update(payload.encode("utf-8", "surrogateescape"))
+            return files_seen, hasher.hexdigest(), index
+
+        reference_count, reference_checksum, reference_index = reference_digest(songs_dir)
+        count, checksum, index = songs_scanner.compute_fs_digest(songs_dir, include_index=True)
+
+        self.assertEqual(count, reference_count)
+        self.assertEqual(checksum, reference_checksum)
+        self.assertEqual(index, reference_index)
+
+    def test_scan_incremental_queue_does_not_block(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(10):
+            (songs_dir / f"song_{idx}.tja").write_text("TITLE:Test\n#START", encoding="utf-8")
+
+        index_prev: Dict[str, Tuple[int, int]] = {}
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir, include_index=True)
+        index_current = index_current or {}
+
+        collection = _MemoryCollection()
+        with mock.patch.dict(
+            os.environ,
+            {
+                'SCAN_IO_THREADS': '4',
+                'SCAN_WRITER_THREADS': '1',
+                'SCAN_BATCH_MAX_OPS': '2',
+                'SCAN_OPS_QUEUE_MAX': '3',
+                'SCAN_BATCH_FLUSH_SECONDS': '0.01',
+            },
+        ):
+            summary = songs_scanner.scan_incremental(
+                songs_dir,
+                index_prev,
+                index_current=index_current,
+                collection=collection,
+            )
+
+        self.assertEqual(summary['scanned'], 10)
+        self.assertEqual(summary['updated'], 10)
+
+    def test_scan_incremental_progress_logging_interval(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(3):
+            (songs_dir / f"song_{idx}.tja").write_text("TITLE:Test\n#START", encoding="utf-8")
+
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir, include_index=True)
+        index_current = index_current or {}
+
+        call_lock = threading.Lock()
+        counter = itertools.count()
+
+        def fake_monotonic():
+            with call_lock:
+                return next(counter) * 0.6
+
+        with mock.patch.dict(os.environ, {'SCAN_PROGRESS_EVERY_SECONDS': '1', 'SCAN_PROGRESS_EVERY_FILES': '0'}), \
+            mock.patch.object(songs_scanner.time, 'monotonic', side_effect=fake_monotonic), \
+            self.assertLogs('taiko.scanner', level='INFO') as captured:
+            songs_scanner.scan_incremental(
+                songs_dir,
+                {},
+                index_current=index_current,
+                collection=None,
+                progress_interval=1,
+            )
+
+        progress_lines = [line for line in captured.output if '[scan] progress:' in line]
+        self.assertGreaterEqual(len(progress_lines), 1)
 
     def test_fast_path_skips_parsing_and_db(self):
         tmp_dir = Path(self._tmp_dir())
@@ -4523,7 +4636,7 @@ LEVEL:7
             ignore_globs=None,
         )
 
-        with mock.patch('songs_scanner.compute_fs_digest', return_value=('steady', 0, {})), \
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=(0, 'steady', {})), \
             mock.patch('songs_scanner.parse_tja') as parse_mock, \
             self.assertLogs('taiko.scanner', level='INFO') as captured:
             summary = scanner.scan(full=False)
@@ -4684,7 +4797,7 @@ LEVEL:7
                 is_leader=lambda: True,
             )
 
-        self.assertFalse(any('Song scan progress' in line for line in captured.output))
+        self.assertTrue(any('[scan] progress:' in line for line in captured.output))
 
     def test_progress_logging_file_gate(self):
         tmp_dir = Path(self._tmp_dir())
@@ -4726,7 +4839,7 @@ LEVEL:7
                 is_leader=lambda: True,
             )
 
-        self.assertTrue(any('Song scan progress' in line for line in captured.output))
+        self.assertTrue(any('[scan] progress:' in line for line in captured.output))
 
     def test_scan_missing_directory_logs_warning(self):
         tmp_dir = Path(self._tmp_dir())

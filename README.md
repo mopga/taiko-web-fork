@@ -42,11 +42,24 @@ The song scanner and validator can be controlled via environment variables:
 | `SCAN_ON_START` | `auto` | Controls startup behaviour: `auto` (digest + incremental), `force`, or `skip`. |
 | `SCAN_LEADER_TTL_SECONDS` | `300` | Expiration time (seconds) for the Redis leader lock key `taiko:scanner:leader`. |
 | `SCAN_LEADER_REFRESH_SECONDS` | `75` | TTL refresh cadence; defaults to `TTL / 4` with a minimum of 10 seconds. |
-| `SCAN_IO_THREADS` | `min(32, 2 × CPU)` | Maximum worker threads for reading chart headers. |
-| `MONGO_BULK_BATCH` | `800` | Number of `UpdateOne` operations buffered before calling `bulk_write`. |
+| `SCAN_IO_THREADS` | `min(32, 2 × CPU)` | Maximum worker threads for filesystem digest and header parsing. |
+| `SCAN_WRITER_THREADS` | `1` | Mongo bulk write worker threads; values > 1 need careful collision handling. |
+| `SCAN_OPS_QUEUE_MAX` | `20000` | Capacity of the parse → writer queue before backpressure kicks in. |
+| `SCAN_BATCH_MAX_OPS` | `1000` | Maximum number of operations coalesced into a single Mongo `bulk_write`. |
+| `SCAN_BATCH_FLUSH_SECONDS` | `0.75` | Force-flush interval when the current batch is not yet full. |
 | `SCAN_PROGRESS_EVERY_SECONDS` | `5` | Minimum interval between INFO progress summaries. |
 | `SCAN_PROGRESS_EVERY_FILES` | `0` | Optional file-count gate for progress logs; `0` disables file-based throttling. |
 | `LEADER_CHECK_INTERVAL` | `200` | How many files to process before re-checking leadership. |
+
+### Performance notes (first start)
+
+The first full scan now pipelines the heavy stages to minimise wall-clock time:
+
+* The filesystem digest walker enumerates files once and hashes metadata in parallel using `SCAN_IO_THREADS` workers.
+* Chart parsing feeds a bounded queue that one or more writer threads consume, issuing Mongo `bulk_write` calls in batches governed by `SCAN_BATCH_MAX_OPS` and `SCAN_BATCH_FLUSH_SECONDS`.
+* Regular progress summaries include queue depth to surface backpressure; tune `SCAN_OPS_QUEUE_MAX`, `SCAN_WRITER_THREADS`, and the batch settings to match your MongoDB deployment.
+
+These defaults are conservative and safe on commodity hardware, but larger deployments can increase the knobs to accelerate cold-start imports.
 
 ### Production hints
 
