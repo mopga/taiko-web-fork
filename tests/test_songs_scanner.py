@@ -1,5 +1,6 @@
 import logging
 import os
+import contextlib
 import queue
 import re
 import sys
@@ -3954,6 +3955,69 @@ LEVEL:7
         self.assertFalse(summary.get('leader'))
         self.assertTrue(summary.get('skipped_due_to_leader'))
         self.assertFalse(scanner.has_leader_lock())
+
+    def test_lock_miss_logs_with_unknown_ttl(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        class _UnknownTtlLock:
+            def __init__(self):
+                self.acquire_calls = 0
+                self.ttl_calls = 0
+
+            def acquire(self, token, ttl):
+                self.acquire_calls += 1
+                return False
+
+            def refresh(self, token, ttl):  # pragma: no cover - should never be called
+                raise AssertionError('refresh should not be invoked on lock miss')
+
+            def release(self, token):  # pragma: no cover - should never be called
+                raise AssertionError('release should not be invoked on lock miss')
+
+            def get_owner(self):
+                return 'other-worker'
+
+            def ttl(self):
+                self.ttl_calls += 1
+                return None
+
+        lock = _UnknownTtlLock()
+        scanner._leader_lock = lock  # type: ignore[assignment]
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary: Dict[str, object] = {}
+            acquired = scanner._acquire_leader_lock(
+                summary=summary,
+                songs_count_before=7,
+                start_monotonic=time.monotonic(),
+                refresher_stack=contextlib.ExitStack(),
+                attempts=1,
+                retry_delay=0,
+            )
+
+        self.assertFalse(acquired)
+        self.assertEqual(lock.acquire_calls, 1)
+        self.assertEqual(lock.ttl_calls, 1)
+        self.assertFalse(summary.get('leader'))
+        self.assertTrue(summary.get('skipped_due_to_leader'))
+        self.assertTrue(
+            any(
+                "ttl=300" in line and "Song scan skipped (no leader)" in line
+                for line in captured.output
+            ),
+            msg=f"expected ttl fallback log, got: {captured.output}",
+        )
     def test_handler_not_accumulated_on_repeated_scan(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)

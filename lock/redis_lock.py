@@ -31,11 +31,13 @@ class RedisLeaderLock(LeaderLock):
     """``LeaderLock`` backed by a Redis key."""
 
     DEFAULT_TTL = 300
+    _ACQUIRE_WARNING_THRESHOLD = 10
 
     def __init__(self, client_factory: Callable[[], Redis], key: str) -> None:
         self._client_factory = client_factory
         self._key = key
         self._release_script: Optional[Callable[..., Any]] = None
+        self._consecutive_acquire_failures = 0
 
     def _client(self) -> Redis:
         client = self._client_factory()
@@ -66,8 +68,20 @@ class RedisLeaderLock(LeaderLock):
         try:
             result = self._client().set(self._key, token, nx=True, ex=ttl_value)
         except Exception:
-            LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
+            self._consecutive_acquire_failures += 1
+            if self._consecutive_acquire_failures >= self._ACQUIRE_WARNING_THRESHOLD:
+                LOGGER.warning(
+                    'Redis leader lock acquire failing repeatedly: key=%s token=%s failures=%d',
+                    self._key,
+                    token,
+                    self._consecutive_acquire_failures,
+                    exc_info=True,
+                )
+                self._consecutive_acquire_failures = 0
+            else:
+                LOGGER.debug('Redis leader lock acquire failed: key=%s token=%s', self._key, token, exc_info=True)
             return False
+        self._consecutive_acquire_failures = 0
         return bool(result)
 
     def refresh(self, token: str, ttl_seconds: int) -> bool:
