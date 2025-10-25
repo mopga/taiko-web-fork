@@ -1,4 +1,6 @@
 /.git
+/.github
+/.devcontainer
 /__pycache__
 
 songs

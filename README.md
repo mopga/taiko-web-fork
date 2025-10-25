@@ -30,18 +30,6 @@ docker compose up -d
 ```
 
 
-## Windows run app
-
-Install WSL2
-Install Docker Desktop
-
-Git clone the repo
-
-in repo directory run the file
-```bash
-start_taiko_edge.hta
-```
-
 ## Environment
 
 The song scanner and validator can be controlled via environment variables:
