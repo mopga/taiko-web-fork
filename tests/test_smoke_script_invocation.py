@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 
 
 def test_smoke_script_invocation() -> None:

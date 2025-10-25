@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -10,6 +11,9 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 BASE_URL = "http://localhost:8000"
+
+
+pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 
 
 def _run_compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
