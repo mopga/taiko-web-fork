@@ -27,6 +27,7 @@ from songs_scanner import (
     TjaImportRecord,
     compute_group_key,
     parse_tja,
+    RedisLeaderLock,
 )
 
 
@@ -4495,14 +4496,194 @@ LEVEL:7
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
         missing_dir = tmp_dir / "missing"
 
-        checksum, count, index = songs_scanner.compute_fs_digest(
-            missing_dir,
-            include_index=True,
-        )
+        checksum, count, index = songs_scanner.compute_fs_digest(missing_dir)
 
         self.assertEqual(checksum, hashlib.sha1(b"").hexdigest())
         self.assertEqual(count, 0)
         self.assertEqual(index, {})
+
+    def test_fast_path_skips_parsing_and_db(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        db = _DummyDB()
+        db.meta._docs.append({
+            '_id': 'songs_manifest',
+            'manifest_checksum': 'steady',
+            'files_count': 0,
+            'manifest_documents': 0,
+        })
+
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=('steady', 0, {})), \
+            mock.patch('songs_scanner.parse_tja') as parse_mock, \
+            self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=False)
+
+        self.assertTrue(summary.get('fast_path'))
+        self.assertEqual(parse_mock.call_count, 0)
+        self.assertFalse(db.songs.inserted)
+        self.assertTrue(any('fast_path=True' in line for line in captured.output))
+
+    def test_incremental_diff_picks_only_changed(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        for index in range(20):
+            path = songs_dir / f"song{index}.tja"
+            path.write_text("\n".join([
+                "TITLE:Song",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ]), encoding='utf-8')
+
+        _, _, index_prev = songs_scanner.compute_fs_digest(songs_dir)
+        index_prev = index_prev or {}
+
+        for index in range(10):
+            path = songs_dir / f"song{index}.tja"
+            path.write_text("\n".join([
+                "TITLE:Song",
+                "LEVEL:2",
+                "#START",
+                "2222,",
+                "3333,",
+                "#END",
+            ]), encoding='utf-8')
+
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir)
+        index_current = index_current or {}
+
+        class _Collector:
+            def __init__(self):
+                self.calls: List[List[songs_scanner.UpdateOne]] = []
+
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                self.calls.append(list(operations))
+
+        collector = _Collector()
+
+        summary = songs_scanner.scan_incremental(
+            songs_dir,
+            index_prev,
+            index_current=index_current,
+            collection=collector,
+            bulk_batch=5,
+            io_threads=4,
+            leader_check_interval=5,
+            progress_interval=3600,
+            is_leader=lambda: True,
+        )
+
+        total_ops = sum(len(call) for call in collector.calls)
+        self.assertEqual(total_ops, 10)
+        self.assertEqual(summary['updated'], 10)
+
+    def test_leadership_loss_aborts_scan(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        for index in range(5):
+            path = songs_dir / f"chart{index}.tja"
+            path.write_text("\n".join([
+                "TITLE:Song",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ]), encoding='utf-8')
+
+        index_prev: Dict[str, Tuple[int, int]] = {}
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir)
+        index_current = index_current or {}
+
+        class _Collector:
+            def __init__(self):
+                self.calls: List[List[songs_scanner.UpdateOne]] = []
+
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                self.calls.append(list(operations))
+
+        collector = _Collector()
+
+        check_counter = {'count': 0}
+
+        def _leader() -> bool:
+            check_counter['count'] += 1
+            return check_counter['count'] <= 2
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = songs_scanner.scan_incremental(
+                songs_dir,
+                index_prev,
+                index_current=index_current,
+                collection=collector,
+                bulk_batch=2,
+                io_threads=2,
+                leader_check_interval=1,
+                progress_interval=3600,
+                is_leader=_leader,
+            )
+
+        total_ops = sum(len(call) for call in collector.calls)
+        self.assertLessEqual(total_ops, 2)
+        self.assertLessEqual(summary['updated'], 2)
+        self.assertTrue(any('lost leadership, aborting current scan' in line for line in captured.output))
+
+    def test_progress_logging_rate(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        for index in range(3):
+            path = songs_dir / f"chart{index}.tja"
+            path.write_text("\n".join([
+                "TITLE:Song",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ]), encoding='utf-8')
+
+        index_prev: Dict[str, Tuple[int, int]] = {}
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir)
+        index_current = index_current or {}
+
+        class _Collector:
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                return None
+
+        collector = _Collector()
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            songs_scanner.scan_incremental(
+                songs_dir,
+                index_prev,
+                index_current=index_current,
+                collection=collector,
+                bulk_batch=10,
+                io_threads=1,
+                leader_check_interval=10,
+                progress_interval=3600,
+                is_leader=lambda: True,
+            )
+
+        self.assertFalse(any('Song scan progress' in line for line in captured.output))
 
     def test_scan_missing_directory_logs_warning(self):
         tmp_dir = Path(self._tmp_dir())
@@ -4529,5 +4710,40 @@ LEVEL:7
         return tempfile.mkdtemp()
 
 
+class TestScannerHelpers(unittest.TestCase):
+    def test_bulk_writer_batches(self):
+        class _Collector:
+            def __init__(self):
+                self.calls: List[List[songs_scanner.UpdateOne]] = []
+
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                self.calls.append(list(operations))
+
+        collector = _Collector()
+        operations = [
+            songs_scanner.UpdateOne({'_id': index}, {'$set': {'value': index}}, upsert=True)
+            for index in range(1200)
+        ]
+
+        songs_scanner.bulk_writer(collector, operations, batch_size=800)
+
+        self.assertEqual(len(collector.calls), 2)
+        self.assertEqual(sum(len(call) for call in collector.calls), 1200)
+
+    def test_logs_mask_token_and_single_message(self):
+        class _FailingClient:
+            def set(self, *args, **kwargs):
+                raise RuntimeError('boom')
+
+        lock = RedisLeaderLock(lambda: _FailingClient(), 'scan-lock')
+
+        with self.assertLogs('lock.redis_lock', level='DEBUG') as captured:
+            result = lock.acquire('super-secret-token', ttl_seconds=10)
+
+        self.assertFalse(result)
+        self.assertEqual(len(captured.output), 1)
+        line = captured.output[0]
+        self.assertIn('…', line)
+        self.assertNotIn('super-secret-token', line)
 if __name__ == "__main__":
     unittest.main()

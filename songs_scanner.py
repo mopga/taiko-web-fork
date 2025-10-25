@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
 from datetime import UTC, datetime
 from collections import defaultdict
@@ -137,16 +138,28 @@ LEADER_LOCK_TTL_SECONDS = 300
 
 
 def _posint_env(*names: str, default: int) -> int:
+    if not names:
+        return default
+
+    preferred = names[0]
     for name in names:
         raw = os.getenv(name)
-        if not raw:
+        if raw is None:
+            continue
+        token = str(raw).strip()
+        if not token:
             continue
         try:
-            value = int(str(raw).strip())
+            value = int(token)
         except (TypeError, ValueError):
             continue
-        if value > 0:
-            return value
+        if value <= 0:
+            continue
+        if name != preferred:
+            LOGGER.info(
+                "Using alias %s=%s for %s", name, value, preferred
+            )
+        return value
     return default
 
 
@@ -154,9 +167,15 @@ def compute_fs_digest(
     root: Path,
     *,
     ignore_globs: Optional[Iterable[str]] = None,
-    include_index: bool = False,
+    include_index: bool = True,
 ) -> Tuple[str, int, Optional[Dict[str, Tuple[int, int]]]]:
-    """Return a checksum and file count for ``root`` without reading file bodies."""
+    """Return a deterministic checksum and lightweight index for ``root``.
+
+    The implementation avoids touching file bodies by walking the directory tree
+    with :func:`os.scandir` and hashing a stable, sorted list of
+    ``"{relpath}|{size}|{mtime_ns}"`` strings.  The caller can request a full
+    index of file metadata by passing ``include_index=True`` (default).
+    """
 
     try:
         root_path = Path(root).resolve()
@@ -168,7 +187,7 @@ def compute_fs_digest(
         empty_index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
         return checksum, 0, empty_index
 
-    ignore_patterns = [pattern for pattern in (ignore_globs or []) if pattern]
+    ignore_patterns = tuple(pattern for pattern in (ignore_globs or []) if pattern)
 
     def _ignored(relative_path: Path) -> bool:
         if not ignore_patterns:
@@ -176,52 +195,68 @@ def compute_fs_digest(
         relative_text = relative_path.as_posix()
         return any(fnmatch.fnmatch(relative_text, pattern) for pattern in ignore_patterns)
 
-    hasher = hashlib.sha1()
-    files = 0
+    entries: List[str] = []
     index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
+    files = 0
+    stack: List[Tuple[Path, Path]] = [(Path("."), root_path)]
 
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        dirnames.sort()
-        filenames.sort()
-        base = Path(dirpath)
+    while stack:
+        rel_dir, abs_dir = stack.pop()
+        try:
+            iterator = os.scandir(abs_dir)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            LOGGER.debug("Failed to scandir %s during digest", abs_dir, exc_info=True)
+            continue
 
-        filtered_dirs: List[str] = []
-        for dirname in dirnames:
-            candidate_dir = base / dirname
-            try:
-                relative_dir = candidate_dir.relative_to(root_path)
-            except ValueError:
-                continue
-            if _ignored(relative_dir):
-                continue
-            filtered_dirs.append(dirname)
-        dirnames[:] = filtered_dirs
-
-        for name in filenames:
-            candidate = base / name
-            try:
-                if candidate.is_symlink():
+        with iterator as it:
+            subdirs: List[Tuple[Path, Path]] = []
+            for entry in it:
+                try:
+                    if entry.is_symlink():
+                        continue
+                except OSError:
+                    LOGGER.debug("Failed to stat entry %s during digest", entry.path, exc_info=True)
                     continue
-                stat_result = candidate.stat()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                LOGGER.debug("Failed to stat %s during digest", candidate, exc_info=True)
-                continue
-            try:
-                relative = candidate.relative_to(root_path)
-            except ValueError:
-                LOGGER.debug("Skipping file outside root during digest: %s", candidate)
-                continue
-            if _ignored(relative):
-                continue
-            mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
-            rel_posix = relative.as_posix()
-            payload = f"{rel_posix}\0{stat_result.st_size}\0{mtime_ns}\n"
-            hasher.update(payload.encode("utf-8", "surrogateescape"))
-            files += 1
-            if index is not None:
-                index[rel_posix] = (int(stat_result.st_size), int(mtime_ns))
+
+                relative = (rel_dir / entry.name).as_posix()
+                relative_path = Path(relative)
+                if _ignored(relative_path):
+                    continue
+
+                abs_path = Path(entry.path)
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirs.append((Path(relative), abs_path))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    LOGGER.debug("Failed to classify entry %s during digest", entry.path, exc_info=True)
+                    continue
+
+                try:
+                    stat_result = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    LOGGER.debug("Failed to stat file %s during digest", entry.path, exc_info=True)
+                    continue
+
+                mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+                payload = f"{relative}|{int(stat_result.st_size)}|{int(mtime_ns)}"
+                entries.append(payload)
+                files += 1
+                if index is not None:
+                    index[relative] = (int(stat_result.st_size), int(mtime_ns))
+
+            for sub_rel, sub_abs in sorted(subdirs, key=lambda item: item[0].as_posix()):
+                stack.append((sub_rel, sub_abs))
+
+    hasher = hashlib.sha1()
+    for payload in sorted(entries):
+        hasher.update(payload.encode("utf-8", "surrogateescape"))
 
     return hasher.hexdigest(), files, index
 
@@ -271,6 +306,253 @@ def _decode_fs_index(payload: object) -> Dict[str, Tuple[int, int]]:
         decoded[path] = (size_int, mtime_int)
     return decoded
 
+
+def diff_changed(
+    index_prev: Mapping[str, Tuple[int, int]],
+    index_current: Mapping[str, Tuple[int, int]],
+) -> Iterable[str]:
+    """Yield relative paths that differ between ``index_prev`` and ``index_current``."""
+
+    for path, stats in index_current.items():
+        if index_prev.get(path) != stats:
+            yield path
+
+
+def parse_header(relpath: Path) -> Dict[str, object]:
+    """Parse the lightweight metadata header of a TJA file.
+
+    The parser stops at the first ``#START`` directive to avoid reading note
+    bodies.  Only well-known header directives are surfaced; the function is
+    deliberately forgiving so that malformed charts do not abort the scan.
+    """
+
+    absolute_path = Path(relpath)
+    metadata: Dict[str, object] = {
+        'path': absolute_path.as_posix(),
+        'title': None,
+        'subtitle': None,
+        'artist': None,
+        'bpm': None,
+        'wave': None,
+        'difficulties': [],
+    }
+
+    try:
+        with absolute_path.open('r', encoding='utf-8', errors='replace') as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith('#START'):
+                    break
+                if ':' not in line:
+                    continue
+                key, value = line.split(':', 1)
+                key_normalised = key.strip().upper()
+                value_str = value.strip()
+                if key_normalised == 'TITLE':
+                    metadata['title'] = value_str or None
+                elif key_normalised == 'SUBTITLE':
+                    metadata['subtitle'] = value_str or None
+                elif key_normalised in {'ARTIST', 'SONG'}:
+                    metadata['artist'] = value_str or None
+                elif key_normalised == 'BPM':
+                    try:
+                        metadata['bpm'] = float(value_str)
+                    except ValueError:
+                        metadata['bpm'] = None
+                elif key_normalised == 'WAVE':
+                    metadata['wave'] = value_str or None
+                elif key_normalised == 'LEVEL':
+                    try:
+                        level_value = int(float(value_str))
+                    except ValueError:
+                        continue
+                    difficulties = metadata.setdefault('difficulties', [])
+                    if isinstance(difficulties, list):
+                        difficulties.append(level_value)
+    except FileNotFoundError:
+        metadata['missing'] = True
+    except OSError:
+        metadata['error'] = True
+
+    difficulties = metadata.get('difficulties')
+    if isinstance(difficulties, list):
+        metadata['difficulties'] = sorted({int(d) for d in difficulties if isinstance(d, (int, float))})
+    else:
+        metadata['difficulties'] = []
+
+    if isinstance(metadata.get('wave'), str):
+        audio_path = absolute_path.parent / str(metadata['wave'])
+        if audio_path.exists():
+            try:
+                stat_result = audio_path.stat()
+            except OSError:
+                pass
+            else:
+                metadata['audio_size'] = int(stat_result.st_size)
+                metadata['audio_mtime_ns'] = getattr(
+                    stat_result,
+                    'st_mtime_ns',
+                    int(stat_result.st_mtime * 1_000_000_000),
+                )
+
+    return metadata
+
+
+def bulk_writer(collection, docs_iter: Iterable[UpdateOne], batch_size: int) -> None:
+    """Flush ``UpdateOne`` operations in ``batch_size`` chunks."""
+
+    batch: List[UpdateOne] = []
+    for operation in docs_iter:
+        batch.append(operation)
+        if len(batch) >= batch_size:
+            _flush_bulk_batch(collection, batch)
+    if batch:
+        _flush_bulk_batch(collection, batch)
+
+
+def _flush_bulk_batch(collection, batch: List[UpdateOne]) -> None:
+    operations = list(batch)
+    batch.clear()
+    if not operations:
+        return
+    start = time.perf_counter()
+    try:
+        collection.bulk_write(
+            operations,
+            ordered=False,
+            bypass_document_validation=True,
+        )
+    except TypeError:
+        collection.bulk_write(operations, ordered=False)
+    except BulkWriteError as exc:  # pragma: no cover - depends on pymongo
+        LOGGER.warning('Mongo bulk write error: %s', getattr(exc, 'details', exc))
+    except Exception:
+        LOGGER.exception('Mongo bulk write failed')
+        return
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    LOGGER.info(
+        'Mongo bulk write: ops=%d duration_ms=%.1f',
+        len(operations),
+        duration_ms,
+    )
+
+
+def scan_incremental(
+    root: Path,
+    index_prev: Mapping[str, Tuple[int, int]],
+    *,
+    index_current: Optional[Mapping[str, Tuple[int, int]]] = None,
+    collection=None,
+    bulk_batch: Optional[int] = None,
+    is_leader: Optional[Callable[[], bool]] = None,
+    io_threads: Optional[int] = None,
+    leader_check_interval: Optional[int] = None,
+    progress_interval: Optional[int] = None,
+) -> Dict[str, int]:
+    """Incrementally scan ``root`` using a thread pool and Mongo bulk writes."""
+
+    summary = {
+        'scanned': 0,
+        'changed': 0,
+        'inserted': 0,
+        'updated': 0,
+        'errors': 0,
+    }
+
+    root_path = Path(root)
+    if index_current is None:
+        _, _, computed_index = compute_fs_digest(root_path, include_index=True)
+        index_current = computed_index or {}
+
+    changed_paths = list(diff_changed(index_prev, index_current))
+    summary['changed'] = len(changed_paths)
+    if not changed_paths:
+        return summary
+
+    io_threads_default = min(16, max(2, 2 * (os.cpu_count() or 1)))
+    workers = max(1, int(io_threads or _posint_env('SCAN_IO_THREADS', default=io_threads_default)))
+    bulk_size = max(1, int(bulk_batch or _posint_env('MONGO_BULK_BATCH', default=800)))
+    leader_check = max(1, int(leader_check_interval or _posint_env('LEADER_CHECK_INTERVAL', default=200)))
+    progress_every = max(1, int(progress_interval or _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=5)))
+    leader_cb = is_leader or (lambda: True)
+
+    start = time.monotonic()
+    last_progress = start
+    processed_since_check = 0
+    pending_ops: List[UpdateOne] = []
+
+    LOGGER.debug(
+        'scan_incremental: workers=%d batch=%d changed=%d',
+        workers,
+        bulk_size,
+        len(changed_paths),
+    )
+
+    def _submit(path: str) -> Dict[str, object]:
+        target = root_path / path
+        header = parse_header(target)
+        header['path'] = path
+        return header
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_submit, path): path for path in changed_paths}
+        for future in as_completed(futures):
+            relpath = futures[future]
+            processed_since_check += 1
+
+            if processed_since_check >= leader_check:
+                processed_since_check = 0
+                if not leader_cb():
+                    LOGGER.info(
+                        'lost leadership, aborting current scan pid=%d scanned=%d',
+                        os.getpid(),
+                        summary['scanned'],
+                    )
+                    for pending in futures:
+                        if pending is future:
+                            continue
+                        pending.cancel()
+                    break
+
+            try:
+                header = future.result()
+            except Exception:  # pragma: no cover - defensive
+                LOGGER.warning('Failed to parse header for %s', relpath, exc_info=True)
+                summary['errors'] += 1
+                continue
+
+            summary['scanned'] += 1
+            operation = UpdateOne(
+                {'path': header['path']},
+                {'$set': header},
+                upsert=True,
+            )
+            pending_ops.append(operation)
+            summary['updated'] += 1
+
+            if collection is not None and len(pending_ops) >= bulk_size:
+                _flush_bulk_batch(collection, pending_ops)
+
+            now = time.monotonic()
+            if now - last_progress >= progress_every:
+                elapsed = now - start
+                LOGGER.info(
+                    'Song scan progress: scanned=%d/%d changed=%d inserted=%d updated=%d elapsed=%.1f',
+                    summary['scanned'],
+                    len(changed_paths),
+                    summary['changed'],
+                    summary['inserted'],
+                    summary['updated'],
+                    elapsed,
+                )
+                last_progress = now
+
+    if collection is not None and pending_ops:
+        _flush_bulk_batch(collection, pending_ops)
+
+    return summary
 
 def _coerce_int(value: object) -> Optional[int]:
     if isinstance(value, bool):
@@ -2702,7 +2984,14 @@ class SongScanner:
             default=refresh_default,
         )
         if ttl_value <= 2 * refresh_value:
-            ttl_value = 3 * max(refresh_value, 1)
+            ttl_candidate = 3 * max(refresh_value, 1)
+            LOGGER.info(
+                'Adjusting leader TTL to satisfy ttl>=3*refresh: requested=%d refresh=%d adjusted=%d',
+                ttl_value,
+                refresh_value,
+                ttl_candidate,
+            )
+            ttl_value = ttl_candidate
         self._leader_lock_ttl = ttl_value
         self._leader_lock_refresh = refresh_value
         progress_default = 5
@@ -2713,13 +3002,19 @@ class SongScanner:
         cpu_count = os.cpu_count() or 1
         io_threads_default = min(16, max(2, 2 * cpu_count))
         self._scan_io_threads = _posint_env('SCAN_IO_THREADS', default=io_threads_default)
+        self._mongo_bulk_batch = _posint_env('MONGO_BULK_BATCH', default=800)
+        self._leader_check_interval = _posint_env('LEADER_CHECK_INTERVAL', default=200)
         self._fast_path_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
         self._state_bulk_batch_size = 1000
         LOGGER.info(
-            "Scanner leader TTL=%d, refresh=%d, key=%s",
+            "Scanner configuration: key=%s base_dir=%s ttl=%d refresh=%d io_threads=%d bulk_batch=%d progress_every=%d",
+            self._leader_lock_key,
+            self._songs_root,
             self._leader_lock_ttl,
             self._leader_lock_refresh,
-            self._leader_lock_key,
+            self._scan_io_threads,
+            self._mongo_bulk_batch,
+            self._scan_progress_interval,
         )
         self._leader_lock: Optional[LeaderLock] = leader_lock
         self._fallback_leader_lock: Optional[LeaderLock] = None
