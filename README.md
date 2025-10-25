@@ -51,7 +51,16 @@ The song scanner and validator can be controlled via environment variables:
 | `TJA_VALIDATION_MODE` | `warn` | Validation mode: `off`, `warn`, or `strict`. `strict` turns validation errors into scanner errors. |
 | `TJA_VALIDATION_LOG` | `0` | Enable verbose validation logging when set to `1`. |
 | `TJA_VALIDATION_SUMMARY` | `1` | Emit aggregated validation summaries when logging is enabled. |
-| `SCAN_LEADER_TTL_SECONDS` | `1200` | Expiration time (seconds) for the Redis leader lock key `taiko:scanner:leader`. |
+| `SCAN_ON_START` | `auto` | Controls startup behaviour: `auto` (digest + incremental), `force`, or `skip`. |
+| `SCAN_LEADER_TTL_SECONDS` | `300` | Expiration time (seconds) for the Redis leader lock key `taiko:scanner:leader`. |
+| `SCAN_LEADER_REFRESH_SECONDS` | `75` | TTL refresh cadence; defaults to `TTL / 4` with a minimum of 10 seconds. |
+| `SCAN_IO_THREADS` | `min(32, 2 × CPU)` | Maximum worker threads for reading chart headers. |
+| `MONGO_BULK_BATCH` | `800` | Number of `UpdateOne` operations buffered before calling `bulk_write`. |
+| `SCAN_PROGRESS_EVERY_SECONDS` | `5` | Minimum interval between INFO progress summaries. |
+| `SCAN_PROGRESS_EVERY_FILES` | `0` | Optional file-count gate for progress logs; `0` disables file-based throttling. |
+| `LEADER_CHECK_INTERVAL` | `200` | How many files to process before re-checking leadership. |
+
+### Production hints
 
 When running in production the scanner persists a songs manifest with a deterministic `manifest_checksum`. The `/api/songs` endpoint exposes this checksum as an HTTP `ETag` header and accepts `If-None-Match` requests to serve `304 Not Modified` responses when the catalog has not changed.
 
