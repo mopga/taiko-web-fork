@@ -4680,10 +4680,53 @@ LEVEL:7
                 io_threads=1,
                 leader_check_interval=10,
                 progress_interval=3600,
+                progress_files=0,
                 is_leader=lambda: True,
             )
 
         self.assertFalse(any('Song scan progress' in line for line in captured.output))
+
+    def test_progress_logging_file_gate(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        for index in range(5):
+            path = songs_dir / f"chart{index}.tja"
+            path.write_text("\n".join([
+                "TITLE:Song",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ]), encoding='utf-8')
+
+        index_prev: Dict[str, Tuple[int, int]] = {}
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir)
+        index_current = index_current or {}
+
+        class _Collector:
+            def bulk_write(self, operations, ordered=False, bypass_document_validation=False):
+                return None
+
+        collector = _Collector()
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            songs_scanner.scan_incremental(
+                songs_dir,
+                index_prev,
+                index_current=index_current,
+                collection=collector,
+                bulk_batch=10,
+                io_threads=1,
+                leader_check_interval=10,
+                progress_interval=3600,
+                progress_files=2,
+                is_leader=lambda: True,
+            )
+
+        self.assertTrue(any('Song scan progress' in line for line in captured.output))
 
     def test_scan_missing_directory_logs_warning(self):
         tmp_dir = Path(self._tmp_dir())

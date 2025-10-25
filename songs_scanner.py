@@ -163,6 +163,32 @@ def _posint_env(*names: str, default: int) -> int:
     return default
 
 
+def _nonnegative_env(*names: str, default: int = 0) -> int:
+    if not names:
+        return max(0, default)
+
+    preferred = names[0]
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        token = str(raw).strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        if name != preferred:
+            LOGGER.info(
+                "Using alias %s=%s for %s", name, value, preferred
+            )
+        return value
+    return max(0, default)
+
+
 def compute_fs_digest(
     root: Path,
     *,
@@ -417,26 +443,49 @@ def _flush_bulk_batch(collection, batch: List[UpdateOne]) -> None:
     batch.clear()
     if not operations:
         return
-    start = time.perf_counter()
-    try:
-        collection.bulk_write(
-            operations,
-            ordered=False,
-            bypass_document_validation=True,
+
+    max_attempts = 3
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        start = time.perf_counter()
+        try:
+            try:
+                collection.bulk_write(
+                    operations,
+                    ordered=False,
+                    bypass_document_validation=True,
+                )
+            except TypeError:
+                collection.bulk_write(operations, ordered=False)
+        except Exception as exc:
+            if isinstance(exc, BulkWriteError):  # pragma: no cover - best effort
+                LOGGER.warning('Mongo bulk write error: %s', getattr(exc, 'details', exc))
+                return
+            should_retry = False
+            mongo_error = PyMongoError if isinstance(PyMongoError, type) else None
+            if mongo_error is not None and isinstance(exc, mongo_error):
+                should_retry = attempt < max_attempts
+            elif isinstance(exc, OSError):
+                should_retry = attempt < max_attempts
+            if should_retry:
+                LOGGER.warning(
+                    'Mongo bulk write attempt %d/%d failed, retrying: %s',
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                time.sleep(min(0.5, 0.1 * attempt))
+                continue
+            LOGGER.exception('Mongo bulk write failed')
+            return
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        LOGGER.info(
+            'Mongo bulk write: ops=%d duration_ms=%.1f',
+            len(operations),
+            duration_ms,
         )
-    except TypeError:
-        collection.bulk_write(operations, ordered=False)
-    except BulkWriteError as exc:  # pragma: no cover - depends on pymongo
-        LOGGER.warning('Mongo bulk write error: %s', getattr(exc, 'details', exc))
-    except Exception:
-        LOGGER.exception('Mongo bulk write failed')
         return
-    duration_ms = (time.perf_counter() - start) * 1000.0
-    LOGGER.info(
-        'Mongo bulk write: ops=%d duration_ms=%.1f',
-        len(operations),
-        duration_ms,
-    )
 
 
 def scan_incremental(
@@ -450,6 +499,7 @@ def scan_incremental(
     io_threads: Optional[int] = None,
     leader_check_interval: Optional[int] = None,
     progress_interval: Optional[int] = None,
+    progress_files: Optional[int] = None,
 ) -> Dict[str, int]:
     """Incrementally scan ``root`` using a thread pool and Mongo bulk writes."""
 
@@ -471,15 +521,20 @@ def scan_incremental(
     if not changed_paths:
         return summary
 
-    io_threads_default = min(16, max(2, 2 * (os.cpu_count() or 1)))
+    io_threads_default = min(32, max(2, 2 * (os.cpu_count() or 1)))
     workers = max(1, int(io_threads or _posint_env('SCAN_IO_THREADS', default=io_threads_default)))
     bulk_size = max(1, int(bulk_batch or _posint_env('MONGO_BULK_BATCH', default=800)))
     leader_check = max(1, int(leader_check_interval or _posint_env('LEADER_CHECK_INTERVAL', default=200)))
     progress_every = max(1, int(progress_interval or _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=5)))
+    if progress_files is not None:
+        progress_every_files = max(0, int(progress_files))
+    else:
+        progress_every_files = _nonnegative_env('SCAN_PROGRESS_EVERY_FILES', default=0)
     leader_cb = is_leader or (lambda: True)
 
     start = time.monotonic()
     last_progress = start
+    last_progress_count = 0
     processed_since_check = 0
     pending_ops: List[UpdateOne] = []
 
@@ -536,7 +591,15 @@ def scan_incremental(
                 _flush_bulk_batch(collection, pending_ops)
 
             now = time.monotonic()
+            should_log = False
             if now - last_progress >= progress_every:
+                should_log = True
+            if (
+                progress_every_files > 0
+                and summary['scanned'] - last_progress_count >= progress_every_files
+            ):
+                should_log = True
+            if should_log and summary['scanned'] > last_progress_count:
                 elapsed = now - start
                 LOGGER.info(
                     'Song scan progress: scanned=%d/%d changed=%d inserted=%d updated=%d elapsed=%.1f',
@@ -548,6 +611,7 @@ def scan_incremental(
                     elapsed,
                 )
                 last_progress = now
+                last_progress_count = summary['scanned']
 
     if collection is not None and pending_ops:
         _flush_bulk_batch(collection, pending_ops)
@@ -2948,6 +3012,11 @@ class SongScanner:
                     type(redis_client).__name__,
                 )
         self._redis: Optional["Redis"] = validated_redis
+        if self._redis is None and leader_lock is None:
+            LOGGER.info(
+                'Song watcher disabled: Redis leader lock unavailable (pid=%d)',
+                os.getpid(),
+            )
         self._coerce_unknown_course: Optional[str] = None
         if coerce_unknown_course:
             token = coerce_unknown_course.strip()
@@ -2999,15 +3068,16 @@ class SongScanner:
             1,
             _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=progress_default),
         )
+        self._scan_progress_files = _nonnegative_env('SCAN_PROGRESS_EVERY_FILES', default=0)
         cpu_count = os.cpu_count() or 1
-        io_threads_default = min(16, max(2, 2 * cpu_count))
+        io_threads_default = min(32, max(2, 2 * cpu_count))
         self._scan_io_threads = _posint_env('SCAN_IO_THREADS', default=io_threads_default)
         self._mongo_bulk_batch = _posint_env('MONGO_BULK_BATCH', default=800)
         self._leader_check_interval = _posint_env('LEADER_CHECK_INTERVAL', default=200)
         self._fast_path_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
         self._state_bulk_batch_size = 1000
         LOGGER.info(
-            "Scanner configuration: key=%s base_dir=%s ttl=%d refresh=%d io_threads=%d bulk_batch=%d progress_every=%d",
+            "Scanner configuration: key=%s base_dir=%s ttl=%d refresh=%d io_threads=%d bulk_batch=%d progress_every=%d progress_every_files=%d",
             self._leader_lock_key,
             self._songs_root,
             self._leader_lock_ttl,
@@ -3015,6 +3085,7 @@ class SongScanner:
             self._scan_io_threads,
             self._mongo_bulk_batch,
             self._scan_progress_interval,
+            self._scan_progress_files,
         )
         self._leader_lock: Optional[LeaderLock] = leader_lock
         self._fallback_leader_lock: Optional[LeaderLock] = None
@@ -5380,6 +5451,7 @@ class SongScanner:
 
         progress_start = time.monotonic()
         next_progress_log = progress_start + self._scan_progress_interval
+        last_progress_files = 0
         progress_state = {
             'files': 0,
             'changed': 0,
@@ -5408,10 +5480,21 @@ class SongScanner:
             LOGGER.info('Mongo bulk: ops=%d, duration_ms=%.1f, target=%s', len(operations), duration_ms, label)
             ops.clear()
 
+        progress_files_step = max(0, getattr(self, '_scan_progress_files', 0))
+
         def _maybe_log_progress(force: bool = False) -> None:
-            nonlocal next_progress_log
+            nonlocal next_progress_log, last_progress_files
             now = time.monotonic()
-            if not force and now < next_progress_log:
+            files_delta = progress_state['files'] - last_progress_files
+            if not force:
+                if now < next_progress_log:
+                    if progress_files_step <= 0 or files_delta < progress_files_step:
+                        return
+                elif progress_files_step > 0 and files_delta < progress_files_step:
+                    return
+                if files_delta <= 0:
+                    return
+            if files_delta <= 0 and not force:
                 return
             elapsed = max(0.0, now - progress_start)
             LOGGER.info(
@@ -5423,6 +5506,7 @@ class SongScanner:
                 elapsed,
             )
             next_progress_log = now + self._scan_progress_interval
+            last_progress_files = progress_state['files']
 
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
