@@ -101,8 +101,6 @@ class RedisLeaderLock(LeaderLock):
                     masked_token,
                     exc_info=True,
                 )
-                if self._consecutive_acquire_failures > self._ACQUIRE_WARNING_THRESHOLD:
-                    self._consecutive_acquire_failures = self._ACQUIRE_WARNING_THRESHOLD
             return False
         self._consecutive_acquire_failures = 0
         return bool(result)
