@@ -4583,6 +4583,63 @@ LEVEL:7
         self.assertEqual(summary['scanned'], 10)
         self.assertEqual(summary['updated'], 10)
 
+    def test_scan_incremental_writer_collisions_multi_thread(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(6):
+            (songs_dir / f"song_{idx}.tja").write_text("TITLE:Test\n#START", encoding="utf-8")
+
+        index_prev: Dict[str, Tuple[int, int]] = {}
+        _, _, index_current = songs_scanner.compute_fs_digest(songs_dir, include_index=True)
+        index_current = index_current or {}
+
+        collection = _MemoryCollection()
+
+        class _CollidingUpdateOne:
+            def __init__(self, filter_, update, upsert=False):
+                self.filter = {'path': 'shared.tja'}
+                new_update = {}
+                for key, value in update.items():
+                    if key == '$set':
+                        coerced = dict(value)
+                        coerced['path'] = 'shared.tja'
+                        new_update['$set'] = coerced
+                    else:
+                        new_update[key] = value
+                new_update.setdefault('$set', {})['path'] = 'shared.tja'
+                self.update = new_update
+                self.upsert = upsert
+                self.args = (self.filter, self.update)
+                self.kwargs = {'upsert': upsert}
+
+        with mock.patch.object(songs_scanner, 'UpdateOne', _CollidingUpdateOne), \
+            mock.patch.dict(
+                os.environ,
+                {
+                    'SCAN_IO_THREADS': '4',
+                    'SCAN_WRITER_THREADS': '2',
+                    'SCAN_BATCH_MAX_OPS': '1',
+                    'SCAN_OPS_QUEUE_MAX': '3',
+                    'SCAN_BATCH_FLUSH_SECONDS': '0.01',
+                },
+            ):
+            summary = songs_scanner.scan_incremental(
+                songs_dir,
+                index_prev,
+                index_current=index_current,
+                collection=collection,
+                leader_check_interval=10,
+                progress_interval=3600,
+                io_threads=4,
+            )
+
+        self.assertEqual(summary['scanned'], 6)
+        self.assertEqual(summary['updated'], 6)
+        self.assertEqual(len(collection._docs), 1)
+        self.assertEqual(collection._docs[0]['path'], 'shared.tja')
+
     def test_scan_incremental_progress_logging_interval(self):
         tmp_dir = Path(self._tmp_dir())
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)

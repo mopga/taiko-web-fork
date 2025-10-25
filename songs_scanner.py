@@ -663,7 +663,7 @@ def scan_incremental(
     start = time.monotonic()
     last_progress = start - progress_every
     last_progress_count = 0
-    processed_since_check = 0
+    lost_leadership = False
     ops_queue: Optional[Queue] = None
     stop_sentinel = object()
     writer_threads_list: List[threading.Thread] = []
@@ -693,7 +693,15 @@ def scan_incremental(
                     continue
                 if len(batch) >= batch_max or now - last_flush >= flush_seconds:
                     ops_count = len(batch)
+                    flush_start = time.perf_counter()
                     _flush_bulk_batch(collection, batch)
+                    flush_duration = (time.perf_counter() - flush_start) * 1000.0
+                    LOGGER.debug(
+                        "mongo bulk flush: ops=%d duration_ms=%d",
+                        ops_count,
+                        int(flush_duration),
+                    )
+                    batch.clear()
                     last_flush = now
             if batch:
                 flush_start = time.perf_counter()
@@ -730,21 +738,23 @@ def scan_incremental(
         futures = {executor.submit(_submit, path): path for path in changed_paths}
         for future in as_completed(futures):
             relpath = futures[future]
-            processed_since_check += 1
+            if lost_leadership:
+                break
 
-            if processed_since_check >= leader_check:
-                processed_since_check = 0
-                if not leader_cb():
-                    LOGGER.info(
-                        'lost leadership, aborting current scan pid=%d scanned=%d',
-                        os.getpid(),
-                        summary['scanned'],
-                    )
-                    for pending in futures:
-                        if pending is future:
-                            continue
-                        pending.cancel()
-                    break
+            processed_so_far = summary['scanned'] + summary['errors']
+            check_threshold = (processed_so_far + 1) % leader_check == 0
+            if check_threshold and not leader_cb():
+                LOGGER.info(
+                    'lost leadership, aborting current scan pid=%d scanned=%d',
+                    os.getpid(),
+                    summary['scanned'],
+                )
+                for pending in futures:
+                    if pending is future:
+                        continue
+                    pending.cancel()
+                lost_leadership = True
+                continue
 
             try:
                 header = future.result()
@@ -767,7 +777,21 @@ def scan_incremental(
                         ops_queue.put(operation, timeout=0.5)
                         break
                     except Full:
-                        continue
+                        if not leader_cb():
+                            LOGGER.info(
+                                'lost leadership while awaiting queue capacity pid=%d scanned=%d',
+                                os.getpid(),
+                                summary['scanned'],
+                            )
+                            for pending in futures:
+                                if pending is future:
+                                    continue
+                                pending.cancel()
+                            lost_leadership = True
+                            break
+                        time.sleep(0.01)
+                if lost_leadership:
+                    break
 
             now = time.monotonic()
             should_log = False
@@ -803,7 +827,7 @@ def scan_incremental(
                     ops_queue.put(stop_sentinel, timeout=0.5)
                     break
                 except Full:
-                    continue
+                    time.sleep(0.01)
         for thread in writer_threads_list:
             thread.join()
 
