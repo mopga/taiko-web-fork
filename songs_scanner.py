@@ -136,7 +136,26 @@ _HANG_WATCHDOG_ARMED = False
 LEADER_LOCK_TTL_SECONDS = 300
 
 
-def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = None) -> Tuple[str, int]:
+def _posint_env(*names: str, default: int) -> int:
+    for name in names:
+        raw = os.getenv(name)
+        if not raw:
+            continue
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return default
+
+
+def compute_fs_digest(
+    root: Path,
+    *,
+    ignore_globs: Optional[Iterable[str]] = None,
+    include_index: bool = False,
+) -> Tuple[str, int, Optional[Dict[str, Tuple[int, int]]]]:
     """Return a checksum and file count for ``root`` without reading file bodies."""
 
     try:
@@ -145,7 +164,9 @@ def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = Non
         root_path = Path(root)
 
     if not root_path.exists():
-        return hashlib.sha1(b"").hexdigest(), 0
+        checksum = hashlib.sha1(b"").hexdigest()
+        empty_index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
+        return checksum, 0, empty_index
 
     ignore_patterns = [pattern for pattern in (ignore_globs or []) if pattern]
 
@@ -157,6 +178,7 @@ def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = Non
 
     hasher = hashlib.sha1()
     files = 0
+    index: Optional[Dict[str, Tuple[int, int]]] = {} if include_index else None
 
     for dirpath, dirnames, filenames in os.walk(root_path):
         dirnames.sort()
@@ -194,11 +216,60 @@ def compute_fs_digest(root: Path, *, ignore_globs: Optional[Iterable[str]] = Non
             if _ignored(relative):
                 continue
             mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
-            payload = f"{relative.as_posix()}\0{stat_result.st_size}\0{mtime_ns}\n"
+            rel_posix = relative.as_posix()
+            payload = f"{rel_posix}\0{stat_result.st_size}\0{mtime_ns}\n"
             hasher.update(payload.encode("utf-8", "surrogateescape"))
             files += 1
+            if index is not None:
+                index[rel_posix] = (int(stat_result.st_size), int(mtime_ns))
 
-    return hasher.hexdigest(), files
+    return hasher.hexdigest(), files, index
+
+
+def _encode_fs_index(index: Mapping[str, Tuple[int, int]]) -> List[Dict[str, int]]:
+    encoded: List[Dict[str, int]] = []
+    for path, (size, mtime_ns) in sorted(index.items()):
+        encoded.append({'p': path, 's': int(size), 'm': int(mtime_ns)})
+    return encoded
+
+
+def _decode_fs_index(payload: object) -> Dict[str, Tuple[int, int]]:
+    decoded: Dict[str, Tuple[int, int]] = {}
+    if isinstance(payload, Mapping):
+        iterable = payload.items()
+    elif isinstance(payload, Iterable) and not isinstance(payload, (str, bytes)):
+        iterable = enumerate(payload)
+    else:
+        return decoded
+
+    for key, value in iterable:
+        path: Optional[str] = None
+        size_value: Optional[int] = None
+        mtime_value: Optional[int] = None
+        if isinstance(value, Mapping):
+            path = value.get('p') or value.get('path')
+            size_value = value.get('s') or value.get('size')
+            mtime_value = value.get('m') or value.get('mtime') or value.get('mtime_ns')
+        elif isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                size_value = int(value[0])
+                mtime_value = int(value[1])
+            except (TypeError, ValueError):
+                continue
+            path = value[2] if len(value) > 2 and isinstance(value[2], str) else None
+        if path is None and isinstance(key, str):
+            path = key
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            size_int = int(size_value) if size_value is not None else None
+            mtime_int = int(mtime_value) if mtime_value is not None else None
+        except (TypeError, ValueError):
+            continue
+        if size_int is None or mtime_int is None:
+            continue
+        decoded[path] = (size_int, mtime_int)
+    return decoded
 
 
 def _coerce_int(value: object) -> Optional[int]:
@@ -258,7 +329,11 @@ class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
                 continue
             if refreshed:
                 continue
-            LOGGER.debug('Leader lock refresh skipped (not owner?) token=%s', self.token)
+            try:
+                masked = RedisLeaderLock._mask_token(self.token)
+            except Exception:  # pragma: no cover - defensive mask fallback
+                masked = '***'
+            LOGGER.debug('Leader lock refresh skipped (not owner?) token=%s', masked)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -2610,15 +2685,42 @@ class SongScanner:
         self._active_summary: Optional[Dict[str, int]] = None
         self._active_refresher_stack: Optional[contextlib.ExitStack] = None
         self._leader_lock_token: Optional[str] = None
+        self._leader_lock_ephemeral = False
         self._leader_lock_key = SCAN_LEADER_KEY
         ttl_default = 300
-        ttl_env = os.getenv('SCAN_LEADER_TTL_SECONDS')
-        if ttl_env:
-            with contextlib.suppress(ValueError):
-                parsed_ttl = int(ttl_env)
-                if parsed_ttl > 0:
-                    ttl_default = parsed_ttl
-        self._leader_lock_ttl = ttl_default
+        ttl_value = _posint_env(
+            'SCAN_LEADER_TTL_SECONDS',
+            'SCANNER_LEADER_TTL_SECONDS',
+            'LEADER_TTL_SECONDS',
+            default=ttl_default,
+        )
+        refresh_default = max(10, ttl_value // 4)
+        refresh_value = _posint_env(
+            'SCAN_LEADER_REFRESH_SECONDS',
+            'SCANNER_LEADER_REFRESH_SECONDS',
+            'LEADER_REFRESH_SECONDS',
+            default=refresh_default,
+        )
+        if ttl_value <= 2 * refresh_value:
+            ttl_value = 3 * max(refresh_value, 1)
+        self._leader_lock_ttl = ttl_value
+        self._leader_lock_refresh = refresh_value
+        progress_default = 5
+        self._scan_progress_interval = max(
+            1,
+            _posint_env('SCAN_PROGRESS_EVERY_SECONDS', default=progress_default),
+        )
+        cpu_count = os.cpu_count() or 1
+        io_threads_default = min(16, max(2, 2 * cpu_count))
+        self._scan_io_threads = _posint_env('SCAN_IO_THREADS', default=io_threads_default)
+        self._fast_path_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
+        self._state_bulk_batch_size = 1000
+        LOGGER.info(
+            "Scanner leader TTL=%d, refresh=%d, key=%s",
+            self._leader_lock_ttl,
+            self._leader_lock_refresh,
+            self._leader_lock_key,
+        )
         self._leader_lock: Optional[LeaderLock] = leader_lock
         self._fallback_leader_lock: Optional[LeaderLock] = None
         db_name = getattr(self.db, 'name', None)
@@ -4744,7 +4846,7 @@ class SongScanner:
             if SCAN_LOG_SUMMARY:
                 try:
                     SUMMARY_LOGGER.info(
-                        "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s",
+                        "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d elapsed=%.3fs",
                         mode_str,
                         int(active_summary.get('found', 0)),
                         int(active_summary.get('inserted', 0)),
@@ -4754,6 +4856,10 @@ class SongScanner:
                         int(active_summary.get('skipped', 0)),
                         final_duration,
                         checksum_str,
+                        str(active_summary.get('fs_checksum', '-')),
+                        str(active_summary.get('manifest_checksum', '-')),
+                        int(active_summary.get('files_count', 0)),
+                        final_duration,
                     )
                 except Exception as exc:  # pragma: no cover - defensive logging path
                     SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
@@ -4810,6 +4916,16 @@ class SongScanner:
         summary['reason'] = 'digest_changed'
         summary['skipped_due_to_leader'] = False
 
+        manifest_index: Dict[str, Tuple[int, int]] = {}
+        if isinstance(manifest_meta, dict):
+            index_payload = (
+                manifest_meta.get('fs_index')
+                or manifest_meta.get('index')
+                or manifest_meta.get('fsIndex')
+            )
+            if index_payload:
+                manifest_index = _decode_fs_index(index_payload)
+
         songs_count_value = self._count_enabled_songs()
         if songs_count_value is not None:
             summary['songs_count_before'] = songs_count_value
@@ -4826,7 +4942,12 @@ class SongScanner:
             self._active_refresher_stack = None
             return summary
 
-        checksum, files_count = compute_fs_digest(self.songs_dir, ignore_globs=self.ignore_globs)
+        checksum, files_count, index_current = compute_fs_digest(
+            self.songs_dir,
+            ignore_globs=self.ignore_globs,
+            include_index=True,
+        )
+        index_current = index_current or {}
         summary['files_count'] = files_count
         summary['fs_checksum'] = checksum
 
@@ -4844,69 +4965,46 @@ class SongScanner:
 
         stored_manifest_files = manifest_files_count if manifest_files_count is not None else manifest_documents
 
-        digest_equal = (
-            not full
-            and bool(manifest_checksum)
-            and manifest_checksum == checksum
-            and stored_manifest_files == files_count
-        )
+        digest_equal = bool(manifest_checksum) and manifest_checksum == checksum and stored_manifest_files == files_count
 
-        if (
-            digest_equal
-            and manifest_documents == 0
-            and (songs_count_value is None or songs_count_value == 0)
-        ):
-            LOGGER.info(
-                'Fast-path decision: digest_equal=%s manifest_documents=%d songs_count=%s mode=%s',
-                digest_equal,
-                manifest_documents,
-                songs_count_value if songs_count_value is not None else 'unknown',
-                'fast_empty',
-            )
-            summary['fast_path'] = True
-            summary['reason'] = 'digest_equal_empty'
-            self._log_scan_outcome(summary, fast_path=True, reason='digest_equal_empty')
-            refresher_stack.close()
-            self._active_refresher_stack = None
-            return summary
+        reason_label = 'digest_changed'
+        if not manifest_checksum:
+            reason_label = 'first_start'
+        if force_scan:
+            reason_label = 'force'
 
-        manifest_has_documents = manifest_documents > 0
-        safe_fast_path = (
+        fast_path_candidate = (
             digest_equal
-            and manifest_has_documents
-            and songs_count_value is not None
-            and songs_count_value >= manifest_documents
-            and manifest_documents > 0
+            and not full
+            and not force_scan
+            and not self._fast_path_disabled
         )
 
         rehydrate_mode: Optional[str] = None
-        if (
-            digest_equal
-            and manifest_has_documents
-            and songs_count_value is not None
-        ):
+        if digest_equal and manifest_documents > 0 and songs_count_value is not None:
             if songs_count_value <= 0:
                 rehydrate_mode = 'full'
             elif songs_count_value < manifest_documents:
                 rehydrate_mode = 'missing'
 
-        decision_mode = 'full_scan'
-        if safe_fast_path:
-            decision_mode = 'fast'
-        elif rehydrate_mode == 'full':
-            decision_mode = 'rehydrate_full'
-        elif rehydrate_mode == 'missing':
-            decision_mode = 'rehydrate_missing'
-        LOGGER.info(
-            'Fast-path decision: digest_equal=%s manifest_documents=%d songs_count=%s mode=%s',
-            digest_equal,
-            manifest_documents,
-            songs_count_value if songs_count_value is not None else 'unknown',
-            decision_mode,
-        )
+        if rehydrate_mode is not None:
+            fast_path_candidate = False
 
-        if safe_fast_path:
+        LOGGER.info(
+            'Song scan started: reason=%s, fast_path=%s, base_dir=%s',
+            reason_label,
+            bool(fast_path_candidate),
+            self._songs_root,
+        )
+        summary['reason'] = reason_label
+
+        if fast_path_candidate:
             summary['fast_path'] = True
+            summary['reason'] = 'digest_equal'
+            LOGGER.info(
+                'Song scan skipped: fast_path=True, digest_unchanged=%s',
+                checksum,
+            )
             self._log_scan_outcome(summary, fast_path=True, reason='digest_equal')
             refresher_stack.close()
             self._active_refresher_stack = None
@@ -4953,7 +5051,12 @@ class SongScanner:
                     )
                 if consistent:
                     if manifest_checksum and files_count is not None:
-                        self._update_manifest_meta(manifest_checksum, files_count, manifest_documents)
+                        self._update_manifest_meta(
+                            manifest_checksum,
+                            files_count,
+                            manifest_documents,
+                            fs_index=index_current,
+                        )
                     LOGGER.info(
                         'Songs collection reconciled with manifest (mode=%s, rehydrated=%s, total=%s)',
                         rehydrate_mode,
@@ -4970,7 +5073,61 @@ class SongScanner:
 
         performed_scan = True
         summary['fast_path'] = False
-        summary['reason'] = 'digest_changed'
+        summary['reason'] = reason_label
+
+        changed_candidates: Set[str] = set()
+        if not full and manifest_index:
+            for path, stats in index_current.items():
+                if manifest_index.get(path) != stats:
+                    changed_candidates.add(path)
+        else:
+            changed_candidates = set(index_current.keys())
+
+        progress_start = time.monotonic()
+        next_progress_log = progress_start + self._scan_progress_interval
+        progress_state = {
+            'files': 0,
+            'changed': 0,
+        }
+
+        bulk_batch_size = max(1, int(getattr(self, '_state_bulk_batch_size', 1000)))
+
+        def _flush_bulk_ops(collection, ops: List[UpdateOne], *, label: str) -> None:
+            if not ops:
+                return
+            start = time.perf_counter()
+            operations = list(ops)
+            try:
+                collection.bulk_write(
+                    operations,
+                    ordered=False,
+                    bypass_document_validation=True,
+                )
+            except TypeError:
+                collection.bulk_write(operations, ordered=False)
+            except Exception:
+                LOGGER.debug('Failed to bulk write %s batch size=%d', label, len(operations), exc_info=True)
+                ops.clear()
+                return
+            duration_ms = (time.perf_counter() - start) * 1000.0
+            LOGGER.info('Mongo bulk: ops=%d, duration_ms=%.1f, target=%s', len(operations), duration_ms, label)
+            ops.clear()
+
+        def _maybe_log_progress(force: bool = False) -> None:
+            nonlocal next_progress_log
+            now = time.monotonic()
+            if not force and now < next_progress_log:
+                return
+            elapsed = max(0.0, now - progress_start)
+            LOGGER.info(
+                'Song scan progress: files_scanned=%d, changed=%d, inserted=%d, updated=%d, elapsed=%.1f',
+                progress_state['files'],
+                progress_state['changed'],
+                int(summary.get('inserted', 0)),
+                int(summary.get('updated', 0)),
+                elapsed,
+            )
+            next_progress_log = now + self._scan_progress_interval
 
         self._cleanup_invalid_group_keys()
         categories: Dict[int, str] = {0: DEFAULT_CATEGORY_TITLE}
@@ -5021,7 +5178,28 @@ class SongScanner:
         manifest_entries_by_id: Dict[str, Dict[str, object]] = {}
         manifest_entry_checksum: Optional[str] = None
 
+        leader_active = True
+        leader_check_counter = 0
+
         for tja_path in self._iter_tja_files():
+            leader_check_counter += 1
+            if (
+                self._leader_lock_token
+                and not self._leader_lock_ephemeral
+                and leader_check_counter >= 25
+            ):
+                leader_check_counter = 0
+                if not self.has_leader_lock():
+                    LOGGER.info(
+                        'Song scan aborted: leader lost (pid=%d, files_scanned=%d)',
+                        os.getpid(),
+                        progress_state['files'],
+                    )
+                    summary['leader'] = False
+                    summary['reason'] = 'leader_lost'
+                    summary['leader_lost'] = True
+                    leader_active = False
+                    break
             summary['found'] += 1
             try:
                 relative_tja = tja_path.relative_to(self._songs_root)
@@ -5033,6 +5211,8 @@ class SongScanner:
             tja_key = relative_tja.as_posix()
             state_doc = state_docs.get(tja_key)
             seen_state_paths.add(tja_key)
+
+            progress_state['files'] += 1
 
             try:
                 tja_stat = tja_path.stat()
@@ -5074,6 +5254,9 @@ class SongScanner:
                 if state_doc.get('tja_mtime_ns') != tja_mtime_ns or state_doc.get('tja_size') != tja_size:
                     needs_processing = True
 
+            if not needs_processing and tja_key in changed_candidates:
+                needs_processing = True
+
             if state_doc is not None and not needs_processing:
                 stored_audio_path = state_doc.get('audio_path') if isinstance(state_doc.get('audio_path'), str) else None
                 if stored_audio_path:
@@ -5105,6 +5288,9 @@ class SongScanner:
             file_hash: Optional[str] = None
             file_sha1: Optional[str] = None
             fingerprint: Optional[str] = None
+
+            if needs_processing:
+                progress_state['changed'] += 1
 
             if not needs_processing and state_doc:
                 record_payload = state_doc.get('record') if isinstance(state_doc.get('record'), dict) else None
@@ -5262,6 +5448,33 @@ class SongScanner:
             if record.category_id != 0:
                 categories[record.category_id] = record.category_title
 
+            _maybe_log_progress()
+
+        _maybe_log_progress(force=True)
+
+        if (
+            leader_active
+            and self._leader_lock_token
+            and not self._leader_lock_ephemeral
+            and not self.has_leader_lock()
+        ):
+            LOGGER.info(
+                'Song scan aborted: leader lost (pid=%d, files_scanned=%d)',
+                os.getpid(),
+                progress_state['files'],
+            )
+            summary['leader'] = False
+            summary['reason'] = 'leader_lost'
+            summary['leader_lost'] = True
+            leader_active = False
+
+        if not leader_active:
+            summary.setdefault('errors', 0)
+            self._log_scan_outcome(summary, fast_path=False, reason='leader_lost')
+            refresher_stack.close()
+            self._active_refresher_stack = None
+            return summary
+
         song_id_by_key: Dict[str, int] = {}
         for key in sorted(aggregated_records.keys()):
             records = aggregated_records[key]
@@ -5338,6 +5551,14 @@ class SongScanner:
                 song_id_by_key[key] = song_id
 
         if self._state_collection is not None:
+            state_collection = self._state_collection
+            state_ops: List[UpdateOne] = []
+
+            def _queue_state_update(path_key: str, payload: Dict[str, object]) -> None:
+                state_ops.append(UpdateOne({'tja_path': path_key}, {'$set': payload}, upsert=True))
+                if len(state_ops) >= bulk_batch_size:
+                    _flush_bulk_ops(state_collection, state_ops, label='state')
+
             for tja_key, record in records_by_path.items():
                 key = group_key_by_path[tja_key]
                 song_id = song_id_by_key.get(key)
@@ -5361,25 +5582,14 @@ class SongScanner:
                     'last_ok_sha1': meta.get('last_ok_sha1'),
                     'record': asdict(record),
                 }
-                if tja_key in state_docs:
-                    try:
-                        self._state_collection.update_one({'tja_path': tja_key}, {'$set': payload}, upsert=True)
-                    except Exception:
-                        LOGGER.debug('Failed to update song scanner state for %s', tja_key)
-                else:
-                    try:
-                        self._state_collection.insert_one(payload)
-                    except Exception:
-                        LOGGER.debug('Failed to insert song scanner state for %s', tja_key)
+                _queue_state_update(tja_key, payload)
 
-        if self._state_collection is not None and failed_state_updates:
             for tja_key, failure_payload in failed_state_updates.items():
                 payload = dict(failure_payload)
                 payload.setdefault('tja_path', tja_key)
-                try:
-                    self._state_collection.update_one({'tja_path': tja_key}, {'$set': payload}, upsert=True)
-                except Exception:
-                    LOGGER.debug('Failed to persist failure state for %s', tja_key)
+                _queue_state_update(tja_key, payload)
+
+            _flush_bulk_ops(state_collection, state_ops, label='state')
 
         if self._state_collection is not None:
             stale_paths = set(state_docs.keys()) - seen_state_paths
@@ -5425,13 +5635,35 @@ class SongScanner:
             if previous_enabled:
                 summary['disabled'] += 1
 
+        if (
+            performed_scan
+            and summary.get('reason') != 'leader_lost'
+            and self._leader_lock_token
+            and not self._leader_lock_ephemeral
+            and not self.has_leader_lock()
+        ):
+            LOGGER.info(
+                'Song scan aborted: leader lost (pid=%d, files_scanned=%d)',
+                os.getpid(),
+                progress_state['files'],
+            )
+            summary['leader'] = False
+            summary['reason'] = 'leader_lost'
+            summary['leader_lost'] = True
+            leader_active = False
+
         if performed_scan:
             manifest_documents_for_meta = int(summary.get('manifest_documents') or 0)
             final_manifest_checksum = checksum or summary.get('fs_checksum') or ''
             if final_manifest_checksum is None:
                 final_manifest_checksum = ''
             summary['manifest_checksum'] = final_manifest_checksum
-            self._update_manifest_meta(final_manifest_checksum, files_count, manifest_documents_for_meta)
+            self._update_manifest_meta(
+                final_manifest_checksum,
+                files_count,
+                manifest_documents_for_meta,
+                fs_index=index_current,
+            )
 
         self._metrics.flush()
 
@@ -5476,6 +5708,7 @@ class SongScanner:
             if self._leader_lock_token is not None:
                 LOGGER.debug('scanner leader lock unavailable: backend missing')
             self._leader_lock_token = None
+            self._leader_lock_ephemeral = True
             return False
         token = self._leader_lock_token
         if token is None:
@@ -5486,11 +5719,13 @@ class SongScanner:
         except Exception:  # pragma: no cover - storage access best effort
             LOGGER.debug('Failed to read scanner leader lock state', exc_info=True)
             self._leader_lock_token = None
+            self._leader_lock_ephemeral = False
             return False
         if owner == token:
             return True
         LOGGER.debug('scanner leader lock unavailable: token mismatch')
         self._leader_lock_token = None
+        self._leader_lock_ephemeral = False
         return False
 
     def _acquire_leader_lock(
@@ -5514,10 +5749,17 @@ class SongScanner:
         if lock is None:
             token = f"{hostname}:{pid}"
             self._leader_lock_token = token
+            self._leader_lock_ephemeral = True
             if summary is not None:
                 summary['leader'] = True
-            LOGGER.info('Leader acquired: token=%s pid=%s key=%s ttl=%d', token, pid, self._leader_lock_key, ttl_value)
-            LOGGER.info('Song scan starting: pid=%s leader=True', pid)
+            LOGGER.info(
+                'Scanner leader acquired: key=%s, pid=%d, ttl=%ds, refresh=%ds, base_dir=%s',
+                self._leader_lock_key,
+                pid,
+                ttl_value,
+                self._leader_lock_refresh,
+                self._songs_root,
+            )
             return True
 
         existing_token = self._leader_lock_token
@@ -5529,26 +5771,35 @@ class SongScanner:
             except Exception:  # pragma: no cover - storage access best effort
                 LOGGER.debug('Failed to refresh scanner leader lock ttl (LeaderLock backend)', exc_info=True)
             self._leader_lock_token = token
+            self._leader_lock_ephemeral = False
             if summary is not None:
                 summary['leader'] = True
             if refresher_stack is not None:
                 def _clear_token(token_to_clear: str = token) -> None:
                     if self._leader_lock_token == token_to_clear:
                         self._leader_lock_token = None
+                        self._leader_lock_ephemeral = False
 
                 refresher_stack.enter_context(
                     TTLRefresher(
                         lock,
                         token,
                         ttl_value,
-                        period=60,
+                        period=self._leader_lock_refresh,
                         on_release=_clear_token,
                     )
                 )
-            LOGGER.info('Leader acquired: token=%s pid=%s key=%s ttl=%d', token, pid, self._leader_lock_key, ttl_value)
-            LOGGER.info('Song scan starting: pid=%s leader=True', pid)
+            LOGGER.info(
+                'Scanner leader acquired: key=%s, pid=%d, ttl=%ds, refresh=%ds, base_dir=%s',
+                self._leader_lock_key,
+                pid,
+                ttl_value,
+                self._leader_lock_refresh,
+                self._songs_root,
+            )
             return True
 
+        backoff = retry_delay
         for attempt in range(1, attempts + 1):
             acquired = False
             try:
@@ -5556,36 +5807,38 @@ class SongScanner:
             except Exception:  # pragma: no cover - storage access best effort
                 LOGGER.warning('Failed to acquire scanner leader lock', exc_info=True)
                 acquired = False
-            LOGGER.info(
-                'LeaderLock acquire attempt=%d ok=%s key=%s token=%s',
-                attempt,
-                acquired,
-                self._leader_lock_key,
-                token,
-            )
             if acquired:
                 self._leader_lock_token = token
+                self._leader_lock_ephemeral = False
                 if summary is not None:
                     summary['leader'] = True
                 if refresher_stack is not None:
                     def _clear_token(token_to_clear: str = token) -> None:
                         if self._leader_lock_token == token_to_clear:
                             self._leader_lock_token = None
+                            self._leader_lock_ephemeral = False
 
                     refresher_stack.enter_context(
                         TTLRefresher(
                             lock,
                             token,
                             ttl_value,
-                            period=60,
+                            period=self._leader_lock_refresh,
                             on_release=_clear_token,
                         )
                     )
-                LOGGER.info('Leader acquired: token=%s pid=%s key=%s ttl=%d', token, pid, self._leader_lock_key, ttl_value)
-                LOGGER.info('Song scan starting: pid=%s leader=True', pid)
+                LOGGER.info(
+                    'Scanner leader acquired: key=%s, pid=%d, ttl=%ds, refresh=%ds, base_dir=%s',
+                    self._leader_lock_key,
+                    pid,
+                    ttl_value,
+                    self._leader_lock_refresh,
+                    self._songs_root,
+                )
                 return True
             if attempt < attempts:
-                time.sleep(retry_delay)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
 
         owner_label: Optional[str] = None
         try:
@@ -5618,6 +5871,7 @@ class SongScanner:
             duration,
         )
         self._leader_lock_token = None
+        self._leader_lock_ephemeral = False
         if summary is not None:
             summary['leader'] = False
             summary['skipped_due_to_leader'] = True
@@ -5637,7 +5891,14 @@ class SongScanner:
             return dict(doc)
         return None
 
-    def _update_manifest_meta(self, checksum: str, files_count: int, manifest_documents: int) -> None:
+    def _update_manifest_meta(
+        self,
+        checksum: str,
+        files_count: int,
+        manifest_documents: int,
+        *,
+        fs_index: Optional[Mapping[str, Tuple[int, int]]] = None,
+    ) -> None:
         collection = self._meta_collection
         if collection is None:
             return
@@ -5647,7 +5908,10 @@ class SongScanner:
             'files_count': files_count,
             'manifest_documents': manifest_documents,
             'updated_at': datetime.now(UTC),
+            'fs_checksum': checksum,
         }
+        if fs_index:
+            payload['fs_index'] = _encode_fs_index(fs_index)
         update = {
             '$set': payload,
             '$unset': {'force': ''},
@@ -6054,6 +6318,12 @@ class SongScanner:
             LOGGER.debug('Failed to ensure songs manifest id index', exc_info=True)
 
     def start_watcher(self, callback: Optional[Callable[[], None]] = None, debounce_seconds: float = 1.0):
+        if not self.has_leader_lock():
+            LOGGER.debug(
+                'Song directory watcher not started: scanner is not leader (pid=%d)',
+                os.getpid(),
+            )
+            return None
         if not self.watchdog_supported:
             LOGGER.info('watchdog is not available; live song updates disabled')
             return None
@@ -6090,6 +6360,8 @@ class SongScanner:
         observer.daemon = True
         observer.schedule(handler, str(self.songs_dir), recursive=True)
         observer.start()
+
+        LOGGER.info('Song directory watcher started: base_dir=%s', self._songs_root)
 
         class _WatcherHandle:
             def __init__(self, obs: Observer, hnd: FileSystemEventHandler) -> None:

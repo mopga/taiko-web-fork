@@ -88,5 +88,45 @@ class RedisLeaderLockAcquireLoggingTest(unittest.TestCase):
         self.assertIn('failures=3', captured.output[4])
 
 
+class RedisLeaderLockTokenMaskingTest(unittest.TestCase):
+    def test_logs_never_expose_raw_tokens(self):
+        token = 'worker-ABC12345'
+
+        class _FailingAcquireRedis:
+            def set(self, key, value, nx=False, ex=None):
+                raise RuntimeError('boom')
+
+        class _ScriptableRedis(_DummyRedisWithoutScripts):
+            def register_script(self, script):
+                def _script(keys=None, args=None, client=None):
+                    # Simulate Lua release success while also cleaning up the key.
+                    if keys:
+                        self.delete(keys[0])
+                    return 1
+
+                return _script
+
+        def _failing_client_factory():
+            raise RuntimeError('no redis available')
+
+        with self.assertLogs('lock.redis_lock', level='DEBUG') as captured:
+            lock_acquire_fail = RedisLeaderLock(lambda: _FailingAcquireRedis(), 'leader-key')
+            self.assertFalse(lock_acquire_fail.acquire(token, ttl_seconds=30))
+
+            lock = RedisLeaderLock(lambda: _ScriptableRedis(), 'leader-key')
+            self.assertTrue(lock.acquire(token, ttl_seconds=30))
+            self.assertTrue(lock.release(token))
+
+            lock_refresh_fail = RedisLeaderLock(_failing_client_factory, 'leader-key')
+            self.assertFalse(lock_refresh_fail.refresh(token, ttl_seconds=30))
+
+            lock_release_fail = RedisLeaderLock(_failing_client_factory, 'leader-key')
+            self.assertFalse(lock_release_fail.release(token))
+
+        combined = '\n'.join(captured.output)
+        self.assertNotIn(token, combined)
+        self.assertRegex(combined, r'token=[^,\s]*…')
+
+
 if __name__ == '__main__':
     unittest.main()

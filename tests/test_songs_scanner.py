@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import contextlib
@@ -3717,6 +3718,11 @@ LEVEL:7
         self.assertIsInstance(manifest_meta, dict)
         self.assertEqual(manifest_meta.get('manifest_checksum'), full_summary.get('manifest_checksum'))
         self.assertEqual(manifest_meta.get('manifest_documents'), full_summary.get('manifest_documents'))
+        self.assertEqual(manifest_meta.get('fs_checksum'), full_summary.get('fs_checksum'))
+        fs_index = manifest_meta.get('fs_index')
+        self.assertIsInstance(fs_index, list)
+        stored_paths = {entry.get('p') for entry in fs_index if isinstance(entry, dict)}
+        self.assertIn('manifest.tja', stored_paths)
 
         redis_client.delete(scanner.leader_lock_key)
         with mock.patch.object(scanner, '_iter_tja_files', side_effect=AssertionError('should use fast path')):
@@ -3724,6 +3730,147 @@ LEVEL:7
 
         self.assertTrue(fast_summary.get('fast_path'))
         self.assertEqual(fast_summary.get('reason'), 'digest_equal')
+
+    def test_incremental_scan_only_parses_changed_files(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        first = songs_dir / "alpha.tja"
+        second = songs_dir / "bravo.tja"
+
+        def _content(name: str) -> str:
+            return "\n".join([
+                "TITLE:Sample",
+                f"WAVE:{name}.ogg",
+                "COURSE:Oni",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ])
+
+        first.write_text(_content('alpha'), encoding="utf-8")
+        second.write_text(_content('bravo'), encoding="utf-8")
+        (songs_dir / 'alpha.ogg').write_bytes(b'audio')
+        (songs_dir / 'bravo.ogg').write_bytes(b'audio')
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        scanner.scan(full=True)
+
+        second.write_text(_content('bravo') + "\n#UPDATED", encoding="utf-8")
+
+        original_parse = songs_scanner.parse_tja
+        parse_calls: List[str] = []
+
+        def _patched_parse(path: Path, *_args, **_kwargs):
+            parse_calls.append(Path(path).name)
+            return original_parse(path)
+
+        with mock.patch('songs_scanner.parse_tja', side_effect=_patched_parse):
+            summary = scanner.scan(full=False)
+
+        self.assertEqual(summary.get('updated'), 1)
+        self.assertEqual(parse_calls, ['bravo.tja'])
+
+    def test_state_updates_use_bulk_batches(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        def _content(name: str) -> str:
+            return "\n".join([
+                "TITLE:Batch",
+                f"WAVE:{name}.ogg",
+                "COURSE:Oni",
+                "LEVEL:1",
+                "#START",
+                "1111,",
+                "#END",
+            ])
+
+        tja_paths: List[Path] = []
+        for index in range(12):
+            path = songs_dir / f"song_{index:04d}.tja"
+            audio_path = songs_dir / f"song_{index:04d}.ogg"
+            audio_path.write_bytes(b'audio')
+            path.write_text(_content(f"song_{index:04d}"), encoding="utf-8")
+            tja_paths.append(path)
+
+        db = _DummyDB()
+        redis_client = _InMemoryRedis()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        scanner._redis = redis_client  # type: ignore[assignment]
+        scanner._state_bulk_batch_size = 6
+
+        scanner.scan(full=True)
+
+        for index, path in enumerate(tja_paths):
+            path.write_text(_content(f"song_{index:04d}") + f"\n#CHANGED {index}", encoding="utf-8")
+
+        redis_client.delete(scanner.leader_lock_key)
+        state_collection = scanner._state_collection
+        self.assertIsNotNone(state_collection)
+
+        with mock.patch.object(state_collection, 'bulk_write', wraps=state_collection.bulk_write) as mocked_bulk:
+            scanner.scan(full=False)
+
+        self.assertGreaterEqual(mocked_bulk.call_count, 2)
+        max_ops = max(len(call[0][0]) for call in mocked_bulk.call_args_list)
+        self.assertLessEqual(max_ops, scanner._state_bulk_batch_size)
+
+    def test_scan_aborts_when_leader_lost(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        tja_path = songs_dir / "leader-loss.tja"
+        tja_path.write_text("\n".join([
+            "TITLE:Leader Loss",
+            "COURSE:Oni",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        redis_client = _InMemoryRedis()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+            redis_client=redis_client,
+        )
+        scanner._redis = redis_client  # type: ignore[assignment]
+
+        call_counter = {'count': 0}
+
+        def _fake_has_lock() -> bool:
+            call_counter['count'] += 1
+            return call_counter['count'] <= 1
+
+        with mock.patch.object(scanner, 'has_leader_lock', side_effect=_fake_has_lock):
+            summary = scanner.scan(full=True)
+
+        self.assertEqual(summary.get('reason'), 'leader_lost')
 
     def test_scan_rehydrates_from_manifest_when_songs_missing(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3759,7 +3906,7 @@ LEVEL:7
             ignore_globs=None,
         )
 
-        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 1)):
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 1, {})):
             summary = scanner.scan(full=False)
 
         self.assertFalse(summary.get('fast_path'))
@@ -3852,7 +3999,7 @@ LEVEL:7
             ignore_globs=None,
         )
 
-        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 2)):
+        with mock.patch('songs_scanner.compute_fs_digest', return_value=('rehydrate-checksum', 2, {})):
             summary = scanner.scan(full=False)
 
         self.assertFalse(summary.get('fast_path'))
@@ -4084,6 +4231,26 @@ LEVEL:7
                 with mock.patch.dict(os.environ, {"SCAN_LOG_SUMMARY": value}, clear=True):
                     loader.exec_module(module)  # type: ignore[union-attr]
                 self.assertEqual(module.SCAN_LOG_SUMMARY, expected)
+
+    def test_leader_ttl_refresh_env_aliases(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        with mock.patch.dict(os.environ, {
+            'SCANNER_LEADER_TTL_SECONDS': '9',
+            'SCAN_LEADER_REFRESH_SECONDS': '5',
+        }, clear=False):
+            scanner = SongScanner(
+                db=_DummyDB(),
+                songs_dir=songs_dir,
+                songs_baseurl="/songs/",
+                ignore_globs=None,
+            )
+
+        self.assertEqual(scanner._leader_lock_refresh, 5)
+        self.assertEqual(scanner._leader_lock_ttl, 15)
 
     def test_summary_log_format_matches_arguments(self):
         tmp_dir = Path(self._tmp_dir())
@@ -4322,6 +4489,41 @@ LEVEL:7
 
         self.assertEqual(len(full_lines), 1)
         self.assertEqual(len(incremental_lines), 1)
+
+    def test_compute_fs_digest_missing_directory_returns_empty_index(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        missing_dir = tmp_dir / "missing"
+
+        checksum, count, index = songs_scanner.compute_fs_digest(
+            missing_dir,
+            include_index=True,
+        )
+
+        self.assertEqual(checksum, hashlib.sha1(b"").hexdigest())
+        self.assertEqual(count, 0)
+        self.assertEqual(index, {})
+
+    def test_scan_missing_directory_logs_warning(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        missing_dir = tmp_dir / "songs"
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=missing_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        with self.assertLogs('taiko.scanner', level='INFO') as captured:
+            summary = scanner.scan(full=True)
+
+        warning_messages = [record.getMessage() for record in captured.records if record.levelno >= logging.WARNING]
+        self.assertTrue(any('does not exist' in message for message in warning_messages))
+        self.assertEqual(summary.get('files_count'), 0)
+        self.assertTrue(summary.get('fast_path'))
 
     def _tmp_dir(self):
         return tempfile.mkdtemp()
