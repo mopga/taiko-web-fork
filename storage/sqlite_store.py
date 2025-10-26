@@ -175,6 +175,7 @@ class SQLiteDatabase:
             "PRAGMA cache_size = -20000",
         ]
         applied: dict[str, Any] = {}
+
         cursor = self._connection.cursor()
         try:
             for pragma in pragmas:
@@ -182,6 +183,11 @@ class SQLiteDatabase:
                     cursor.execute(pragma)
                 except sqlite3.DatabaseError:
                     LOGGER.warning("Failed to apply pragma: %s", pragma, exc_info=True)
+        finally:
+            cursor.close()
+
+        read_cursor = self._connection.cursor()
+        try:
             for pragma_name in [
                 "journal_mode",
                 "synchronous",
@@ -190,13 +196,17 @@ class SQLiteDatabase:
                 "cache_size",
             ]:
                 try:
-                    cursor.execute(f"PRAGMA {pragma_name}")
-                    row = cursor.fetchone()
+                    read_cursor.execute(f"PRAGMA {pragma_name}")
+                    row = read_cursor.fetchone()
                 except sqlite3.DatabaseError:
+                    LOGGER.warning(
+                        "Failed to read pragma value: %s", pragma_name, exc_info=True
+                    )
                     row = None
                 applied[pragma_name] = row[0] if row else None
         finally:
-            cursor.close()
+            read_cursor.close()
+
         LOGGER.info("SQLite pragmas applied path=%s settings=%s", self.path, applied)
         return applied
 
@@ -267,7 +277,7 @@ class SQLiteDatabase:
             "SQLite storage initialised path=%s schema_version=%s pragmas=%s",
             self.path,
             self._schema_version,
-            getattr(self, "_pragmas", {}),
+            self._pragmas,
         )
 
     def execute_bulk(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
@@ -278,6 +288,11 @@ class SQLiteDatabase:
                 cursor.executemany(sql, rows)
                 self._connection.commit()
             except Exception:
+                LOGGER.exception(
+                    "SQLiteDatabase execute_bulk failed sql=%s row_count=%d",
+                    sql,
+                    len(rows),
+                )
                 self._connection.rollback()
                 raise
             finally:
