@@ -29,6 +29,125 @@ Run it:
 docker compose up -d
 ```
 
+## Desktop run
+
+The desktop profile stores persistent data under `DATA_DIR` (defaults to
+`~/.taiko-web-data` when the variable is not set). Sessions live in
+`$DATA_DIR/sessions`, the SQLite database in `$DATA_DIR/taiko.db`, and logs
+default to `$DATA_DIR/logs` when file logging is enabled. This directory also
+contains the `songs/` subfolder used by the scanner.
+
+### Quick start
+
+```bash
+# Unix/macOS shell
+RUN_PROFILE=desktop DATA_DIR="$HOME/.taiko-web-data" python -m standalone.run_desktop --port 8000
+
+# Windows PowerShell
+$env:RUN_PROFILE="desktop"; $env:DATA_DIR="$env:USERPROFILE\.taiko-web-data"; python -m standalone.run_desktop --port 8000
+
+# Windows cmd.exe
+set RUN_PROFILE=desktop
+set DATA_DIR=%USERPROFILE%\.taiko-web-data
+python -m standalone.run_desktop --port 8000
+```
+
+### Prereqs
+- Python 3.10+ (verified on 3.11/3.12)
+- Windows: `pip install --upgrade pip` and ensure `python`/`pip` are in `PATH`
+- macOS: `xcode-select --install` (toolchain for native extensions, if needed)
+- Linux:
+  - Debian/Ubuntu: `python3-dev`, `build-essential`
+  - Fedora/RHEL/CentOS: `python3-devel`, `gcc`
+
+### Install
+```bash
+# from the repository root
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Windows cmd.exe: .venv\Scripts\activate.bat
+# Unix/macOS:
+source .venv/bin/activate
+
+pip install -U pip wheel
+pip install -r requirements.txt
+# Optional: waitress instead of uvicorn
+# pip install waitress
+
+# First run (Desktop)
+# profile and directories can be set explicitly
+export RUN_PROFILE=desktop
+export DATA_DIR="${HOME}/.taiko-web-data"
+# Windows PowerShell:
+# $env:RUN_PROFILE="desktop"; $env:DATA_DIR="$env:USERPROFILE\.taiko-web-data"
+# Windows cmd.exe:
+# set RUN_PROFILE=desktop
+# set DATA_DIR=%USERPROFILE%\.taiko-web-data
+
+# start the local server (uvicorn by default)
+python -m standalone.run_desktop --port 8000
+# or force waitress:
+# python -m standalone.run_desktop --server=waitress --port 8000
+```
+
+#### Server options
+
+| Flag value | Default | Notes |
+| --- | --- | --- |
+| `uvicorn` | ✅ | ASGI server with uvloop support when available. Recommended for best performance. |
+| `waitress` |  | Pure-Python WSGI server; choose when uvicorn/uvloop wheels are not available. |
+
+Without `--server`, the runner selects `uvicorn`. You can also override the
+server via `TAIKO_DESKTOP_SERVER`.
+
+Open: http://127.0.0.1:8000/healthz — it should respond with:
+
+```
+{"ok": true, "profile": "desktop", "db": "sqlite", "sessions": "filesystem"}
+```
+
+The desktop profile disables Mongo-backed features; the `/healthz` response
+surfaces `db="sqlite"` to reflect the local storage layer in use.
+
+Then visit http://127.0.0.1:8000/ — the web UI ships with the backend and works
+out of the box without an additional Node/webpack build step.
+
+### Managing data
+
+- SQLite DB: `${DATA_DIR}/taiko.db`
+- Sessions: `${DATA_DIR}/sessions`
+- Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
+- Songs: `${DATA_DIR}/songs`
+
+### Adding songs
+
+By default, the desktop profile scans for songs in `${DATA_DIR}/songs/` (for
+example, `~/.taiko-web-data/songs/` on Linux and macOS or
+`%USERPROFILE%\.taiko-web-data\songs\` on Windows). Each song belongs in its
+own directory that contains a `.tja` or `.tjc` chart file and optional audio or
+background assets:
+
+```
+~/.taiko-web-data/
+└── songs/
+    ├── MySong1/
+    │   ├── MySong1.tja
+    │   ├── MySong1.ogg
+    │   └── bg.jpg
+    └── MySong2/
+        └── song.tjc
+```
+
+After adding or updating songs, restart the desktop server to rescan the
+collection. (Automatic hot reload may arrive in a future build.)
+
+### Common issues
+
+- Port already in use: run with another port `--port 8010` or stop the conflicting process.
+- Permission denied (sessions dir): ensure the process can write to `${DATA_DIR}`.
+- ModuleNotFoundError at startup: activate the virtualenv (`.venv\Scripts\Activate.ps1`, `.venv\Scripts\activate.bat`, or `source .venv/bin/activate`).
+- Windows console encoding: set UTF-8 mode via `setx PYTHONUTF8 1` (persisted) or `set PYTHONUTF8=1` (current session).
+
 
 ## Environment
 
