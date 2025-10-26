@@ -167,34 +167,30 @@ class SQLiteDatabase:
             return self._connection.cursor()
 
     def _apply_pragmas(self) -> dict[str, Any]:
-        pragmas = [
-            "PRAGMA journal_mode = WAL",
-            "PRAGMA synchronous = NORMAL",
-            "PRAGMA temp_store = MEMORY",
-            "PRAGMA foreign_keys = ON",
-            "PRAGMA cache_size = -20000",
-        ]
+        pragma_statements = {
+            "journal_mode": "PRAGMA journal_mode = WAL",
+            "synchronous": "PRAGMA synchronous = NORMAL",
+            "temp_store": "PRAGMA temp_store = MEMORY",
+            "foreign_keys": "PRAGMA foreign_keys = ON",
+            "cache_size": "PRAGMA cache_size = -20000",
+        }
         applied: dict[str, Any] = {}
 
-        cursor = self._connection.cursor()
+        apply_cursor = self._connection.cursor()
         try:
-            for pragma in pragmas:
+            for statement in pragma_statements.values():
                 try:
-                    cursor.execute(pragma)
+                    apply_cursor.execute(statement)
                 except sqlite3.DatabaseError:
-                    LOGGER.warning("Failed to apply pragma: %s", pragma, exc_info=True)
+                    LOGGER.warning(
+                        "Failed to apply pragma: %s", statement, exc_info=True
+                    )
         finally:
-            cursor.close()
+            apply_cursor.close()
 
         read_cursor = self._connection.cursor()
         try:
-            for pragma_name in [
-                "journal_mode",
-                "synchronous",
-                "temp_store",
-                "foreign_keys",
-                "cache_size",
-            ]:
+            for pragma_name in pragma_statements.keys():
                 try:
                     read_cursor.execute(f"PRAGMA {pragma_name}")
                     row = read_cursor.fetchone()
