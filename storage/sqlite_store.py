@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
 
 
 LOGGER = logging.getLogger(__name__)
@@ -77,6 +77,49 @@ def _deserialize_json(payload: Optional[str]) -> Any:
     except json.JSONDecodeError:
         LOGGER.warning("Failed to decode JSON payload", exc_info=True)
         return None
+
+
+def _apply_update_ops(document: dict[str, Any], update: Mapping[str, Any]) -> bool:
+    modified = False
+    if not update:
+        return modified
+    if any(key.startswith("$") for key in update.keys()):
+        sets = update.get("$set")
+        if isinstance(sets, Mapping):
+            for key, value in sets.items():
+                if document.get(key) != value:
+                    document[key] = value
+                    modified = True
+        add_to_set = update.get("$addToSet")
+        if isinstance(add_to_set, Mapping):
+            for key, value in add_to_set.items():
+                existing = document.setdefault(key, [])
+                if isinstance(existing, list) and value not in existing:
+                    existing.append(value)
+                    modified = True
+        pulls = update.get("$pull")
+        if isinstance(pulls, Mapping):
+            for key, condition in pulls.items():
+                original = document.get(key)
+                if not isinstance(original, list):
+                    continue
+                if isinstance(condition, Mapping) and "$nin" in condition:
+                    keep = condition.get("$nin")
+                    if isinstance(keep, Sequence) and not isinstance(keep, (str, bytes)):
+                        filtered = [item for item in original if item in keep]
+                    else:
+                        filtered = [item for item in original if item == keep]
+                else:
+                    filtered = [item for item in original if item != condition]
+                if filtered != original:
+                    document[key] = filtered
+                    modified = True
+        return modified
+    if document != update:
+        document.clear()
+        document.update(update)
+        modified = True
+    return modified
 
 
 class SQLiteDatabase:
@@ -214,6 +257,29 @@ class SQLiteDatabase:
         )
 
 
+class SQLiteInsertOneResult:
+    """Lightweight result object returned from ``insert_one``."""
+
+    def __init__(self, inserted_id: Any):
+        self.inserted_id = inserted_id
+
+
+class SQLiteUpdateResult:
+    """Lightweight result object returned from update operations."""
+
+    def __init__(self, matched: int, modified: int, upserted_id: Any | None = None):
+        self.matched_count = matched
+        self.modified_count = modified
+        self.upserted_id = upserted_id
+
+
+class SQLiteDeleteResult:
+    """Lightweight result object returned from delete operations."""
+
+    def __init__(self, deleted: int):
+        self.deleted_count = deleted
+
+
 class SQLiteSongStore:
     """SQLite-backed implementation of the songs data access layer."""
 
@@ -262,6 +328,202 @@ class SQLiteSongStore:
             duration_ms,
         )
         return len(rows)
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers for the ``SongStore`` protocol
+    # ------------------------------------------------------------------
+
+    def find(
+        self,
+        filter: Optional[Mapping[str, Any]] = None,
+        projection: Optional[Mapping[str, Any]] = None,
+        *,
+        sort: Optional[Sequence[tuple[str, int]]] = None,
+        limit: Optional[int] = None,
+        skip: Optional[int] = None,
+        **_: Any,
+    ) -> Iterable[Mapping[str, Any]]:
+        """Retrieve documents matching the supplied filter."""
+
+        documents = list(
+            self._query_documents(
+                filter=filter,
+                sort_spec=sort,
+                limit=limit if limit is not None else -1,
+                offset=skip or 0,
+            )
+        )
+        if projection:
+            documents = [self._apply_projection(doc, projection) for doc in documents]
+        return documents
+
+    def find_one(
+        self,
+        filter: Optional[Mapping[str, Any]] = None,
+        projection: Optional[Mapping[str, Any]] = None,
+        *,
+        sort: Optional[Sequence[tuple[str, int]]] = None,
+        **kwargs: Any,
+    ) -> Optional[Mapping[str, Any]]:
+        documents = list(
+            self._query_documents(
+                filter=filter,
+                sort_spec=sort,
+                limit=1,
+                offset=0,
+            )
+        )
+        if not documents:
+            return None
+        document = documents[0]
+        if projection:
+            document = self._apply_projection(document, projection)
+        return document
+
+    def find_one_and_update(
+        self,
+        filter: Mapping[str, Any],
+        update: Mapping[str, Any],
+        *,
+        upsert: bool = False,
+        **kwargs: Any,
+    ) -> Optional[Mapping[str, Any]]:
+        original = self.find_one(filter, **kwargs)
+        self.update_one(filter, update, upsert=upsert)
+        return original
+
+    def insert_one(
+        self,
+        document: Mapping[str, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> SQLiteInsertOneResult:
+        self.upsert_many([document])
+        return SQLiteInsertOneResult(document.get("song_id"))
+
+    def update_one(
+        self,
+        filter: Mapping[str, Any],
+        update: Mapping[str, Any],
+        *,
+        upsert: bool = False,
+        **kwargs: Any,
+    ) -> SQLiteUpdateResult:
+        existing = self.find_one(filter)
+        if existing is None:
+            if not upsert:
+                return SQLiteUpdateResult(0, 0)
+            base: dict[str, Any] = {}
+        else:
+            base = dict(existing)
+
+        modified = _apply_update_ops(base, update)
+        if modified:
+            self.upsert_many([base])
+        elif existing is None and upsert:
+            self.upsert_many([base])
+        matched = 1 if existing is not None else 0
+        upserted_id = None if existing is not None else base.get("song_id")
+        return SQLiteUpdateResult(matched, 1 if modified else 0, upserted_id)
+
+    def replace_one(
+        self,
+        filter: Mapping[str, Any],
+        replacement: Mapping[str, Any],
+        *,
+        upsert: bool = False,
+        **kwargs: Any,
+    ) -> SQLiteUpdateResult:
+        existing = self.find_one(filter)
+        if existing is None and not upsert:
+            return SQLiteUpdateResult(0, 0)
+        self.upsert_many([replacement])
+        matched = 1 if existing is not None else 0
+        upserted_id = None if existing is not None else replacement.get("song_id")
+        return SQLiteUpdateResult(matched, 1, upserted_id)
+
+    def update_many(
+        self,
+        filter: Mapping[str, Any],
+        update: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> SQLiteUpdateResult:
+        documents = list(self._query_documents(filter=filter))
+        if not documents:
+            return SQLiteUpdateResult(0, 0)
+        modified = 0
+        for document in documents:
+            payload = dict(document)
+            if _apply_update_ops(payload, update):
+                self.upsert_many([payload])
+                modified += 1
+        return SQLiteUpdateResult(len(documents), modified)
+
+    def bulk_write(
+        self,
+        operations: Sequence[Any],
+        **_: Any,
+    ) -> None:
+        for operation in operations:
+            handler = getattr(operation, "_sqlite_apply", None)
+            if callable(handler):
+                handler(self)
+                continue
+            if hasattr(operation, "_filter") and hasattr(operation, "_doc"):
+                self.replace_one(operation._filter, operation._doc, upsert=True)
+                continue
+            LOGGER.warning("Unsupported bulk_write operation: %s", type(operation).__name__)
+
+    def delete_one(
+        self,
+        filter: Mapping[str, Any],
+        **_: Any,
+    ) -> SQLiteDeleteResult:
+        document = self.find_one(filter)
+        if not document:
+            return SQLiteDeleteResult(0)
+        identifier = document.get("song_id")
+        if identifier is None:
+            return SQLiteDeleteResult(0)
+        with self._db.connection:
+            self._db.execute("DELETE FROM songs WHERE song_id = ?", (identifier,))
+        return SQLiteDeleteResult(1)
+
+    def delete_many(
+        self,
+        filter: Mapping[str, Any],
+        **_: Any,
+    ) -> SQLiteDeleteResult:
+        documents = list(self._query_documents(filter=filter))
+        if not documents:
+            return SQLiteDeleteResult(0)
+        identifiers = [doc.get("song_id") for doc in documents if doc.get("song_id")]
+        if not identifiers:
+            return SQLiteDeleteResult(0)
+        placeholders = ",".join(["?"] * len(identifiers))
+        query = f"DELETE FROM songs WHERE song_id IN ({placeholders})"
+        with self._db.connection:
+            self._db.execute(query, identifiers)
+        return SQLiteDeleteResult(len(identifiers))
+
+    def count_documents(
+        self,
+        filter: Mapping[str, Any],
+        **_: Any,
+    ) -> int:
+        song_filter = self._convert_filter_to_song_filter(filter)
+        if song_filter is not None:
+            return self.count(song_filter)
+        return len(list(self._query_documents(filter=filter)))
+
+    def create_index(self, *args: Any, **kwargs: Any) -> None:
+        LOGGER.debug("SQLiteSongStore.create_index noop args=%s kwargs=%s", args, kwargs)
+
+    def drop_index(self, *args: Any, **kwargs: Any) -> None:
+        LOGGER.debug("SQLiteSongStore.drop_index noop args=%s kwargs=%s", args, kwargs)
+
+    def list_indexes(self, *args: Any, **kwargs: Any) -> Iterable[Mapping[str, Any]]:
+        return []
 
     def get_by_id(self, song_id: str) -> Optional[dict[str, Any]]:
         cursor = self._db.execute(
@@ -388,7 +650,149 @@ class SQLiteSongStore:
         payload["difficulties"] = _deserialize_json(payload.pop("difficulties_json", None)) or {}
         payload["tags"] = _deserialize_json(payload.pop("tags_json", None))
         payload["meta"] = _deserialize_json(payload.pop("meta_json", None))
+        if "song_id" in payload and "id" not in payload:
+            payload["id"] = payload["song_id"]
         return payload
+
+    def _apply_projection(
+        self, document: Mapping[str, Any], projection: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        include_keys = {
+            key for key, value in projection.items() if value and not key.startswith("-")
+        }
+        if not include_keys:
+            exclude_keys = {
+                key for key, value in projection.items() if not value and not key.startswith("-")
+            }
+            if not exclude_keys:
+                return dict(document)
+            return {k: v for k, v in document.items() if k not in exclude_keys}
+        return {k: v for k, v in document.items() if k in include_keys}
+
+    def _query_documents(
+        self,
+        *,
+        filter: Optional[Mapping[str, Any]] = None,
+        sort_spec: Optional[Sequence[tuple[str, int]]] = None,
+        limit: int = -1,
+        offset: int = 0,
+    ) -> Iterator[dict[str, Any]]:
+        song_filter = self._convert_filter_to_song_filter(filter)
+        if song_filter is None:
+            where_clause, parameters = "", []
+        else:
+            where_clause, parameters = self._build_where_clause(song_filter)
+        sort_fields = None
+        if sort_spec:
+            sort_fields = [SortField(field=name, ascending=direction >= 0) for name, direction in sort_spec]
+        order_clause = self._build_order_clause(sort_fields)
+        query = f"SELECT * FROM songs {where_clause} {order_clause}"
+        params: list[Any] = list(parameters)
+        if limit is not None and limit >= 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        if offset:
+            query += " OFFSET ?"
+            params.append(offset)
+        cursor = self._db.execute(query, params)
+        rows = cursor.fetchall()
+        documents = [self._row_to_song(row) for row in rows]
+        if song_filter is None and filter:
+            documents = [doc for doc in documents if self._match_document(filter, doc)]
+        return iter(documents)
+
+    def _convert_filter_to_song_filter(
+        self, filter: Optional[Mapping[str, Any]]
+    ) -> Optional[SongFilter]:
+        if not filter:
+            return SongFilter()
+        kwargs: dict[str, Any] = {}
+        song_ids: list[str] = []
+        for key, value in filter.items():
+            if key in {"song_id", "id"}:
+                if isinstance(value, Mapping):
+                    ids = self._extract_in_values(value)
+                    if ids is None:
+                        return None
+                    song_ids.extend(ids)
+                elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                    song_ids.extend(str(item) for item in value)
+                else:
+                    song_ids.append(str(value))
+            elif key == "is_playable":
+                if isinstance(value, Mapping):
+                    allowed = value.get("$eq")
+                    if isinstance(allowed, bool):
+                        kwargs["is_playable"] = allowed
+                        continue
+                    return None
+                if isinstance(value, bool):
+                    kwargs["is_playable"] = value
+                else:
+                    return None
+            elif key in {"genre", "genres"}:
+                if isinstance(value, Mapping):
+                    items = self._extract_in_values(value)
+                    if items is None:
+                        return None
+                    kwargs["genres"] = tuple(str(item) for item in items)
+                else:
+                    kwargs["genres"] = (str(value),)
+            elif key == "artist":
+                if isinstance(value, str):
+                    kwargs["artist"] = value
+                else:
+                    return None
+            elif key == "search":
+                if isinstance(value, str):
+                    kwargs["search"] = value
+                else:
+                    return None
+            else:
+                return None
+        if song_ids:
+            kwargs["song_ids"] = tuple(song_ids)
+        return SongFilter(**kwargs)
+
+    def _extract_in_values(self, payload: Mapping[str, Any]) -> Optional[list[str]]:
+        if "$in" in payload:
+            values = payload.get("$in")
+            if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+                return [str(item) for item in values]
+        elif "$eq" in payload:
+            value = payload.get("$eq")
+            if value is not None:
+                return [str(value)]
+        return None
+
+    def _match_document(
+        self, filter: Mapping[str, Any], document: Mapping[str, Any]
+    ) -> bool:
+        for key, expected in filter.items():
+            if key == "id":
+                value = document.get("song_id")
+            else:
+                value = document.get(key)
+            if isinstance(expected, Mapping):
+                if "$in" in expected:
+                    options = expected.get("$in")
+                    if not isinstance(options, Sequence) or isinstance(options, (str, bytes)):
+                        return False
+                    if value not in options:
+                        return False
+                elif "$ne" in expected:
+                    if value == expected.get("$ne"):
+                        return False
+                elif "$exists" in expected:
+                    exists = bool(expected.get("$exists"))
+                    if exists != (key in document and document[key] is not None):
+                        return False
+                else:
+                    return False
+            else:
+                if value != expected:
+                    return False
+        return True
 
     def _build_where_clause(self, filter: SongFilter) -> tuple[str, list[Any]]:
         clauses: list[str] = []
@@ -487,6 +891,94 @@ class SQLiteManifestStore:
     def __init__(self, database: SQLiteDatabase):
         self._db = database
 
+    # Mongo compatibility surface -------------------------------------------------
+
+    def find(
+        self,
+        filter: Optional[Mapping[str, Any]] = None,
+        projection: Optional[Mapping[str, Any]] = None,
+        **_: Any,
+    ) -> Iterable[Mapping[str, Any]]:
+        documents = [
+            self._row_to_manifest(row) for row in self._db.execute("SELECT * FROM manifest")
+        ]
+        if filter:
+            documents = [doc for doc in documents if self._match_manifest(filter, doc)]
+        if projection:
+            documents = [self._apply_manifest_projection(doc, projection) for doc in documents]
+        return documents
+
+    def find_one(
+        self,
+        filter: Optional[Mapping[str, Any]] = None,
+        projection: Optional[Mapping[str, Any]] = None,
+        **_: Any,
+    ) -> Optional[Mapping[str, Any]]:
+        matches = list(self.find(filter, projection))
+        return matches[0] if matches else None
+
+    def update_one(
+        self,
+        filter: Mapping[str, Any],
+        update: Mapping[str, Any],
+        *,
+        upsert: bool = False,
+        **_: Any,
+    ) -> SQLiteUpdateResult:
+        document = self.find_one(filter)
+        if document is None:
+            if not upsert:
+                return SQLiteUpdateResult(0, 0)
+            if "$set" in update and isinstance(update["$set"], Mapping):
+                base = dict(update["$set"])
+            else:
+                base = dict(update)
+            identifier = self._manifest_id_from_filter(filter)
+            if identifier is None:
+                raise ValueError("Manifest upsert requires _id in filter")
+            self.put(identifier, base)
+            return SQLiteUpdateResult(0, 1, identifier)
+        payload = dict(document)
+        modified = _apply_update_ops(payload, update)
+        if modified:
+            identifier = payload.get("_id")
+            if identifier is None:
+                raise ValueError("Manifest document missing _id")
+            payload_copy = dict(payload)
+            payload_copy.pop("_id", None)
+            payload_copy.pop("updated_at", None)
+            self.put(identifier, payload_copy)
+        return SQLiteUpdateResult(1, 1 if modified else 0)
+
+    def delete_many(self, filter: Mapping[str, Any], **_: Any) -> SQLiteDeleteResult:
+        documents = list(self.find(filter))
+        if not documents:
+            return SQLiteDeleteResult(0)
+        identifiers = [doc.get("_id") for doc in documents if isinstance(doc.get("_id"), str)]
+        if not identifiers:
+            return SQLiteDeleteResult(0)
+        placeholders = ",".join(["?"] * len(identifiers))
+        query = f"DELETE FROM manifest WHERE key IN ({placeholders})"
+        with self._db.connection:
+            self._db.execute(query, identifiers)
+        return SQLiteDeleteResult(len(identifiers))
+
+    def bulk_write(self, operations: Sequence[Any], **_: Any) -> None:
+        for operation in operations:
+            handler = getattr(operation, "_sqlite_apply", None)
+            if callable(handler):
+                handler(self)
+            else:
+                LOGGER.warning(
+                    "Unsupported manifest bulk operation: %s", type(operation).__name__
+                )
+
+    def create_index(self, *args: Any, **kwargs: Any) -> None:
+        LOGGER.debug("SQLiteManifestStore.create_index noop args=%s kwargs=%s", args, kwargs)
+
+    def list_indexes(self, *args: Any, **kwargs: Any) -> Iterable[Mapping[str, Any]]:
+        return []
+
     def get(self, key: str) -> Optional[dict[str, Any]]:
         cursor = self._db.execute(
             "SELECT value_json FROM manifest WHERE key = ?", (key,)
@@ -511,6 +1003,59 @@ class SQLiteManifestStore:
         )
         with self._db.connection:
             self._db.execute(query, (key, payload, updated_at))
+
+    def _row_to_manifest(self, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
+        key = row["key"] if isinstance(row, sqlite3.Row) else row.get("key")
+        value = _deserialize_json(row["value_json"] if isinstance(row, sqlite3.Row) else row.get("value_json"))
+        document: dict[str, Any] = {"_id": key}
+        if isinstance(value, Mapping):
+            document.update(value)
+        else:
+            document["value"] = value
+        document["updated_at"] = row["updated_at"] if isinstance(row, sqlite3.Row) else row.get("updated_at")
+        return document
+
+    def _apply_manifest_projection(
+        self, document: Mapping[str, Any], projection: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        include = {key for key, value in projection.items() if value}
+        if include:
+            return {key: document[key] for key in include if key in document}
+        exclude = {key for key, value in projection.items() if not value}
+        if not exclude:
+            return dict(document)
+        return {key: value for key, value in document.items() if key not in exclude}
+
+    def _match_manifest(
+        self, filter: Mapping[str, Any], document: Mapping[str, Any]
+    ) -> bool:
+        for key, expected in filter.items():
+            value = document.get(key)
+            if isinstance(expected, Mapping):
+                if "$in" in expected:
+                    candidates = expected.get("$in")
+                    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
+                        return False
+                    if value not in candidates:
+                        return False
+                elif "$ne" in expected:
+                    if value == expected.get("$ne"):
+                        return False
+                else:
+                    return False
+            else:
+                if value != expected:
+                    return False
+        return True
+
+    def _manifest_id_from_filter(self, filter: Mapping[str, Any]) -> Optional[str]:
+        identifier = filter.get("_id")
+        if isinstance(identifier, str):
+            return identifier
+        if isinstance(identifier, Mapping):
+            if "$eq" in identifier and isinstance(identifier["$eq"], str):
+                return identifier["$eq"]
+        return None
 
 
 class SQLiteStorage:

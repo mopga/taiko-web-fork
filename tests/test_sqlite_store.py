@@ -204,6 +204,57 @@ def test_manifest_round_trip(sqlite_storage: SQLiteStorage) -> None:
     assert stored == {"total": 10}
 
 
+def test_song_store_protocol_surface(sqlite_storage: SQLiteStorage) -> None:
+    song_store = sqlite_storage.song_store
+    song_store.upsert_many([
+        _make_song("alpha", artist="One"),
+        _make_song("beta", artist="Two"),
+    ])
+
+    results = list(song_store.find({"song_id": {"$in": ["alpha", "beta"]}}))
+    assert {doc["song_id"] for doc in results} == {"alpha", "beta"}
+
+    single = song_store.find_one({"id": "alpha"})
+    assert single is not None and single["song_id"] == "alpha"
+
+    song_store.insert_one(_make_song("gamma", artist="Three"))
+    assert song_store.find_one({"song_id": "gamma"}) is not None
+
+    update_result = song_store.update_one({"song_id": "beta"}, {"$set": {"artist": "Updated"}})
+    assert update_result.matched_count == 1
+    assert song_store.find_one({"song_id": "beta"})["artist"] == "Updated"
+
+    replace_result = song_store.replace_one(
+        {"song_id": "gamma"}, _make_song("gamma", artist="Replace")
+    )
+    assert replace_result.matched_count == 1
+    assert song_store.find_one({"song_id": "gamma"})["artist"] == "Replace"
+
+    delete_result = song_store.delete_one({"song_id": "alpha"})
+    assert delete_result.deleted_count == 1
+    assert song_store.find_one({"song_id": "alpha"}) is None
+
+    assert song_store.count_documents({"song_id": {"$in": ["beta", "gamma"]}}) == 2
+
+
+def test_manifest_store_protocol_surface(sqlite_storage: SQLiteStorage) -> None:
+    manifest_store = sqlite_storage.manifest_store
+    manifest_store.put("catalog_stats", {"total": 10})
+    manifest_store.put("scanner_state", {"status": "ok"})
+
+    all_docs = list(manifest_store.find())
+    assert {doc["_id"] for doc in all_docs} == {"catalog_stats", "scanner_state"}
+
+    single = manifest_store.find_one({"_id": "catalog_stats"})
+    assert single and single["total"] == 10
+
+    manifest_store.update_one({"_id": "catalog_stats"}, {"$set": {"total": 11}})
+    assert manifest_store.get("catalog_stats") == {"total": 11}
+
+    deleted = manifest_store.delete_many({"_id": {"$in": ["scanner_state"]}})
+    assert deleted.deleted_count == 1
+
+
 def test_perf_smoke(sqlite_storage: SQLiteStorage) -> None:
     sqlite_storage.song_store.upsert_many(list(_seed_songs(5000)))
     start = time.perf_counter()
