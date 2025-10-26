@@ -268,22 +268,38 @@ def setup_stdout_logging() -> None:
     is_gunicorn = "gunicorn" in server_software.lower()
 
     if not is_gunicorn:
-        for handler in list(root.handlers):
-            root.removeHandler(handler)
+        for h in list(root.handlers):
+            root.removeHandler(h)
         handler = logging.StreamHandler(stream=sys.stdout)
         handler.setLevel(logging.DEBUG)
-        handler.setFormatter(
-            logging.Formatter(
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        ))
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+
+    else:
+        # <<< вот это ключевое под gunicorn >>>
+        gunicorn_logger = logging.getLogger("gunicorn.error")
+        if gunicorn_logger.handlers:
+            root.handlers = gunicorn_logger.handlers
+            root.setLevel(gunicorn_logger.level)
+        else:
+            # запасной план: если вдруг нет хэндлеров у gunicorn
+            handler = logging.StreamHandler(stream=sys.stdout)
+            handler.setFormatter(logging.Formatter(
                 "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
                 "%Y-%m-%d %H:%M:%S",
-            )
-        )
-        root.addHandler(handler)
+            ))
+            root.addHandler(handler)
+            root.setLevel(logging.INFO)
 
-    root.setLevel(logging.DEBUG)
     for name in ("taiko.scanner", "taiko.scanner.summary"):
-        logging.getLogger(name).propagate = True
-
+        lg = logging.getLogger(name)
+        lg.propagate = True
+        if lg.level == logging.NOTSET:
+            lg.setLevel(logging.INFO)
 
 client = None
 db = None
