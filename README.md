@@ -34,7 +34,8 @@ docker compose up -d
 The desktop profile stores persistent data under `DATA_DIR` (defaults to
 `~/.taiko-web-data` when the variable is not set). Sessions live in
 `$DATA_DIR/sessions`, the SQLite database in `$DATA_DIR/taiko.db`, and logs
-default to `$DATA_DIR/logs` when file logging is enabled.
+default to `$DATA_DIR/logs` when file logging is enabled. This directory also
+contains the `songs/` subfolder used by the scanner.
 
 ### Quick start
 
@@ -116,6 +117,29 @@ out of the box without an additional Node/webpack build step.
 - SQLite DB: `${DATA_DIR}/taiko.db`
 - Sessions: `${DATA_DIR}/sessions`
 - Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
+- Songs: `${DATA_DIR}/songs`
+
+### Adding songs
+
+By default, the desktop profile scans for songs in `${DATA_DIR}/songs/` (for
+example, `~/.taiko-web-data/songs/` on Linux and macOS or
+`%USERPROFILE%\.taiko-web-data\songs\` on Windows). Each song belongs in its
+own directory that contains a `.tja` or `.tjc` chart file and optional audio or
+background assets:
+
+```
+~/.taiko-web-data/
+└── songs/
+    ├── MySong1/
+    │   ├── MySong1.tja
+    │   ├── MySong1.ogg
+    │   └── bg.jpg
+    └── MySong2/
+        └── song.tjc
+```
+
+After adding or updating songs, restart the desktop server to rescan the
+collection. (Automatic hot reload may arrive in a future build.)
 
 ### Common issues
 
