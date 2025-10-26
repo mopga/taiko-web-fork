@@ -29,6 +29,14 @@ Run it:
 docker compose up -d
 ```
 
+## Desktop run
+
+To launch the standalone desktop server with the filesystem-backed session store, run:
+
+```bash
+python -m standalone.run_desktop --port 8000
+```
+
 
 ## Environment
 

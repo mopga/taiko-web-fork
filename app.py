@@ -20,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 # -- カスタム --
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import flask
 
@@ -43,6 +43,23 @@ from flask import (
 from flask_caching import Cache
 from flask_compress import Compress
 from flask_session import Session
+
+try:
+    from flask_session.defaults import Defaults as SessionDefaults
+except Exception:  # pragma: no cover - fallback for stripped Flask-Session builds
+    class SessionDefaults:  # type: ignore[too-many-ancestors]
+        SESSION_KEY_PREFIX = 'session:'
+        SESSION_USE_SIGNER = False
+        SESSION_PERMANENT = True
+        SESSION_ID_LENGTH = 32
+        SESSION_SERIALIZATION_FORMAT = 'msgpack'
+        SESSION_FILE_THRESHOLD = 500
+        SESSION_FILE_MODE = 384
+
+try:
+    from flask_session.filesystem.filesystem import FileSystemSessionInterface
+except Exception:  # pragma: no cover - optional import guard
+    FileSystemSessionInterface = None  # type: ignore[assignment]
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from pymongo import MongoClient, ReturnDocument
@@ -65,6 +82,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 RUN_PROFILE = os.getenv("RUN_PROFILE", "web")
+DESKTOP_DATA_DIR_ENV = "DATA_DIR"
+DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
 
 
 _startup_scan_started_at: Optional[float] = None
@@ -560,6 +579,16 @@ compress = Compress()
 sess = Session()
 
 
+def _ensure_desktop_data_dir() -> Path:
+    data_dir_value = os.environ.get(DESKTOP_DATA_DIR_ENV)
+    if data_dir_value:
+        path = Path(data_dir_value).expanduser()
+    else:
+        path = DEFAULT_DESKTOP_DATA_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def create_app():
     global client, db, basedir, SCAN_ON_START, ENABLE_SONG_WATCHER, SCAN_IGNORE_GLOBS
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
@@ -574,6 +603,7 @@ def create_app():
 
     app_instance = Flask(__name__)
     app_instance.logger.info("run_profile=%s", RUN_PROFILE)
+    app_instance.config['RUN_PROFILE'] = RUN_PROFILE
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
     compress.init_app(app_instance)
 
@@ -591,52 +621,60 @@ def create_app():
     basedir_value = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
 
     app_instance.secret_key = take_config('SECRET_KEY') or 'change-me'
-    redis_config = dict(take_config('REDIS', required=True))
 
-    redis_host = os.environ.get("TAIKO_WEB_REDIS_HOST") or redis_config.get('CACHE_REDIS_HOST') or 'redis'
-    redis_port = int(os.environ.get("TAIKO_WEB_REDIS_PORT", redis_config.get('CACHE_REDIS_PORT', 6379)))
-    redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
-    redis_password = redis_password_env if redis_password_env is not None else redis_config.get('CACHE_REDIS_PASSWORD')
-    redis_db = int(os.environ.get("TAIKO_WEB_REDIS_DB", redis_config.get('CACHE_REDIS_DB', 0)))
+    session_backend = 'redis'
+    session_redis = None
+    cache_config: Mapping[str, object]
+    desktop_data_dir: Optional[Path] = None
+    sessions_directory: Optional[Path] = None
 
-    redis_config['CACHE_REDIS_HOST'] = redis_host
-    redis_config['CACHE_REDIS_PORT'] = redis_port
-    redis_config['CACHE_REDIS_PASSWORD'] = redis_password
-    redis_config['CACHE_REDIS_DB'] = redis_db
-
-    session_redis = Redis(
-        host=redis_host,
-        port=redis_port,
-        password=redis_password,
-        db=redis_db,
-        decode_responses=False,
-    )
-
-    session_logger = logging.getLogger('taiko.session')
-    try:
-        session_redis.ping()
-    except Exception as exc:
-        session_logger.error('SESSION_REDIS ping=FAIL: %r', exc)
-    else:
-        pool = getattr(session_redis, 'connection_pool', None)
-        connection_kwargs = getattr(pool, 'connection_kwargs', {}) if pool is not None else {}
-        session_logger.info(
-            'SESSION_REDIS ping=ok host=%s port=%s db=%s',
-            connection_kwargs.get('host', redis_host),
-            connection_kwargs.get('port', redis_port),
-            connection_kwargs.get('db', redis_db),
+    if RUN_PROFILE == 'desktop':
+        desktop_data_dir = _ensure_desktop_data_dir()
+        sessions_directory = desktop_data_dir / 'sessions'
+        sessions_directory.mkdir(parents=True, exist_ok=True)
+        lifetime_seconds = int(
+            os.getenv(
+                'SESSION_TTL_SECONDS',
+                str(int(timedelta(days=7).total_seconds())),
+            )
         )
+        app_instance.config.update(
+            SESSION_TYPE='filesystem',
+            SESSION_FILE_DIR=str(sessions_directory),
+            PERMANENT_SESSION_LIFETIME=lifetime_seconds,
+        )
+        file_threshold = int(
+            os.getenv(
+                'SESSION_FILE_THRESHOLD',
+                str(SessionDefaults.SESSION_FILE_THRESHOLD),
+            )
+        )
+        file_mode = int(
+            os.getenv(
+                'SESSION_FILE_MODE',
+                str(SessionDefaults.SESSION_FILE_MODE),
+            )
+        )
+        app_instance.config.setdefault('SESSION_FILE_THRESHOLD', file_threshold)
+        app_instance.config.setdefault('SESSION_FILE_MODE', file_mode)
+        cache_config = {'CACHE_TYPE': 'NullCache'}
+        session_backend = 'filesystem'
+        app_instance.config['DATA_DIR'] = str(desktop_data_dir)
+    else:
+        redis_config = dict(take_config('REDIS', required=True))
 
-    app_instance.config.update(
-        SESSION_TYPE='redis',
-        SESSION_REDIS=session_redis,
-        SESSION_KEY_PREFIX=os.getenv('SESSION_KEY_PREFIX', 'sess:'),
-        PERMANENT_SESSION_LIFETIME=int(os.getenv('SESSION_TTL_SECONDS', '1209600')),
-    )
-    db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
+        redis_host = os.environ.get("TAIKO_WEB_REDIS_HOST") or redis_config.get('CACHE_REDIS_HOST') or 'redis'
+        redis_port = int(os.environ.get("TAIKO_WEB_REDIS_PORT", redis_config.get('CACHE_REDIS_PORT', 6379)))
+        redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
+        redis_password = redis_password_env if redis_password_env is not None else redis_config.get('CACHE_REDIS_PASSWORD')
+        redis_db = int(os.environ.get("TAIKO_WEB_REDIS_DB", redis_config.get('CACHE_REDIS_DB', 0)))
 
-    def _create_redis_client() -> Redis:
-        return Redis(
+        redis_config['CACHE_REDIS_HOST'] = redis_host
+        redis_config['CACHE_REDIS_PORT'] = redis_port
+        redis_config['CACHE_REDIS_PASSWORD'] = redis_password
+        redis_config['CACHE_REDIS_DB'] = redis_db
+
+        session_redis = Redis(
             host=redis_host,
             port=redis_port,
             password=redis_password,
@@ -644,14 +682,64 @@ def create_app():
             decode_responses=False,
         )
 
-    _mongo_dispatcher = MongoDispatcher(_create_mongo_client, db_name)
-    _redis_dispatcher = RedisDispatcher(_create_redis_client)
+        session_logger = logging.getLogger('taiko.session')
+        try:
+            session_redis.ping()
+        except Exception as exc:
+            session_logger.error('SESSION_REDIS ping=FAIL: %r', exc)
+        else:
+            pool = getattr(session_redis, 'connection_pool', None)
+            connection_kwargs = getattr(pool, 'connection_kwargs', {}) if pool is not None else {}
+            session_logger.info(
+                'SESSION_REDIS ping=ok host=%s port=%s db=%s',
+                connection_kwargs.get('host', redis_host),
+                connection_kwargs.get('port', redis_port),
+                connection_kwargs.get('db', redis_db),
+            )
+
+        app_instance.config.update(
+            SESSION_TYPE='redis',
+            SESSION_REDIS=session_redis,
+            SESSION_KEY_PREFIX=os.getenv('SESSION_KEY_PREFIX', 'sess:'),
+            PERMANENT_SESSION_LIFETIME=int(os.getenv('SESSION_TTL_SECONDS', '1209600')),
+        )
+        cache_config = redis_config
+    app_instance.config['SESSION_BACKEND'] = session_backend
+    db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
+
+    mongo_database_factory: Callable[[], object]
+    redis_factory: Optional[Callable[[], object]]
+
+    if RUN_PROFILE == 'desktop':
+        _mongo_dispatcher = None
+        _redis_dispatcher = None
+
+        def _desktop_mongo_database():
+            return None
+
+        mongo_database_factory = _desktop_mongo_database
+        redis_factory = None
+    else:
+        def _create_redis_client() -> Redis:
+            return Redis(
+                host=redis_host,
+                port=redis_port,
+                password=redis_password,
+                db=redis_db,
+                decode_responses=False,
+            )
+
+        _mongo_dispatcher = MongoDispatcher(_create_mongo_client, db_name)
+        _redis_dispatcher = RedisDispatcher(_create_redis_client)
+        mongo_database_factory = _mongo_dispatcher.get_database
+        redis_factory = _redis_dispatcher.get_client
 
     global _storage_bundle, SONG_STORE, MANIFEST_STORE, LEADER_LOCK
     _storage_bundle = create_storage_bundle(
         run_profile=RUN_PROFILE,
-        mongo_database_factory=_mongo_dispatcher.get_database,
-        redis_client_factory=_redis_dispatcher.get_client,
+        mongo_database_factory=mongo_database_factory,
+        redis_client_factory=redis_factory,
+        data_directory=desktop_data_dir,
     )
     LOGGER.info('storage bundle initialized')
     SONG_STORE = _storage_bundle.song_store
@@ -662,17 +750,58 @@ def create_app():
         if sqlite_path:
             app_instance.config['SQLITE_DB_PATH'] = str(sqlite_path)
 
-    app_instance.cache = Cache(app_instance, config=redis_config)
+    app_instance.cache = Cache(app_instance, config=cache_config)
     sess.init_app(app_instance)
+    if RUN_PROFILE == 'desktop':
+        if FileSystemSessionInterface is None:
+            raise RuntimeError('FileSystemSessionInterface backend is unavailable')
+
+        key_prefix = app_instance.config.get(
+            'SESSION_KEY_PREFIX', SessionDefaults.SESSION_KEY_PREFIX
+        )
+        use_signer = app_instance.config.get(
+            'SESSION_USE_SIGNER', SessionDefaults.SESSION_USE_SIGNER
+        )
+        permanent = app_instance.config.get(
+            'SESSION_PERMANENT', SessionDefaults.SESSION_PERMANENT
+        )
+        sid_length = app_instance.config.get(
+            'SESSION_ID_LENGTH', SessionDefaults.SESSION_ID_LENGTH
+        )
+        serialization_format = app_instance.config.get(
+            'SESSION_SERIALIZATION_FORMAT',
+            SessionDefaults.SESSION_SERIALIZATION_FORMAT,
+        )
+        threshold = app_instance.config.get(
+            'SESSION_FILE_THRESHOLD', SessionDefaults.SESSION_FILE_THRESHOLD
+        )
+        mode = app_instance.config.get(
+            'SESSION_FILE_MODE', SessionDefaults.SESSION_FILE_MODE
+        )
+        app_instance.session_interface = FileSystemSessionInterface(
+            app_instance,
+            key_prefix=key_prefix,
+            use_signer=use_signer,
+            permanent=permanent,
+            sid_length=sid_length,
+            serialization_format=serialization_format,
+            cache_dir=str(sessions_directory) if sessions_directory else None,
+            threshold=threshold,
+            mode=mode,
+        )
     #csrf = CSRFProtect(app)
 
     db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
-    if os.getenv('TAIKO_INIT_INDEXES') == '1':
+    if RUN_PROFILE != 'desktop' and os.getenv('TAIKO_INIT_INDEXES') == '1':
         init_db_schema(_mongo_dispatcher.get_database())
 
     basedir = basedir_value
-    client = _LazyResourceProxy(_mongo_dispatcher.get_client)
-    db = _LazyResourceProxy(_mongo_dispatcher.get_database)
+    if _mongo_dispatcher is not None:
+        client = _LazyResourceProxy(_mongo_dispatcher.get_client)
+        db = _LazyResourceProxy(_mongo_dispatcher.get_database)
+    else:
+        client = _LazyResourceProxy(lambda: None)
+        db = _LazyResourceProxy(lambda: None)
 
     SONGS_DIR_PATH = Path(
         os.environ.get('SONGS_DIR')
@@ -724,8 +853,9 @@ def create_app():
     COERCE_UNKNOWN_COURSE = os.environ.get('COERCE_UNKNOWN_COURSE') or take_config('COERCE_UNKNOWN_COURSE')
 
     def _create_song_scanner() -> SongScanner:
+        database = _mongo_dispatcher.get_database() if _mongo_dispatcher is not None else None
         return SongScanner(
-            db=_mongo_dispatcher.get_database(),
+            db=database,
             songs_dir=SONGS_DIR_PATH,
             songs_baseurl=SONGS_BASEURL_VALUE,
             ignore_globs=SCAN_IGNORE_GLOBS,
@@ -763,18 +893,33 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def route_healthcheck():
     if RUN_PROFILE == 'desktop':
-        payload = {'ok': True, 'db': 'sqlite'}
+        payload = {
+            'ok': True,
+            'profile': 'desktop',
+            'db': 'sqlite',
+            'sessions': app.config.get('SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')),
+        }
         sqlite_path = app.config.get('SQLITE_DB_PATH')
         if sqlite_path:
             payload['path'] = sqlite_path
+        sessions_dir = app.config.get('SESSION_FILE_DIR')
+        if sessions_dir:
+            payload['sessions_dir'] = sessions_dir
         return jsonify(payload)
 
-    status = {'status': 'ok'}
+    status = {
+        'status': 'ok',
+        'ok': True,
+        'profile': 'web',
+        'db': 'mongo',
+        'sessions': app.config.get('SESSION_BACKEND', 'redis'),
+    }
     try:
         client.admin.command('ping')
         status['mongo'] = 'ok'
     except Exception:
         status['status'] = 'error'
+        status['ok'] = False
         status['mongo'] = 'error'
         return jsonify(status), 503
     try:
@@ -784,6 +929,7 @@ def route_healthcheck():
         status['redis'] = 'ok'
     except Exception:
         status['status'] = 'error'
+        status['ok'] = False
         status['redis'] = 'error'
         return jsonify(status), 503
     return jsonify(status)
