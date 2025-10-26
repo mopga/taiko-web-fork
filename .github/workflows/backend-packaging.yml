@@ -1,0 +1,158 @@
+name: backend-packaging
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: [ '3.11' ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix['python-version'] }}
+          cache: 'pip'
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller jinja2 websockets uvicorn waitress markdown setuptools
+
+      - name: Build backend (PyInstaller)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -File scripts/build_backend_desktop.ps1
+          else
+            bash scripts/build_backend_desktop.sh
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -File scripts/smoke_run_windows.ps1
+          else
+            bash scripts/smoke_run_linux.sh
+          fi
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -Command "Compress-Archive -Path 'dist/backend/taiko-web-backend' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
+          else
+            tar -C dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
+          fi
+
+      - name: Build Windows installer
+        if: matrix.os == 'windows-latest'
+        uses: krproject/innosetup-action@v1
+        with:
+          path: packaging/windows/taiko-backend.iss
+        env:
+          MyVersion: ${{ steps.version.outputs.value }}
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            if [ -d "packaging/windows/Output" ]; then
+              cp packaging/windows/Output/*.exe out/ || true
+            fi
+            pwsh -Command "if (Test-Path 'out/SHA256SUMS.txt') { Remove-Item 'out/SHA256SUMS.txt' -Force }"
+            pwsh -Command "$hashes = Get-ChildItem out -File | ForEach-Object { $h = Get-FileHash $_.FullName -Algorithm SHA256; ($h.Hash.ToLower() + '  ' + $_.Name) }; if ($hashes.Count -eq 0) { throw 'No artifacts found for checksum generation.' } else { $hashes | Set-Content -Path out/\SHA256SUMS.txt }"
+          else
+            (cd out && sha256sum * > SHA256SUMS.txt)
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.os }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       github.ref == 'refs/heads/main' ||
+       github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: rel
+
+      - name: Prepare release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            stamp=$(date -u +%Y%m%d)
+            echo "tag=nightly-${stamp}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "name=nightly-${stamp}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gather release files
+        run: |
+          mkdir -p upload
+          shopt -s globstar nullglob
+          for file in rel/**/taiko-web-backend-windows.zip rel/**/taiko-web-backend-linux-x64.tar.gz rel/**/taiko-web-backend-setup-*.exe; do
+            if [ -f "$file" ]; then
+              cp "$file" upload/
+            fi
+          done
+
+      - name: Generate SHA256 sums
+        run: |
+          cd upload
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: upload/*
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

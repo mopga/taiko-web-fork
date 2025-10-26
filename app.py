@@ -928,6 +928,7 @@ def route_healthcheck():
         )
         return jsonify(
             {
+                'status': 'ok',
                 'ok': True,
                 'profile': 'desktop',
                 'db': 'sqlite',
