@@ -923,19 +923,17 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def route_healthcheck():
     if RUN_PROFILE == 'desktop':
-        payload = {
-            'ok': True,
-            'profile': 'desktop',
-            'db': 'sqlite',
-            'sessions': app.config.get('SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')),
-        }
-        sqlite_path = app.config.get('SQLITE_DB_PATH')
-        if sqlite_path:
-            payload['path'] = sqlite_path
-        sessions_dir = app.config.get('SESSION_FILE_DIR')
-        if sessions_dir:
-            payload['sessions_dir'] = sessions_dir
-        return jsonify(payload)
+        session_backend = app.config.get(
+            'SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')
+        )
+        return jsonify(
+            {
+                'ok': True,
+                'profile': 'desktop',
+                'db': 'sqlite',
+                'sessions': session_backend,
+            }
+        )
 
     status = {
         'status': 'ok',

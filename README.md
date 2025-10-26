@@ -37,6 +37,56 @@ To launch the standalone desktop server with the filesystem-backed session store
 python -m standalone.run_desktop --port 8000
 ```
 
+### Prereqs
+- Python 3.10+ (verified on 3.11/3.12)
+- Windows: `pip install --upgrade pip` and ensure `python`/`pip` are in `PATH`
+- macOS: `xcode-select --install` (toolchain for native extensions, if needed)
+- Linux: `python3-dev`, `build-essential` (Debian/Ubuntu package names)
+
+### Install
+```bash
+# from the repository root
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Unix/macOS:
+source .venv/bin/activate
+
+pip install -U pip wheel
+pip install -r requirements.txt
+# Optional: waitress instead of uvicorn
+# pip install waitress
+
+# First run (Desktop)
+# profile and directories can be set explicitly
+export RUN_PROFILE=desktop
+export DATA_DIR="${HOME}/.taiko-web-data"
+# Windows PowerShell:
+# $env:RUN_PROFILE="desktop"; $env:DATA_DIR="$env:USERPROFILE\.taiko-web-data"
+
+# start the local server (uvicorn by default)
+python -m standalone.run_desktop --port 8000
+# or force waitress:
+# python -m standalone.run_desktop --server=waitress --port 8000
+```
+
+Open: http://127.0.0.1:8000/healthz — it should respond with:
+
+```
+{"ok": true, "profile": "desktop", "db": "sqlite", "sessions": "filesystem"}
+```
+
+### Managing data
+
+- SQLite DB: `${DATA_DIR}/taiko.db`
+- Sessions: `${DATA_DIR}/sessions`
+- Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
+
+### Common issues
+
+- Port already in use: run with another port `--port 8010` or stop the conflicting process.
+- Permission denied (sessions dir): ensure the process can write to `${DATA_DIR}`.
+- Windows console encoding: add `PYTHONUTF8=1` to the environment.
+
 
 ## Environment
 

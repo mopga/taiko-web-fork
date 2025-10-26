@@ -31,10 +31,12 @@ def test_desktop_healthz(tmp_path, monkeypatch):
     response = client.get("/healthz")
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["ok"] is True
-    assert payload["profile"] == "desktop"
-    assert payload["db"] == "sqlite"
-    assert payload["sessions"] in {"filesystem", "sqlite"}
+    assert payload == {
+        "ok": True,
+        "profile": "desktop",
+        "db": "sqlite",
+        "sessions": "filesystem",
+    }
 
 
 def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):

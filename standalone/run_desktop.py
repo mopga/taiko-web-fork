@@ -108,8 +108,12 @@ def _run_uvicorn(app, *, host: str, port: int) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
     try:
-        server.run()
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            LOGGER.info("desktop.uvicorn stopping host=%s port=%s", host, port)
     finally:
+        LOGGER.info("desktop.uvicorn stopped host=%s port=%s", host, port)
         _restore_signals(previous_handlers)
 
 
@@ -134,9 +138,11 @@ def _run_waitress(app, *, host: str, port: int) -> None:
         try:
             serve(app, host=host, port=port)
         except KeyboardInterrupt:
-            LOGGER.info("desktop.waitress stopped")
+            LOGGER.info("desktop.waitress stopping host=%s port=%s", host, port)
     finally:
         _restore_signals(previous_handlers)
+
+    LOGGER.info("desktop.waitress stopped host=%s port=%s", host, port)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
@@ -153,10 +159,18 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     _log_startup(server=server_choice, host=host, port=port, data_dir=data_dir, app=flask_app)
 
-    if server_choice == "waitress":
-        _run_waitress(flask_app, host=host, port=port)
-    else:
-        _run_uvicorn(flask_app, host=host, port=port)
+    try:
+        if server_choice == "waitress":
+            _run_waitress(flask_app, host=host, port=port)
+        else:
+            _run_uvicorn(flask_app, host=host, port=port)
+    finally:
+        LOGGER.info(
+            "desktop.shutdown profile=desktop server=%s host=%s port=%s",
+            server_choice,
+            host,
+            port,
+        )
 
     return 0
 
