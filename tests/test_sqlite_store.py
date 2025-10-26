@@ -84,6 +84,16 @@ def test_schema_initialization(sqlite_storage: SQLiteStorage) -> None:
     assert sqlite_storage.path.exists()
 
 
+def test_creates_parent_directories(tmp_path: Path) -> None:
+    db_path = tmp_path / "nested" / "layer" / "taiko.db"
+    storage = SQLiteStorage(db_path)
+    try:
+        assert db_path.parent.exists()
+        assert storage.path == db_path
+    finally:
+        storage.close()
+
+
 def test_upsert_and_get(sqlite_storage: SQLiteStorage) -> None:
     payloads = [
         _make_song("alpha", title="Alpha Song", artist="Composer", genre="Pop", updated_at=101),

@@ -17,6 +17,8 @@ LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+UPSERT_CHUNK_SIZE = 500
+
 
 @dataclass(frozen=True)
 class DifficultyFilter:
@@ -135,7 +137,7 @@ class SQLiteDatabase:
         )
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
-        self._apply_pragmas()
+        self._pragmas = self._apply_pragmas()
         self._schema_version = self._ensure_schema()
         self._log_startup()
 
@@ -164,7 +166,7 @@ class SQLiteDatabase:
         with self._lock:
             return self._connection.cursor()
 
-    def _apply_pragmas(self) -> None:
+    def _apply_pragmas(self) -> dict[str, Any]:
         pragmas = [
             "PRAGMA journal_mode = WAL",
             "PRAGMA synchronous = NORMAL",
@@ -172,13 +174,31 @@ class SQLiteDatabase:
             "PRAGMA foreign_keys = ON",
             "PRAGMA cache_size = -20000",
         ]
+        applied: dict[str, Any] = {}
         cursor = self._connection.cursor()
-        for pragma in pragmas:
-            try:
-                cursor.execute(pragma)
-            except sqlite3.DatabaseError:
-                LOGGER.warning("Failed to apply pragma: %s", pragma, exc_info=True)
-        cursor.close()
+        try:
+            for pragma in pragmas:
+                try:
+                    cursor.execute(pragma)
+                except sqlite3.DatabaseError:
+                    LOGGER.warning("Failed to apply pragma: %s", pragma, exc_info=True)
+            for pragma_name in [
+                "journal_mode",
+                "synchronous",
+                "temp_store",
+                "foreign_keys",
+                "cache_size",
+            ]:
+                try:
+                    cursor.execute(f"PRAGMA {pragma_name}")
+                    row = cursor.fetchone()
+                except sqlite3.DatabaseError:
+                    row = None
+                applied[pragma_name] = row[0] if row else None
+        finally:
+            cursor.close()
+        LOGGER.info("SQLite pragmas applied path=%s settings=%s", self.path, applied)
+        return applied
 
     def _ensure_schema(self) -> int:
         with self._connection:  # autocommit boundary
@@ -243,18 +263,25 @@ class SQLiteDatabase:
         )
 
     def _log_startup(self) -> None:
-        try:
-            cursor = self._connection.execute("PRAGMA journal_mode")
-            journal_mode_row = cursor.fetchone()
-            journal_mode = journal_mode_row[0] if journal_mode_row else "?"
-        except sqlite3.DatabaseError:
-            journal_mode = "?"
         LOGGER.info(
-            "SQLite storage initialised path=%s journal_mode=%s schema_version=%s",
+            "SQLite storage initialised path=%s schema_version=%s pragmas=%s",
             self.path,
-            journal_mode,
             self._schema_version,
+            getattr(self, "_pragmas", {}),
         )
+
+    def execute_bulk(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                cursor.executemany(sql, rows)
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+            finally:
+                cursor.close()
 
 
 class SQLiteInsertOneResult:
@@ -291,11 +318,17 @@ class SQLiteSongStore:
         return self._db.path
 
     def upsert_many(self, songs: Iterable[Mapping[str, Any]]) -> int:
-        rows = [self._prepare_song_row(song) for song in songs]
-        if not rows:
+        prepared_rows = [self._prepare_song_row(song) for song in songs]
+        if not prepared_rows:
             return 0
+
+        total_rows = len(prepared_rows)
         start = time.perf_counter()
-        LOGGER.info("SQLiteSongStore upsert_many start rows=%d", len(rows))
+        LOGGER.info(
+            "SQLiteSongStore upsert_many start rows=%d chunk_size=%d",
+            total_rows,
+            UPSERT_CHUNK_SIZE,
+        )
         query = (
             """
             INSERT INTO songs(
@@ -319,15 +352,32 @@ class SQLiteSongStore:
                 created_at=excluded.created_at
             """
         )
-        with self._db.connection:
-            self._db.executemany(query, rows)
+
+        processed = 0
+        for chunk_index, chunk_start in enumerate(
+            range(0, total_rows, UPSERT_CHUNK_SIZE), start=1
+        ):
+            chunk_rows = prepared_rows[chunk_start : chunk_start + UPSERT_CHUNK_SIZE]
+            chunk_begin = time.perf_counter()
+            self._db.execute_bulk(query, chunk_rows)
+            processed += len(chunk_rows)
+            chunk_duration_ms = (time.perf_counter() - chunk_begin) * 1000
+            LOGGER.info(
+                "SQLiteSongStore upsert_many chunk=%d rows=%d duration_ms=%.2f processed=%d/%d",
+                chunk_index,
+                len(chunk_rows),
+                chunk_duration_ms,
+                processed,
+                total_rows,
+            )
+
         duration_ms = (time.perf_counter() - start) * 1000
         LOGGER.info(
             "SQLiteSongStore upsert_many complete rows=%d duration_ms=%.2f",
-            len(rows),
+            total_rows,
             duration_ms,
         )
-        return len(rows)
+        return total_rows
 
     # ------------------------------------------------------------------
     # Compatibility helpers for the ``SongStore`` protocol
