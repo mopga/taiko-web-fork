@@ -657,6 +657,10 @@ def create_app():
     SONG_STORE = _storage_bundle.song_store
     MANIFEST_STORE = _storage_bundle.manifest_store
     LEADER_LOCK = _storage_bundle.leader_lock
+    if RUN_PROFILE == 'desktop':
+        sqlite_path = getattr(SONG_STORE, 'path', None)
+        if sqlite_path:
+            app_instance.config['SQLITE_DB_PATH'] = str(sqlite_path)
 
     app_instance.cache = Cache(app_instance, config=redis_config)
     sess.init_app(app_instance)
@@ -758,6 +762,13 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
+    if RUN_PROFILE == 'desktop':
+        payload = {'ok': True, 'db': 'sqlite'}
+        sqlite_path = app.config.get('SQLITE_DB_PATH')
+        if sqlite_path:
+            payload['path'] = sqlite_path
+        return jsonify(payload)
+
     status = {'status': 'ok'}
     try:
         client.admin.command('ping')

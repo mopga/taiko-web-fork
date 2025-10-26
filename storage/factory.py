@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from storage.mongo_store import MongoManifestStore, MongoSongStore
+
+try:  # optional import for desktop profile
+    from storage.sqlite_store import SQLiteStorage
+except Exception:  # pragma: no cover - optional dependency during typing
+    SQLiteStorage = None  # type: ignore[assignment]
 
 from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
 
@@ -32,6 +38,7 @@ def create_storage_bundle(
     redis_client_factory: Optional[Callable[[], Any]] = None,
     leader_lock_key: str = SCAN_LEADER_KEY,
     file_leader_lock_path: Optional[Union[str, Path]] = None,
+    data_directory: Optional[Union[str, Path]] = None,
 ) -> StorageBundle:
     """Create a ``StorageBundle`` for the configured runtime profile."""
 
@@ -47,8 +54,21 @@ def create_storage_bundle(
             raise RuntimeError('Mongo database is not available')
         return getattr(database, 'songs_manifest', None)
 
-    song_store: SongStore = MongoSongStore(_songs_collection)
-    manifest_store: ManifestStore = MongoManifestStore(_manifest_collection)
+    if run_profile == 'desktop' and SQLiteStorage is not None:
+        data_dir_value: Union[str, Path, None] = data_directory
+        if data_dir_value is None:
+            data_dir_value = os.environ.get('DATA_DIR')
+        if data_dir_value is None:
+            data_dir_value = Path.home() / '.taiko-web-data'
+        data_dir = Path(data_dir_value)
+        db_path = data_dir / 'taiko.db'
+        sqlite_storage = SQLiteStorage(db_path)
+        song_store = sqlite_storage.song_store
+        manifest_store = sqlite_storage.manifest_store
+        LOGGER.info('SQLite storage configured for desktop profile path=%s', db_path)
+    else:
+        song_store = MongoSongStore(_songs_collection)
+        manifest_store = MongoManifestStore(_manifest_collection)
 
     def _create_leader_lock() -> Optional[LeaderLock]:
         return _create_leader_lock_for_profile(
@@ -60,9 +80,6 @@ def create_storage_bundle(
 
     leader_lock = _create_leader_lock()
 
-    # ``run_profile`` primarily exists to support future desktop profiles. The
-    # current implementation always returns the Mongo-backed stores while
-    # letting the leader lock vary per profile.
     return StorageBundle(song_store=song_store, manifest_store=manifest_store, leader_lock=leader_lock)
 
 
