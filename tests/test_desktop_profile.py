@@ -173,3 +173,21 @@ def test_standalone_entrypoint_waitress(monkeypatch, tmp_path):
     assert exit_code == 0
     assert serve_calls["host"] == "127.0.0.1"
     assert serve_calls["port"] == 23456
+
+
+def test_desktop_admin_routes_guarded(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    client = app_module.app.test_client()
+    response = client.get("/admin/songs")
+    assert response.status_code == 503
+    assert b"desktop profile" in response.data.lower()
+
+
+def test_desktop_api_login_guarded(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    client = app_module.app.test_client()
+    response = client.post("/api/login", json={"username": "user", "password": "pass"})
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert payload["status"] == "error"
+    assert payload["message"] == "desktop_profile_feature_unavailable"

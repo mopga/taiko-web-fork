@@ -39,6 +39,7 @@ from flask import (
     flash,
     make_response,
     send_from_directory,
+    Response,
 )
 from flask_caching import Cache
 from flask_compress import Compress
@@ -154,6 +155,35 @@ class _LazyResourceProxy:
 
     def __repr__(self) -> str:
         return f"<LazyResourceProxy factory={self._factory!r}>"
+
+
+DESKTOP_MONGO_UNAVAILABLE_MESSAGE = (
+    'Mongo-backed features are not available in the desktop profile.'
+)
+
+
+def _desktop_mongo_unavailable_response(*, api: bool) -> Optional[Response]:
+    if RUN_PROFILE != 'desktop':
+        return None
+    if not flask.has_request_context():
+        return None
+    LOGGER.debug(
+        'desktop profile requested mongo-backed feature path=%s api=%s',
+        request.path,
+        api,
+    )
+    if api:
+        payload = jsonify(
+            {
+                'status': 'error',
+                'message': 'desktop_profile_feature_unavailable',
+            }
+        )
+        payload.status_code = 503
+        return payload
+    response = make_response(DESKTOP_MONGO_UNAVAILABLE_MESSAGE, 503)
+    response.mimetype = 'text/plain'
+    return response
 
 
 class MongoDispatcher:
@@ -984,11 +1014,14 @@ def admin_required(level):
     def decorated_function(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            unavailable = _desktop_mongo_unavailable_response(api=False)
+            if unavailable is not None:
+                return unavailable
             if not session.get('username'):
                 return abort(403)
-            
+
             user = db.users.find_one({'username': session.get('username')})
-            if user['user_level'] < level:
+            if not isinstance(user, Mapping) or user.get('user_level', 0) < level:
                 return abort(403)
 
             return f(*args, **kwargs)
@@ -1003,6 +1036,8 @@ def handle_csrf_error(e):
 
 @app.before_request
 def before_request_func():
+    if RUN_PROFILE == 'desktop':
+        return None
     if session.get('session_id'):
         if not db.users.find_one({'session_id': session.get('session_id')}):
             session.clear()
@@ -1450,6 +1485,9 @@ def route_api_preview():
 
 @app.route(basedir + 'api/songs')
 def route_api_songs():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     cache_control = 'public, max-age=86400, stale-while-revalidate=600'
     vary_header = 'If-None-Match, Accept-Encoding'
 
@@ -1736,6 +1774,9 @@ def route_api_song_details() -> 'flask.Response':
 
 @app.route(basedir + 'api/modes')
 def route_api_modes():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     if not is_modes_manifest_enabled():
         return jsonify({'status': 'disabled'})
 
@@ -1936,12 +1977,18 @@ def route_api_dan_chart():
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)
 def route_api_categories():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     categories = list(db.categories.find({},{'_id': False}))
     return jsonify(categories)
 
 
 @app.route(basedir + 'import/report')
 def route_import_report():
+    unavailable = _desktop_mongo_unavailable_response(api=False)
+    if unavailable is not None:
+        return unavailable
     state_collection = getattr(db, 'song_scanner_state', None)
     if state_collection is None:
         abort(404)
@@ -2130,6 +2177,9 @@ def route_api_config():
 
 @app.route(basedir + 'api/register', methods=['POST'])
 def route_api_register():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.register):
         return abort(400)
@@ -2171,6 +2221,9 @@ def route_api_register():
 
 @app.route(basedir + 'api/login', methods=['POST'])
 def route_api_login():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.login):
         return abort(400)
@@ -2206,6 +2259,9 @@ def route_api_logout():
 @app.route(basedir + 'api/account/display_name', methods=['POST'])
 @login_required
 def route_api_account_display_name():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.update_display_name):
         return abort(400)
@@ -2226,6 +2282,9 @@ def route_api_account_display_name():
 @app.route(basedir + 'api/account/don', methods=['POST'])
 @login_required
 def route_api_account_don():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.update_don):
         return abort(400)
@@ -2251,6 +2310,9 @@ def route_api_account_don():
 @app.route(basedir + 'api/account/password', methods=['POST'])
 @login_required
 def route_api_account_password():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.update_password):
         return abort(400)
@@ -2279,6 +2341,9 @@ def route_api_account_password():
 @app.route(basedir + 'api/account/remove', methods=['POST'])
 @login_required
 def route_api_account_remove():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.delete_account):
         return abort(400)
@@ -2298,6 +2363,9 @@ def route_api_account_remove():
 @app.route(basedir + 'api/scores/save', methods=['POST'])
 @login_required
 def route_api_scores_save():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     data = request.get_json()
     if not schema.validate(data, schema.scores_save):
         return abort(400)
@@ -2321,6 +2389,9 @@ def route_api_scores_save():
 @app.route(basedir + 'api/scores/get')
 @login_required
 def route_api_scores_get():
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable
     username = session.get('username')
 
     scores = []
