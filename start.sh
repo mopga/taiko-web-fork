@@ -25,8 +25,9 @@ fi
 
 gunicorn \
     --bind 0.0.0.0:8000 \
-    --workers ${GWORKERS:-2} \
+    --workers ${GWORKERS:-1} \
     --threads ${GTHREADS:-4} \
+    --log-level info \
     --capture-output \
     --error-logfile - \
     --access-logfile - \
