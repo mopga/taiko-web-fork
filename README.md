@@ -62,7 +62,7 @@ Pre-built desktop packages are published by the CI workflow:
   pre-release.
 - Tagged releases (`v*`): full GitHub Release with installers and archives.
 
-Grab them from the [Releases page](https://github.com/kuroni/taiko-web/releases)
+Grab them from the [Releases page](../../releases)
 or from the workflow run summary. Each release ships the following files:
 
 - **Windows installer** – `taiko-web-backend-setup-<version>.exe` installs the

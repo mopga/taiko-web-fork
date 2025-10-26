@@ -75,10 +75,11 @@ jobs:
       - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         uses: krproject/innosetup-action@v1
-        with:
-          path: packaging/windows/taiko-backend.iss
         env:
           MyVersion: ${{ steps.version.outputs.value }}
+          MyDistDir: dist\backend\taiko-web-backend
+        with:
+          path: packaging/windows/taiko-backend.iss
 
       - name: Collect artifacts
         shell: bash
