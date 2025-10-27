@@ -5,17 +5,23 @@ $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
 
-$exe = "dist\\backend\\taiko-web-backend\\taiko-web-backend.exe"
+$exe = "dist\backend\taiko-web-backend\taiko-web-backend.exe"
 if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
 
-$log = Join-Path (Get-Location) "smoke_windows.log"
-if (Test-Path $log) {
-    Remove-Item $log -Force
-}
+$logDir = Join-Path (Get-Location) "_logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stdoutLog = Join-Path $logDir "smoke_stdout.log"
+$stderrLog = Join-Path $logDir "smoke_stderr.log"
+Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+
 $args = @("--host", "127.0.0.1", "--port", "8000")
-$process = Start-Process -FilePath $exe -ArgumentList $args -PassThru -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Hidden
+$process = Start-Process -FilePath $exe -ArgumentList $args -PassThru \
+    -RedirectStandardOutput $stdoutLog \
+    -RedirectStandardError $stderrLog \
+    -WindowStyle Hidden
+
 try {
     for ($i = 0; $i -lt 60; $i++) {
         try {
@@ -29,9 +35,13 @@ try {
         }
     }
     Write-Error "healthz failed"
-    if (Test-Path $log) {
-        Write-Host "===== smoke_windows.log (tail) ====="
-        Get-Content $log -Tail 200 | Write-Host
+    if (Test-Path $stdoutLog) {
+        Write-Host "===== smoke_stdout.log (tail) ====="
+        Get-Content $stdoutLog -Tail 200 | Write-Host
+    }
+    if (Test-Path $stderrLog) {
+        Write-Host "===== smoke_stderr.log (tail) ====="
+        Get-Content $stderrLog -Tail 200 | Write-Host
     }
     exit 1
 } finally {
