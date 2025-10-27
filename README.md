@@ -52,6 +52,53 @@ set DATA_DIR=%USERPROFILE%\.taiko-web-data
 python -m standalone.run_desktop --port 8000
 ```
 
+## Desktop binaries
+
+Pre-built desktop packages are published by the CI workflow:
+
+- Pull requests and feature branches: downloadable artifacts attached to each
+  workflow run.
+- Nightly builds (scheduled and pushes to `main`): GitHub Release marked as a
+  pre-release.
+- Tagged releases (`v*`): full GitHub Release with installers and archives.
+
+Grab them from the [Releases page](../../releases)
+or from the workflow run summary. Each release ships the following files:
+
+- **Windows installer** – `taiko-web-backend-setup-<version>.exe` installs the
+  backend under `%APPDATA%\taiko-web-backend` and creates shortcuts that launch
+  the desktop profile on port 8000.
+- **Windows portable zip** – `taiko-web-backend-windows.zip` contains the
+  `taiko-web-backend` folder produced by PyInstaller. Extract it anywhere, then
+  run:
+
+  ```powershell
+  Expand-Archive taiko-web-backend-windows.zip
+  cd taiko-web-backend
+  ```
+
+  ```cmd
+  set RUN_PROFILE=desktop && taiko-web-backend.exe --port 8000
+  ```
+
+- **Linux archive** – `taiko-web-backend-linux-x64.tar.gz` expands to a
+  `taiko-web-backend` directory with the self-contained binary. Launch it with:
+
+  ```bash
+  tar -xzf taiko-web-backend-linux-x64.tar.gz
+  cd taiko-web-backend
+  RUN_PROFILE=desktop ./taiko-web-backend --port 8000
+  ```
+
+All desktop builds honour the `DATA_DIR` environment variable (defaults to
+`~/.taiko-web-data` on Linux/macOS and `%USERPROFILE%\.taiko-web-data` on
+Windows). Songs must live under `$DATA_DIR/songs`, regardless of how the backend
+was installed.
+
+> **Note**
+> The Windows binaries are unsigned, so SmartScreen may display a warning. Use
+> "More info" → "Run anyway" to continue.
+
 ### Prereqs
 - Python 3.10+ (verified on 3.11/3.12)
 - Windows: `pip install --upgrade pip` and ensure `python`/`pip` are in `PATH`

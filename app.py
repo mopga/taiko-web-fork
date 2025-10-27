@@ -926,14 +926,17 @@ def route_healthcheck():
         session_backend = app.config.get(
             'SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')
         )
-        return jsonify(
-            {
-                'ok': True,
-                'profile': 'desktop',
-                'db': 'sqlite',
-                'sessions': session_backend,
-            }
-        )
+        payload = {
+            'status': 'ok',
+            'ok': True,
+            'profile': 'desktop',
+            'db': 'sqlite',
+            'sessions': session_backend,
+        }
+        sqlite_path = app.config.get('SQLITE_DB_PATH')
+        if sqlite_path:
+            payload['path'] = sqlite_path
+        return jsonify(payload)
 
     status = {
         'status': 'ok',

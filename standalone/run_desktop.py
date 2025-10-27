@@ -92,7 +92,7 @@ def _run_uvicorn(app, *, host: str, port: int) -> None:
         port=port,
         log_level="info",
         access_log=True,
-        lifespan="on",
+        lifespan="off",
     )
     server = uvicorn.Server(config)
 

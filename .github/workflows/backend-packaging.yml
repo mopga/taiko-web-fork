@@ -1,0 +1,195 @@
+name: backend-packaging
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: [ '3.11' ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix['python-version'] }}
+          cache: 'pip'
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller jinja2 websockets uvicorn waitress markdown setuptools
+
+      - name: Build backend (PyInstaller)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -File scripts/build_backend_desktop.ps1
+          else
+            bash scripts/build_backend_desktop.sh
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -File scripts/smoke_run_windows.ps1
+          else
+            bash scripts/smoke_run_linux.sh
+          fi
+
+      - name: Upload smoke logs (Windows)
+        if: ${{ matrix.os == 'windows-latest' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-windows
+          path: _logs/*.log
+          if-no-files-found: ignore
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -Command "Compress-Archive -Path 'dist/backend/taiko-web-backend/*' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
+          else
+            tar -C dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
+          fi
+
+      # Install Inno Setup and build installer without any 3rd-party Actions
+      - name: Install Inno Setup (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          "$env:Path"
+          # Ensure output dir exists (Inno can create it, но будет чище)
+          New-Item -ItemType Directory -Force -Path "packaging/windows/Output" | Out-Null
+
+      - name: Build Windows installer (ISCC)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          MyVersion: ${{ github.ref_name }}
+          MyDistDir: ${{ github.workspace }}\dist\backend\taiko-web-backend
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC not found at: $iscc"
+          }
+          & "$iscc" "packaging/windows/taiko-backend.iss" `
+            /DMyVersion="$env:MyVersion" `
+            /DMyDistDir="$env:MyDistDir"
+
+      - name: Collect installer artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (Test-Path "packaging/windows/Output") {
+            Copy-Item "packaging/windows/Output/*.exe" "out/" -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate checksums (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cd out
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Generate checksums (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Set-Location out
+          Remove-Item -Path SHA256SUMS.txt -ErrorAction SilentlyContinue
+          Get-ChildItem -File | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 $_.FullName
+            "$($hash.Hash.ToLower())  $($_.Name)" | Out-File -FilePath SHA256SUMS.txt -Append -Encoding ascii
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.os }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       github.ref == 'refs/heads/main' ||
+       github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch')
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: rel
+
+      - name: Prepare release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            stamp=$(date -u +%Y%m%d)
+            echo "tag=nightly-${stamp}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "name=nightly-${stamp}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gather release files
+        run: |
+          mkdir -p upload
+          shopt -s globstar nullglob
+          for file in rel/**/taiko-web-backend-windows.zip rel/**/taiko-web-backend-linux-x64.tar.gz rel/**/taiko-web-backend-setup-*.exe; do
+            if [ -f "$file" ]; then
+              cp "$file" upload/
+            fi
+          done
+
+      - name: Generate SHA256 sums
+        run: |
+          cd upload
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: upload/*
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
