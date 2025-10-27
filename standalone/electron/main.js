@@ -317,6 +317,9 @@ function resolveBackendBinary() {
     }
     return candidates[0];
   }
+  if (!isDev && process.platform === 'darwin') {
+    return path.join(resolveInstallRoot(), 'Resources', 'backend', exeName);
+  }
   return path.join(resolveInstallRoot(), 'backend', exeName);
 }
 

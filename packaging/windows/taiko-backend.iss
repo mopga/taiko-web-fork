@@ -1,7 +1,11 @@
 ; Hybrid installer definition used for backward compatibility.
+; WARNING: this script exists only so automated pipelines that still
+; reference the historical backend installer keep working. Do not run
+; this installer manually; prefer taiko-desktop.iss instead.
 ; When a full desktop staging directory is provided, delegate to the
 ; desktop installer implementation. Otherwise fall back to the legacy
-; backend-only installer behavior.
+; backend-only installer behavior without creating launchers or batch
+; files so the payload cannot be mistaken for the desktop product.
 
 #define BACKEND_APP_NAME "taiko-web-backend"
 
@@ -54,27 +58,5 @@ SolidCompression=yes
 
 [Files]
 Source: "{#BACKEND_SOURCE_ROOT}\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-
-[Icons]
-Name: "{autoprograms}\taiko-web-backend (desktop)"; Filename: "{app}\run_desktop.bat"
-Name: "{autodesktop}\taiko-web-backend (desktop)"; Filename: "{app}\run_desktop.bat"
-
-[Run]
-Filename: "{app}\\run_desktop.bat"; Description: "Run taiko-web-backend (desktop)"; Flags: nowait postinstall skipifsilent
-
-[Code]
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  BatchFile: string;
-begin
-  if CurStep = ssInstall then begin
-    BatchFile := ExpandConstant('{app}\\run_desktop.bat');
-    SaveStringToFile(BatchFile,
-      '@echo off'#13#10 +
-      'set RUN_PROFILE=desktop'#13#10 +
-      'start "" "%~dp0taiko-web-backend.exe" --port 8000'#13#10,
-      False);
-  end;
-end;
 
 #endif
