@@ -5,7 +5,7 @@
 #endif
 #define MyDistDir GetEnv("MyDistDir")
 #if MyDistDir == ""
-  #define MyDistDir "dist\\backend\\taiko-web-backend"
+  #define MyDistDir "..\\..\\dist\\backend\\taiko-web-backend"
 #endif
 ; Sanitize version for filesystem/installer usage
 #define MyVersionSafe StringChange(StringChange(StringChange(StringChange(MyVersion, "/", "-"), "\\", "-"), ":", "-"), " ", "-")

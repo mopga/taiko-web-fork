@@ -95,13 +95,15 @@ jobs:
         shell: pwsh
         env:
           MyVersion: ${{ github.ref_name }}
-          MyDistDir: dist\backend\taiko-web-backend
+          MyDistDir: ${{ github.workspace }}\dist\backend\taiko-web-backend
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
             throw "ISCC not found at: $iscc"
           }
-          & "$iscc" "packaging/windows/taiko-backend.iss" /DMyVersion="$env:MyVersion" /DMyDistDir="$env:MyDistDir"
+          & "$iscc" "packaging/windows/taiko-backend.iss" `
+            /DMyVersion="$env:MyVersion" `
+            /DMyDistDir="$env:MyDistDir"
 
       - name: Collect installer artifact (Windows)
         if: matrix.os == 'windows-latest'
