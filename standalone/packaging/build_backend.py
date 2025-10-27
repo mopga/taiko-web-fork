@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "standalone" / "run_desktop.py"
-DIST = ROOT / "dist" / "backend"
+DIST = ROOT / "standalone" / "dist" / "backend"
 NAME = "taiko-web-backend"
 
 DATA_DIRS = [
@@ -38,6 +38,9 @@ def main():
         "--collect-all=cffi",
         str(ENTRY),
     ]
+    if platform.system() == "Windows":
+        args.append("--noconsole")
+
     for s, d in DATA_DIRS:
         if (ROOT / s).exists():
             args.append(add_data_arg(s, d))
@@ -45,6 +48,8 @@ def main():
     print("Running:", " ".join(args))
     subprocess.check_call(args)
 
+    if DIST.exists():
+        shutil.rmtree(DIST)
     DIST.mkdir(parents=True, exist_ok=True)
     if platform.system() == "Windows":
         shutil.copyfile(ROOT / "dist" / f"{NAME}.exe", DIST / f"{NAME}.exe")

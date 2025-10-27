@@ -1,36 +1,41 @@
-appId: com.taiko.web.desktop.fork
-productName: Taiko Web Desktop (Fork)
+appId: com.taiko.web.desktop
+productName: Taiko Web Desktop
 asar: true
+
+directories:
+  output: dist
+  buildResources: build
 
 files:
   - main.js
   - preload.js
   - package.json
   - build/icons/**
-extraResources:
+  - "!dist/**"
+
+extraFiles:
   - from: ../dist/backend
-    to: dist/backend
+    to: backend
     filter:
       - "**/*"
+  - from: ../../assets/launcher
+    to: assets/launcher
+    filter:
+      - "*.ico"
 
 win:
-  target: [nsis]
-  icon: build/icons/icon.ico
-  artifactName: "TaikoWebDesktop-${version}-win.${ext}"
-
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
-  createStartMenuShortcut: true
-  shortcutName: "Taiko Web Desktop (Fork)"
-  perMachine: false
+  target:
+    - target: dir
+      arch:
+        - x64
+  icon: ../assets/launcher/app.ico
+  artifactName: "TaikoWebDesktop-${version}-win-unpacked"
 
 mac:
   target: [dmg]
   category: public.app-category.games
   icon: build/icons/icon.icns
-  artifactName: "Taiko Web Desktop (Fork)-${version}.${ext}"
+  artifactName: "Taiko Web Desktop-${version}.${ext}"
   hardenedRuntime: false
   gatekeeperAssess: false
   notarize: false
