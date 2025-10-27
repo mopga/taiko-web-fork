@@ -67,10 +67,16 @@ jobs:
         run: |
           mkdir -p out
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            pwsh -Command "Compress-Archive -Path 'dist/backend/taiko-web-backend' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
+            pwsh -Command "Compress-Archive -Path 'dist/backend/taiko-web-backend/*' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
           else
             tar -C dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
           fi
+
+      - name: Ensure installer output dir exists (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "packaging/windows/Output" | Out-Null
 
       - name: Build Windows installer
         if: matrix.os == 'windows-latest'
@@ -81,19 +87,31 @@ jobs:
         with:
           path: packaging/windows/taiko-backend.iss
 
-      - name: Collect artifacts
+      - name: Collect installer artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (Test-Path "packaging/windows/Output") {
+            Copy-Item "packaging/windows/Output/*.exe" "out/" -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate checksums (Linux)
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          mkdir -p out
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            if [ -d "packaging/windows/Output" ]; then
-              cp packaging/windows/Output/*.exe out/ || true
-            fi
-            pwsh -Command "if (Test-Path 'out/SHA256SUMS.txt') { Remove-Item 'out/SHA256SUMS.txt' -Force }"
-            pwsh -Command "$hashes = Get-ChildItem out -File | ForEach-Object { $h = Get-FileHash $_.FullName -Algorithm SHA256; ($h.Hash.ToLower() + '  ' + $_.Name) }; if ($hashes.Count -eq 0) { throw 'No artifacts found for checksum generation.' } else { $hashes | Set-Content -Path out/\SHA256SUMS.txt }"
-          else
-            (cd out && sha256sum * > SHA256SUMS.txt)
-          fi
+          cd out
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Generate checksums (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Set-Location out
+          Remove-Item -Path SHA256SUMS.txt -ErrorAction SilentlyContinue
+          Get-ChildItem -File | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 $_.FullName
+            "$($hash.Hash.ToLower())  $($_.Name)" | Out-File -FilePath SHA256SUMS.txt -Append -Encoding ascii
+          }
 
       - uses: actions/upload-artifact@v4
         with:
