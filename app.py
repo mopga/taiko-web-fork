@@ -940,12 +940,17 @@ def route_healthcheck():
 
     status = {
         'status': 'ok',
+        'ok': True,
+        'profile': 'web',
+        'db': 'mongo',
+        'sessions': app.config.get('SESSION_BACKEND', 'redis'),
     }
     try:
         client.admin.command('ping')
         status['mongo'] = 'ok'
     except Exception:
         status['status'] = 'error'
+        status['ok'] = False
         status['mongo'] = 'error'
         return jsonify(status), 503
     try:
@@ -955,6 +960,7 @@ def route_healthcheck():
         status['redis'] = 'ok'
     except Exception:
         status['status'] = 'error'
+        status['ok'] = False
         status['redis'] = 'error'
         return jsonify(status), 503
     return jsonify(status)
