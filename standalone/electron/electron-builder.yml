@@ -1,0 +1,28 @@
+appId: com.taiko.web.desktop.fork
+productName: Taiko Web Desktop (Fork)
+files:
+  - from: .
+    filter:
+      - main.js
+      - preload.js
+      - package.json
+      - build/icons/**
+extraResources:
+  - from: ../dist/backend/**
+    to: dist/backend
+asar: true
+mac:
+  target:
+    - dmg
+  category: public.app-category.games
+  icon: build/icons/icon.icns
+linux:
+  target:
+    - AppImage
+  category: Game
+  icon: build/icons/icon.png
+win:
+  target:
+    - nsis
+  artifactName: TaikoWebDesktop-${version}-win.${ext}
+  icon: build/icons/icon.ico
