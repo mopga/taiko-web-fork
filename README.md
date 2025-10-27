@@ -62,6 +62,17 @@ Pre-built desktop packages are published by the CI workflow:
   pre-release.
 - Tagged releases (`v*`): full GitHub Release with installers and archives.
 
+### Desktop Release (manual)
+
+- Запуск: GitHub → Actions → `desktop-release` → **Run workflow**
+- Параметры:
+  - `tag_name` (необяз.) — если пусто, будет сгенерирован `nightly-YYYYMMDD-HHMM`
+  - `prerelease` (bool) — по умолчанию `true`
+  - `draft` (bool) — по умолчанию `false`
+- Артефакты раскладываются по платформенным подпапкам внутри `upload/` (Windows/macOS/Linux).
+- Требования:
+  - В Settings → Actions → General → Workflow permissions включено **Read and write permissions**.
+
 Grab them from the [Releases page](../../releases)
 or from the workflow run summary. Each release ships the following files:
 
