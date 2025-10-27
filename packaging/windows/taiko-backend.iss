@@ -16,7 +16,7 @@ AppVersion={#MyVersionSafe}
 DefaultDirName={userappdata}\{#MyAppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
-OutputDir=packaging\windows\Output
+OutputDir={#SourcePath}\Output
 OutputBaseFilename=taiko-web-backend-setup-{#MyVersionSafe}
 Compression=lzma2/max
 SolidCompression=yes
@@ -32,7 +32,7 @@ Name: "{autodesktop}\taiko-web-backend (desktop)"; Filename: "{app}\run_desktop.
 Filename: "{app}\\run_desktop.bat"; Description: "Run taiko-web-backend (desktop)"; Flags: nowait postinstall skipifsilent
 
 [Code]
-function CurStepChanged(CurStep: TSetupStep);
+procedure CurStepChanged(CurStep: TSetupStep);
 var
   BatchFile: string;
 begin
