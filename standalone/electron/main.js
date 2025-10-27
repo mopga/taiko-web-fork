@@ -226,9 +226,7 @@ async function findAvailablePort(startPort = 3123, attempts = 20) {
 function resolveBackendBinary() {
   const executableName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
   const relativePath = path.join('dist', 'backend', executableName);
-  const binaryPath = isDev
-    ? path.resolve(__dirname, '..', relativePath)
-    : path.join(process.resourcesPath, relativePath);
+  const binaryPath = isDev ? path.resolve(__dirname, '..', relativePath) : path.join(process.resourcesPath, relativePath);
   return binaryPath;
 }
 
