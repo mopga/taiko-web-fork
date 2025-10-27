@@ -15,6 +15,31 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
 
+def _resolve_host_port(args: argparse.Namespace) -> tuple[str, int]:
+    host = args.host or os.getenv("TAIKO_DESKTOP_HOST") or DEFAULT_HOST
+
+    port_candidates: Iterable[object] = (
+        args.port,
+        os.getenv("TAIKO_DESKTOP_PORT"),
+        os.getenv("PORT"),
+        os.getenv("UVICORN_PORT"),
+    )
+    for candidate in port_candidates:
+        if candidate in (None, ""):
+            continue
+        try:
+            port_value = int(candidate)
+        except (TypeError, ValueError):
+            LOGGER.debug("desktop.port invalid candidate=%r", candidate)
+            continue
+        if port_value <= 0 or port_value > 65535:
+            LOGGER.debug("desktop.port out_of_range=%r", candidate)
+            continue
+        return host, port_value
+
+    return host, DEFAULT_PORT
+
+
 def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the TaikoWeb desktop server")
     parser.add_argument("--host", dest="host", default=None, help="Host interface to bind")
@@ -150,9 +175,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     data_dir = _resolve_data_dir(args.data_dir)
     _prepare_environment(data_dir=data_dir)
 
-    host = args.host or os.environ.get("TAIKO_DESKTOP_HOST") or DEFAULT_HOST
-    port_env = os.environ.get("TAIKO_DESKTOP_PORT")
-    port = args.port or (int(port_env) if port_env else DEFAULT_PORT)
+    host, port = _resolve_host_port(args)
     server_choice = (args.server or os.environ.get("TAIKO_DESKTOP_SERVER") or "uvicorn").lower()
 
     from app import app as flask_app

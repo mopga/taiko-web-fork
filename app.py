@@ -66,7 +66,7 @@ from ffmpy import FFmpeg
 from pymongo import MongoClient, ReturnDocument
 from redis import Redis
 
-from songs_scanner import SongScanner
+from songs_scanner import SongScanner, empty_scan_summary
 from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
@@ -2114,8 +2114,33 @@ def invalidate_category_cache():
 
 
 def perform_song_scan(*, full: bool = False):
-    summary = song_scanner.scan(full=full)
+    mode_label = 'full' if full else 'incremental'
+    start_perf = time.perf_counter()
+    try:
+        summary = song_scanner.scan(full=full)
+    except Exception:  # pragma: no cover - defensive runtime guard
+        elapsed = max(time.perf_counter() - start_perf, 0.0)
+        active_summary = getattr(song_scanner, '_active_summary', None)
+        files_count = None
+        if isinstance(active_summary, dict):
+            files_count = active_summary.get('files_count')
+        logger = app.logger if 'app' in globals() else LOGGER
+        logger.error(
+            'Song scan failed: mode=%s base_dir=%s files_count=%s duration=%.3fs',
+            mode_label,
+            SONGS_DIR_PATH,
+            files_count if files_count is not None else 'unknown',
+            elapsed,
+            exc_info=True,
+        )
+        summary = empty_scan_summary(reason='scan_failed')
+        summary['duration_seconds'] = round(elapsed, 3)
     summary_dict = summary if isinstance(summary, dict) else {}
+    if not summary_dict:
+        fallback = empty_scan_summary(reason='scan_empty')
+        summary_dict.update(fallback)
+        summary_dict['duration_seconds'] = round(max(time.perf_counter() - start_perf, 0.0), 3)
+        summary = summary_dict
     leader = summary_dict.get('leader') is True
     fast_path = summary_dict.get('fast_path') is True
     if leader and not fast_path:
