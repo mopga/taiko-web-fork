@@ -1,0 +1,58 @@
+import os
+import sys
+import subprocess
+import shutil
+import platform
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+ENTRY = ROOT / "standalone" / "run_desktop.py"
+DIST = ROOT / "dist" / "backend"
+NAME = "taiko-web-backend"
+
+DATA_DIRS = [
+    ("web/templates", "web/templates"),
+    ("web/static", "web/static"),
+    # если SPA: ("frontend/dist", "frontend/dist"),
+]
+
+
+def add_data_arg(src_rel, dst_rel):
+    sep = ";" if platform.system() == "Windows" else ":"
+    return f"--add-data={src_rel}{sep}{dst_rel}"
+
+
+def main():
+    os.chdir(ROOT)
+    args = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--name",
+        NAME,
+        "--onefile",
+        "--hidden-import=bcrypt",
+        "--hidden-import=cffi",
+        "--hidden-import=_cffi_backend",
+        "--collect-all=bcrypt",
+        "--collect-all=cffi",
+        str(ENTRY),
+    ]
+    for s, d in DATA_DIRS:
+        if (ROOT / s).exists():
+            args.append(add_data_arg(s, d))
+
+    print("Running:", " ".join(args))
+    subprocess.check_call(args)
+
+    DIST.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Windows":
+        shutil.copyfile(ROOT / "dist" / f"{NAME}.exe", DIST / f"{NAME}.exe")
+    else:
+        dst = DIST / NAME
+        shutil.copyfile(ROOT / "dist" / NAME, dst)
+        dst.chmod(0o755)
+
+
+if __name__ == "__main__":
+    main()

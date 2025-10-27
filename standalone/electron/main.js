@@ -6,7 +6,7 @@ const log = require('electron-log');
 const treeKill = require('tree-kill');
 const { spawn } = require('child_process');
 
-const isDev = process.env.ELECTRON_DEV === '1' || process.env.NODE_ENV === 'development';
+const isDev = process.env.ELECTRON_DEV === '1';
 
 let mainWindow = null;
 let backendProcess = null;
@@ -224,10 +224,11 @@ async function findAvailablePort(startPort = 3123, attempts = 20) {
 }
 
 function resolveBackendBinary() {
-  const executableName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
-  const relativePath = path.join('dist', 'backend', executableName);
-  const binaryPath = isDev ? path.resolve(__dirname, '..', relativePath) : path.join(process.resourcesPath, relativePath);
-  return binaryPath;
+  const exeName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+  const backendPath = isDev
+    ? path.resolve(__dirname, '..', '..', 'dist', 'backend', exeName)
+    : path.join(process.resourcesPath, 'dist', 'backend', exeName);
+  return backendPath;
 }
 
 function spawnBackend(port) {
@@ -236,10 +237,13 @@ function spawnBackend(port) {
     throw new Error(`Backend binary not found at ${backendPath}`);
   }
   log.info('Spawning backend at', backendPath, 'on port', port);
+  const chosenPort = port;
   const env = {
     ...process.env,
     RUN_PROFILE: 'desktop',
-    PORT: String(port),
+    TAIKO_DESKTOP_HOST: '127.0.0.1',
+    TAIKO_DESKTOP_PORT: String(chosenPort),
+    PORT: String(chosenPort),
     DATA_DIR: dataDir,
     SONGS_DIR: songsDir,
   };

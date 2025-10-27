@@ -82,6 +82,17 @@ from storage.interfaces import (
 LOGGER = logging.getLogger(__name__)
 
 
+def resource_path(rel: str) -> str:
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return str(Path(base, rel))
+    return str(Path(__file__).resolve().parent / rel)
+
+
+TEMPLATES_DIR = os.getenv("TAIKO_TEMPLATES_DIR") or resource_path("web/templates")
+STATIC_DIR = os.getenv("TAIKO_STATIC_DIR") or resource_path("web/static")
+
+
 RUN_PROFILE = os.getenv("RUN_PROFILE", "web")
 DESKTOP_DATA_DIR_ENV = "DATA_DIR"
 DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
@@ -631,7 +642,12 @@ def create_app():
     _startup_scan_started_at = time.monotonic()
     _startup_scan_logged = False
 
-    app_instance = Flask(__name__)
+    app_instance = Flask(
+        __name__,
+        template_folder=TEMPLATES_DIR,
+        static_folder=STATIC_DIR,
+        static_url_path="/static",
+    )
     app_instance.logger.info("run_profile=%s", RUN_PROFILE)
     app_instance.config['RUN_PROFILE'] = RUN_PROFILE
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
