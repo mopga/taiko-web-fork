@@ -1,23 +1,41 @@
-#define APP_NAME "Taiko Web Desktop"
-#define APP_ID "com.taiko.web.desktop"
-#ifdef MyVersion
-  #define RAW_APP_VERSION MyVersion
-#else
-  #define RAW_APP_VERSION GetEnv("TAIKO_DESKTOP_VERSION")
+#ifndef APP_NAME
+  #define APP_NAME "Taiko Web Desktop"
+#endif
+#ifndef APP_ID
+  #define APP_ID "com.taiko.web.desktop"
+#endif
+#ifndef RAW_APP_VERSION
+  #ifdef DESKTOP_VERSION_OVERRIDE
+    #define RAW_APP_VERSION DESKTOP_VERSION_OVERRIDE
+  #else
+    #ifdef MyVersion
+      #define RAW_APP_VERSION MyVersion
+    #else
+      #define RAW_APP_VERSION GetEnv("TAIKO_DESKTOP_VERSION")
+    #endif
+  #endif
 #endif
 #if RAW_APP_VERSION == ""
   #define RAW_APP_VERSION "dev"
 #endif
-#define APP_VERSION RAW_APP_VERSION
+#ifndef APP_VERSION
+  #define APP_VERSION RAW_APP_VERSION
+#endif
 #define APP_VERSION_SAFE StringChange(StringChange(StringChange(StringChange(APP_VERSION, "/", "-"), "\\", "-"), ":", "-"), " ", "-")
-#ifdef MyDistDir
-  #define SOURCE_DIR MyDistDir
-#else
-  #define SOURCE_DIR_ENV GetEnv("DESKTOP_STAGING_DIR")
-  #if SOURCE_DIR_ENV == ""
-    #define SOURCE_DIR "..\\..\\standalone\\electron\\dist\\win-unpacked"
+#ifndef SOURCE_DIR
+  #ifdef DESKTOP_SOURCE_OVERRIDE
+    #define SOURCE_DIR DESKTOP_SOURCE_OVERRIDE
   #else
-    #define SOURCE_DIR SOURCE_DIR_ENV
+    #ifdef MyDistDir
+      #define SOURCE_DIR MyDistDir
+    #else
+      #define SOURCE_DIR_ENV GetEnv("DESKTOP_STAGING_DIR")
+      #if SOURCE_DIR_ENV == ""
+        #define SOURCE_DIR "..\\..\\standalone\\electron\\dist\\win-unpacked"
+      #else
+        #define SOURCE_DIR SOURCE_DIR_ENV
+      #endif
+    #endif
   #endif
 #endif
 #define OUTPUT_DIR_ENV GetEnv("TAIKO_INSTALLER_OUTPUT")
