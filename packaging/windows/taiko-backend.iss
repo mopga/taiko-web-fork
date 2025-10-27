@@ -1,21 +1,23 @@
 #define MyAppName "taiko-web-backend"
 #define MyVersion GetEnv("MyVersion")
-#ifndef MyVersion
+#if MyVersion == ""
   #define MyVersion "dev"
 #endif
 #define MyDistDir GetEnv("MyDistDir")
-#ifndef MyDistDir
+#if MyDistDir == ""
   #define MyDistDir "dist\\backend\\taiko-web-backend"
 #endif
+; Sanitize version for filesystem/installer usage
+#define MyVersionSafe StrReplace(StrReplace(StrReplace(StrReplace(MyVersion, "/", "-"), "\\", "-"), ":", "-"), " ", "-")
 
 [Setup]
 AppName={#MyAppName}
-AppVersion={#MyVersion}
+AppVersion={#MyVersionSafe}
 DefaultDirName={userappdata}\{#MyAppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputDir=packaging\windows\Output
-OutputBaseFilename=taiko-web-backend-setup-{#MyVersion}
+OutputBaseFilename=taiko-web-backend-setup-{#MyVersionSafe}
 Compression=lzma2/max
 SolidCompression=yes
 
