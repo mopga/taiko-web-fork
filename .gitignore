@@ -62,3 +62,5 @@ public/src/js/plugin
 build/
 dist/
 packaging/windows/Output/
+node_modules
+
