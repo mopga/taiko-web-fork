@@ -108,8 +108,13 @@ jobs:
         shell: bash
         run: |
           if [ -z "${{ github.event.inputs.tag_name }}" ]; then
-            TAG="nightly-$(date +'%Y%m%d-%H%M')"
-            NAME="nightly-$(date +'%Y%m%d')"
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              TAG="${{ github.ref_name }}"
+              NAME="${{ github.ref_name }}"
+            else
+              TAG="nightly-$(date +'%Y%m%d-%H%M')"
+              NAME="nightly-$(date +'%Y%m%d')"
+            fi
           else
             TAG="${{ github.event.inputs.tag_name }}"
             NAME="${{ github.event.inputs.tag_name }}"
@@ -139,7 +144,7 @@ jobs:
           name: ${{ steps.gen.outputs.name }}
           draft: ${{ steps.gen.outputs.draft }}
           prerelease: ${{ steps.gen.outputs.prerelease }}
-          files: upload/*
+          files: upload/**/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

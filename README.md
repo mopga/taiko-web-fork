@@ -69,6 +69,7 @@ Pre-built desktop packages are published by the CI workflow:
   - `tag_name` (необяз.) — если пусто, будет сгенерирован `nightly-YYYYMMDD-HHMM`
   - `prerelease` (bool) — по умолчанию `true`
   - `draft` (bool) — по умолчанию `false`
+- Артефакты раскладываются по платформенным подпапкам внутри `upload/` (Windows/macOS/Linux).
 - Требования:
   - В Settings → Actions → General → Workflow permissions включено **Read and write permissions**.
 
