@@ -2,7 +2,7 @@
 
 import inspect
 import os
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
@@ -16,29 +16,41 @@ def _data_tuple(relative_path):
     return []
 
 
+binaries = []
 datas = []
+hiddenimports = [
+    "flask",
+    "jinja2",
+    "websockets",
+    "uvicorn",
+    "waitress",
+    "werkzeug",
+    "markdown",
+    "importlib.metadata",
+    "pkg_resources",
+    "cffi",
+    "markupsafe",
+    "itsdangerous",
+    "click",
+]
+
 for folder in ("templates", "assets", "public", "standalone/static", "standalone/templates"):
     datas.extend(_data_tuple(folder))
 
-datas.extend(collect_data_files("jinja2", includes=["**/*.py", "**/*.json", "**/*.data"]))
+for module in ("jinja2", "markupsafe", "flask"):
+    module_datas, module_binaries, module_hiddenimports = collect_all(module)
+    datas.extend(module_datas)
+    binaries.extend(module_binaries)
+    hiddenimports.extend(module_hiddenimports)
+
+hiddenimports = list(dict.fromkeys(hiddenimports))
 
 a = Analysis(
     [os.path.join(project_root, "standalone", "run_desktop.py")],
     pathex=[project_root],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        "flask",
-        "jinja2",
-        "websockets",
-        "uvicorn",
-        "waitress",
-        "werkzeug",
-        "markdown",
-        "importlib.metadata",
-        "pkg_resources",
-        "cffi",
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

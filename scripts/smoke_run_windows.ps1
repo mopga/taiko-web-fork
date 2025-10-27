@@ -10,9 +10,14 @@ if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
 
-$process = Start-Process -FilePath $exe -ArgumentList "--port", "8000" -PassThru
+$log = Join-Path (Get-Location) "smoke_windows.log"
+if (Test-Path $log) {
+    Remove-Item $log -Force
+}
+$args = @("--host", "127.0.0.1", "--port", "8000")
+$process = Start-Process -FilePath $exe -ArgumentList $args -PassThru -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Hidden
 try {
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 60; $i++) {
         try {
             $response = Invoke-WebRequest -Uri "http://127.0.0.1:8000/healthz" -TimeoutSec 2
             if ($response.StatusCode -eq 200 -and $response.Content -match '"status":"ok"' -and $response.Content -match '"db":"sqlite"') {
@@ -22,9 +27,13 @@ try {
         } catch {
             Start-Sleep -Seconds 1
         }
-        Start-Sleep -Seconds 1
     }
-    throw "healthz failed"
+    Write-Error "healthz failed"
+    if (Test-Path $log) {
+        Write-Host "===== smoke_windows.log (tail) ====="
+        Get-Content $log -Tail 200 | Write-Host
+    }
+    exit 1
 } finally {
     if ($process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
