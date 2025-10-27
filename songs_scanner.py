@@ -158,6 +158,47 @@ _HANG_WATCHDOG_ARMED = False
 LEADER_LOCK_TTL_SECONDS = 300
 
 
+def _apply_empty_summary_defaults(
+    summary: Dict[str, object],
+    *,
+    reason: Optional[str] = None,
+    fs_checksum: Optional[str] = None,
+) -> None:
+    checksum_value = fs_checksum if fs_checksum else "-"
+    defaults: Dict[str, object] = {
+        'found': 0,
+        'inserted': 0,
+        'updated': 0,
+        'disabled': 0,
+        'errors': 0,
+        'skipped': 0,
+        'files_count': 0,
+        'songs_count_before': 0,
+        'songs_count_after': 0,
+        'manifest_documents': 0,
+        'fast_path': False,
+        'leader': False,
+        'leader_lost': False,
+        'skipped_due_to_leader': False,
+        'duration_seconds': 0.0,
+        'fs_checksum': checksum_value,
+        'checksum': checksum_value,
+        'manifest_checksum': '-',
+        'manifest_entry_checksum': '-',
+        'rehydrated': 0,
+    }
+    if reason and 'reason' not in summary:
+        defaults['reason'] = reason
+    for key, value in defaults.items():
+        summary.setdefault(key, value)
+
+
+def empty_scan_summary(*, reason: str = 'empty_library', fs_checksum: Optional[str] = None) -> Dict[str, object]:
+    summary: Dict[str, object] = {}
+    _apply_empty_summary_defaults(summary, reason=reason, fs_checksum=fs_checksum)
+    return summary
+
+
 def _posint_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or str(raw).strip() == "":
@@ -5465,6 +5506,7 @@ class SongScanner:
             'errors': 0,
             'skipped': 0,
         }
+        _apply_empty_summary_defaults(summary)
         self._active_summary = summary
         performed_scan = False
         refresher_stack = contextlib.ExitStack()
@@ -5530,12 +5572,16 @@ class SongScanner:
         )
         index_current = index_current or {}
         summary['files_count'] = files_count
-        summary['fs_checksum'] = checksum
+        checksum_value = checksum if isinstance(checksum, str) and checksum else None
+        _apply_empty_summary_defaults(summary, fs_checksum=checksum_value)
+        summary['fs_checksum'] = checksum if checksum_value else summary['fs_checksum']
+        summary['checksum'] = summary['fs_checksum']
 
         if not self.songs_dir.exists():
             LOGGER.warning("Songs directory %s does not exist", self.songs_dir)
             reason = 'digest_equal' if manifest_checksum == checksum and manifest_documents == files_count else 'digest_changed'
             summary['fast_path'] = True
+            _apply_empty_summary_defaults(summary, reason=reason, fs_checksum=checksum)
             self._log_scan_outcome(summary, fast_path=True, reason=reason)
             refresher_stack.close()
             self._active_refresher_stack = None
@@ -6205,17 +6251,34 @@ class SongScanner:
         if manifest_entry_checksum:
             summary['manifest_entry_checksum'] = manifest_entry_checksum
 
-        for cat_id, title in categories.items():
-            update = {
-                'id': cat_id,
-                'title': title,
-            }
-            existing_cat = self.db.categories.find_one({'id': cat_id})
-            if existing_cat:
-                self.db.categories.update_one({'id': cat_id}, {'$set': {'title': title}})
-            else:
-                update.setdefault('song_skin', None)
-                self.db.categories.insert_one(update)
+        categories_collection = getattr(self.db, 'categories', None)
+        find_category = getattr(categories_collection, 'find_one', None) if categories_collection is not None else None
+        update_category = getattr(categories_collection, 'update_one', None) if categories_collection is not None else None
+        insert_category = getattr(categories_collection, 'insert_one', None) if categories_collection is not None else None
+        if not (callable(find_category) and callable(update_category) and callable(insert_category)):
+            LOGGER.debug('Categories collection unavailable; skipping category synchronisation')
+        else:
+            for cat_id, title in categories.items():
+                update = {
+                    'id': cat_id,
+                    'title': title,
+                }
+                try:
+                    existing_cat = find_category({'id': cat_id})
+                except Exception:  # pragma: no cover - tolerate collection access issues
+                    LOGGER.debug('Failed to read category %s during scan', cat_id, exc_info=True)
+                    existing_cat = None
+                if existing_cat:
+                    try:
+                        update_category({'id': cat_id}, {'$set': {'title': title}})
+                    except Exception:  # pragma: no cover - tolerate update issues
+                        LOGGER.debug('Failed to update category %s title', cat_id, exc_info=True)
+                else:
+                    update.setdefault('song_skin', None)
+                    try:
+                        insert_category(update)
+                    except Exception:  # pragma: no cover - tolerate insert issues
+                        LOGGER.debug('Failed to insert category %s', cat_id, exc_info=True)
 
         missing_ids = set(managed_songs.keys()) - seen_song_ids
         for missing_id in sorted(missing_ids):
