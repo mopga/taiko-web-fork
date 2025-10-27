@@ -72,20 +72,28 @@ jobs:
             tar -C dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
           fi
 
-      - name: Ensure installer output dir exists (Windows)
+      # Install Inno Setup and build installer without any 3rd-party Actions
+      - name: Install Inno Setup (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          choco install innosetup --no-progress -y
+          "$env:Path"
+          # Ensure output dir exists (Inno can create it, но будет чище)
           New-Item -ItemType Directory -Force -Path "packaging/windows/Output" | Out-Null
 
-      - name: Build Windows installer
+      - name: Build Windows installer (ISCC)
         if: matrix.os == 'windows-latest'
-        uses: krproject/innosetup-action@v1
+        shell: pwsh
         env:
-          MyVersion: ${{ steps.version.outputs.value }}
+          MyVersion: ${{ github.ref_name }}
           MyDistDir: dist\backend\taiko-web-backend
-        with:
-          path: packaging/windows/taiko-backend.iss
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC not found at: $iscc"
+          }
+          & "$iscc" "packaging/windows/taiko-backend.iss" /DMyVersion="$env:MyVersion" /DMyDistDir="$env:MyDistDir"
 
       - name: Collect installer artifact (Windows)
         if: matrix.os == 'windows-latest'
