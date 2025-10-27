@@ -1,9 +1,25 @@
-name: Desktop Release
+name: desktop-release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag name for release (e.g. nightly-20251027-2130)"
+        required: false
+      prerelease:
+        description: "Mark as prerelease?"
+        type: boolean
+        default: true
+      draft:
+        description: "Create as draft instead of published?"
+        type: boolean
+        default: false
   push:
     tags:
       - "v*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -15,6 +31,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug event context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "repository=${{ github.repository }}"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -54,6 +76,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    if: >
+      github.event_name != 'pull_request' &&
+      (github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/main'))
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -71,10 +96,50 @@ jobs:
           path: dist/Linux
         continue-on-error: true
 
+      - name: Prepare upload directory
+        run: |
+          mkdir -p upload
+          if [ -d dist ]; then
+            cp -R dist/* upload/ 2>/dev/null || true
+          fi
+
+      - name: Generate tag and name
+        id: gen
+        shell: bash
+        run: |
+          if [ -z "${{ github.event.inputs.tag_name }}" ]; then
+            TAG="nightly-$(date +'%Y%m%d-%H%M')"
+            NAME="nightly-$(date +'%Y%m%d')"
+          else
+            TAG="${{ github.event.inputs.tag_name }}"
+            NAME="${{ github.event.inputs.tag_name }}"
+          fi
+          if [ -z "${{ github.event.inputs.draft }}" ]; then
+            DRAFT="false"
+          else
+            DRAFT="${{ github.event.inputs.draft }}"
+          fi
+          if [ -z "${{ github.event.inputs.prerelease }}" ]; then
+            PRERELEASE="true"
+          else
+            PRERELEASE="${{ github.event.inputs.prerelease }}"
+          fi
+          echo "tag=$TAG"  >> $GITHUB_OUTPUT
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "draft=$DRAFT" >> $GITHUB_OUTPUT
+          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
+        if: >
+          github.event_name != 'pull_request' &&
+          (github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/main'))
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/**/*
+          tag_name: ${{ steps.gen.outputs.tag }}
+          name: ${{ steps.gen.outputs.name }}
+          draft: ${{ steps.gen.outputs.draft }}
+          prerelease: ${{ steps.gen.outputs.prerelease }}
+          files: upload/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
