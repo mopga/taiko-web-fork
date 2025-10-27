@@ -17,10 +17,15 @@ $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
 $args = @("--host", "127.0.0.1", "--port", "8000")
-$process = Start-Process -FilePath $exe -ArgumentList $args -PassThru \
-    -RedirectStandardOutput $stdoutLog \
-    -RedirectStandardError $stderrLog \
-    -WindowStyle Hidden
+$startParams = @{
+    FilePath = $exe
+    ArgumentList = $args
+    PassThru = $true
+    RedirectStandardOutput = $stdoutLog
+    RedirectStandardError = $stderrLog
+    WindowStyle = 'Hidden'
+}
+$process = Start-Process @startParams
 
 try {
     for ($i = 0; $i -lt 60; $i++) {
