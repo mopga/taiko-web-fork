@@ -8,7 +8,7 @@
   #define MyDistDir "dist\\backend\\taiko-web-backend"
 #endif
 ; Sanitize version for filesystem/installer usage
-#define MyVersionSafe StrReplace(StrReplace(StrReplace(StrReplace(MyVersion, "/", "-"), "\\", "-"), ":", "-"), " ", "-")
+#define MyVersionSafe StringChange(StringChange(StringChange(StringChange(MyVersion, "/", "-"), "\\", "-"), ":", "-"), " ", "-")
 
 [Setup]
 AppName={#MyAppName}
