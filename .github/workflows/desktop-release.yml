@@ -35,6 +35,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          
+          Install-Module -Name powershell-yaml -Force -Scope CurrentUser
+          Import-Module powershell-yaml
 
           $backendScript = 'standalone/packaging/build_backend.py'
           if (-not (Test-Path $backendScript)) { throw "Missing backend build script at $backendScript" }
