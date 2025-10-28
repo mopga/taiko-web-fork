@@ -102,12 +102,14 @@ try:
 except Exception as exc:  # pragma: no cover - smoke guard
     raise SystemExit(f'Invalid JSON: {exc}')
 
-if isinstance(data, dict):
-    items = data.get('items', [])
+if isinstance(data, list):
+    pass
+elif isinstance(data, dict):
+    items = data.get('items')
+    if items is None:
+        items = []
     if not isinstance(items, list):
         raise SystemExit('Songs payload items is not a list')
-elif isinstance(data, list):
-    pass
 else:
     raise SystemExit('Songs payload must be a list or dict with items list')
 PY

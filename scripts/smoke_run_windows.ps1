@@ -133,37 +133,43 @@ try {
     }
 
     if ($null -eq $songsData) {
-        throw "Songs payload is empty"
+        throw "Songs payload is null"
     }
 
-    $songsObject = [System.Management.Automation.PSObject]::AsPSObject($songsData)
-    $songsBase = $songsObject.BaseObject
+    function Test-IsSongsEnumerable {
+        param($value)
+        if ($null -eq $value) { return $true }
+        if ($value -is [string]) { return $false }
+        if ($value -is [System.Collections.IDictionary]) { return $false }
+        if ($value -is [System.Management.Automation.PSObject]) { return $false }
+        return $value -is [System.Collections.IEnumerable]
+    }
 
-    if ($songsBase -is [System.Collections.IDictionary]) {
-        $itemsProp = $songsObject.Properties['items']
-        if (-not $itemsProp) {
+    if ($songsData -is [System.Array] -or ($songsData -isnot [System.Management.Automation.PSObject] -and (Test-IsSongsEnumerable $songsData))) {
+        # Accept bare arrays or other enumerables (except strings/dicts)
+        $null = $songsData
+    } else {
+        $itemsValue = $null
+        $itemsFound = $false
+        if ($songsData -is [System.Collections.IDictionary]) {
+            if ($songsData.Contains('items')) {
+                $itemsFound = $true
+                $itemsValue = $songsData['items']
+            }
+        } else {
+            $itemsProperty = $songsData.PSObject.Properties['items']
+            if ($itemsProperty) {
+                $itemsFound = $true
+                $itemsValue = $itemsProperty.Value
+            }
+        }
+
+        if (-not $itemsFound) {
             throw "Songs payload dictionary is missing items"
         }
 
-        $itemsValue = $itemsProp.Value
-        if ($null -eq $itemsValue) {
-            throw "Songs payload items is null"
-        }
-
-        $itemsObject = [System.Management.Automation.PSObject]::AsPSObject($itemsValue)
-        $itemsBase = $itemsObject.BaseObject
-        if ($itemsBase -is [string] -or $itemsBase -is [System.Collections.IDictionary]) {
+        if (-not (Test-IsSongsEnumerable $itemsValue)) {
             throw "Songs payload items is not an array"
-        }
-        if ($itemsBase -isnot [System.Collections.IEnumerable]) {
-            throw "Songs payload items is not an array"
-        }
-    } else {
-        if ($songsBase -is [string] -or $songsBase -is [System.Collections.IDictionary]) {
-            throw "Songs payload is not an array"
-        }
-        if ($songsBase -isnot [System.Collections.IEnumerable]) {
-            throw "Songs payload is not an array"
         }
     }
 

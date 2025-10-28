@@ -121,27 +121,38 @@ if not Path(_static_candidate).exists():
 STATIC_DIR = _static_candidate
 
 
-def _resolve_frontend_dir() -> Path:
-    candidates = [
+def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
+    raw_candidates = [
         Path(resource_path("taiko-web-backend", "_internal", "public")),
         Path(resource_path("taiko_web_backend", "_internal", "public")),
         Path(resource_path("client", "build")),
         Path(resource_path("web", "frontend")),
         Path(resource_path("public")),
     ]
+    candidates: list[Path] = []
     seen: set[str] = set()
-    for candidate in candidates:
-        path = candidate.resolve()
-        key = str(path)
+    for raw_candidate in raw_candidates:
+        try:
+            resolved = Path(raw_candidate).resolve()
+        except Exception:
+            resolved = Path(raw_candidate)
+        key = str(resolved)
         if key in seen:
             continue
         seen.add(key)
-        if path.exists():
-            return path
-    return candidates[0].resolve()
+        candidates.append(resolved)
+
+    if not candidates:
+        raise RuntimeError("No frontend directory candidates available")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate, tuple(candidates)
+
+    return candidates[0], tuple(candidates)
 
 
-FRONTEND_DIR = _resolve_frontend_dir()
+FRONTEND_DIR, FRONTEND_DIR_CANDIDATES = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
 
@@ -778,7 +789,7 @@ def create_app():
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
     global song_scanner, _song_watcher_handle
     global _mongo_dispatcher, _redis_dispatcher, _song_scanner_provider
-    global _startup_scan_started_at, _startup_scan_logged
+    global _startup_scan_started_at, _startup_scan_logged, _FRONTEND_WARNING_EMITTED
 
     setup_stdout_logging()
 
@@ -792,6 +803,19 @@ def create_app():
         static_url_path="/static",
     )
     app_instance.logger.info("run_profile=%s", RUN_PROFILE)
+    try:
+        frontend_dir_resolved = FRONTEND_DIR.resolve()
+    except Exception:
+        frontend_dir_resolved = FRONTEND_DIR
+    if frontend_dir_resolved.exists():
+        app_instance.logger.info("frontend_dir=%s", frontend_dir_resolved)
+    else:
+        candidate_strings = [str(path) for path in FRONTEND_DIR_CANDIDATES]
+        app_instance.logger.warning(
+            "frontend_dir=missing candidates=%s",
+            candidate_strings,
+        )
+        _FRONTEND_WARNING_EMITTED = True
     app_instance.config['RUN_PROFILE'] = RUN_PROFILE
     app_instance.config.setdefault('COMPRESS_MIN_SIZE', 1024)
     compress.init_app(app_instance)
