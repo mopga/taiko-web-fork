@@ -31,6 +31,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate desktop prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $backendScript = 'standalone/packaging/build_backend.py'
+          if (-not (Test-Path $backendScript)) {
+            throw "Missing backend build script at $backendScript"
+          }
+
+          $builderConfig = 'standalone/electron/electron-builder.yml'
+          if (-not (Test-Path $builderConfig)) {
+            throw "Missing electron-builder configuration at $builderConfig"
+          }
+
+          $builder = Get-Content $builderConfig | ConvertFrom-Yaml
+          if (-not $builder.win.icon) {
+            throw 'electron-builder configuration must define win.icon'
+          }
+
+          $iconPath = Join-Path 'standalone/electron' $builder.win.icon
+          if (-not (Test-Path $iconPath)) {
+            throw "Missing Windows icon referenced by electron-builder: $iconPath"
+          }
+
+          if ($builder.directories.buildResources) {
+            $resources = Join-Path 'standalone/electron' $builder.directories.buildResources
+            if (-not (Test-Path $resources)) {
+              throw "Missing buildResources directory referenced by electron-builder: $resources"
+            }
+          }
+
       - name: Validate launcher icon
         shell: pwsh
         run: |
@@ -54,14 +85,14 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
-          pip install pyinstaller pyinstaller-hooks-contrib
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
 
       - name: Install Electron dependencies
         working-directory: standalone/electron
         run: npm install
 
-      - name: Determine desktop version
+      - name: Determine desktop metadata
         id: version
         shell: pwsh
         run: |
@@ -69,7 +100,11 @@ jobs:
           if (-not $package.version) {
             throw 'Unable to read package version from standalone/electron/package.json'
           }
+          if (-not $package.productName) {
+            throw 'Unable to read productName from standalone/electron/package.json'
+          }
           "value=$($package.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "product=$($package.productName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build desktop bundle
         working-directory: ./standalone/electron
@@ -78,19 +113,69 @@ jobs:
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "true"
         run: npm run dist
 
+      - name: Verify backend bundle
+        shell: pwsh
+        run: |
+          $backendDir = 'standalone/dist/backend'
+          if (-not (Test-Path $backendDir)) {
+            throw "Backend staging directory missing: $backendDir"
+          }
+
+          $backendExe = Join-Path $backendDir 'taiko-web-backend.exe'
+          if (-not (Test-Path $backendExe)) {
+            throw "Backend executable missing: $backendExe"
+          }
+
+          $info = Get-Item $backendExe
+          if (-not $info.Length -or $info.Length -le 0) {
+            throw "Backend executable is empty: $backendExe"
+          }
+
       - name: Verify staging artifacts
         shell: pwsh
         run: |
-          $root = Resolve-Path 'standalone/electron/dist/win-unpacked'
-          $expected = @(
-            Join-Path $root 'Taiko Web Desktop.exe',
-            Join-Path $root 'backend/taiko-web-backend.exe',
-            Join-Path $root 'assets/launcher/app.ico'
-          )
-          foreach ($path in $expected) {
-            if (-not (Test-Path $path)) {
-              throw "Missing build artifact: $path"
+          $ErrorActionPreference = 'Stop'
+          $rootPath = (Resolve-Path 'standalone/electron/dist/win-unpacked').Path
+          if (-not (Test-Path $rootPath)) {
+            throw "Missing win-unpacked directory at $rootPath"
+          }
+
+          $productName = '${{ steps.version.outputs.product }}'
+          if (-not $productName) {
+            throw 'productName metadata was not provided'
+          }
+
+          $expectedMain = Join-Path $rootPath "$productName.exe"
+          if (-not (Test-Path $expectedMain)) {
+            $fallback = Get-ChildItem -Path $rootPath -Filter '*.exe' | Select-Object -First 1
+            if (-not $fallback) {
+              throw "Unable to find any executable in $rootPath"
             }
+            $expectedMain = $fallback.FullName
+          }
+
+          $pathsToCheck = @()
+          $pathsToCheck += $expectedMain
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend.exe')
+          $pathsToCheck += (Join-Path $rootPath 'assets/launcher/app.ico')
+          $pathsToCheck += (Join-Path $rootPath 'resources/app')
+
+          foreach ($item in $pathsToCheck) {
+            if (-not (Test-Path $item)) {
+              throw "Missing build artifact: $item"
+            }
+          }
+
+          Get-ChildItem -Path $rootPath -Recurse | Select-Object FullName, Length | Out-String | Write-Host
+
+      - name: Capture electron-builder effective config
+        shell: pwsh
+        run: |
+          $configPath = 'standalone/electron/dist/builder-effective-config.yaml'
+          if (Test-Path $configPath) {
+            Get-Content $configPath | Out-String | Write-Host
+          } else {
+            Write-Warning "builder-effective-config.yaml not found at $configPath"
           }
 
       - name: Install Inno Setup 6
@@ -130,6 +215,9 @@ jobs:
           if (-not $installer) {
             throw 'Installer executable was not produced'
           }
+          if (-not $installer.Length -or $installer.Length -le 0) {
+            throw "Installer file is empty: $($installer.FullName)"
+          }
           "path=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "name=$($installer.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -167,6 +255,8 @@ jobs:
             exit 1
           fi
           cp RELEASE_NOTES.md release/RELEASE_NOTES.md
+          echo "Release payload contents:"
+          ls -al release
 
       - name: Generate tag and name
         id: gen
