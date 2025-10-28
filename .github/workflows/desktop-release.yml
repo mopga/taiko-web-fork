@@ -226,9 +226,11 @@ jobs:
           }
 
           Write-Host "Using ISCC: $isccPath"
-          & $isccPath '/?'
+          $null = (& $isccPath '/?' | Out-Host)
+          $global:LASTEXITCODE = 0
 
           $env:ISCC_PATH = $isccPath
+          "ISCC_PATH=$isccPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build installer
         shell: pwsh
