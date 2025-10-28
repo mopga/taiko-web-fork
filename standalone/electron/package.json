@@ -1,6 +1,8 @@
 {
   "name": "taiko-web-desktop",
   "version": "0.1.0",
+  "description": "Electron-based desktop build of Taiko Web with bundled backend",
+  "author": "Taiko Web Contributors",
   "productName": "Taiko Web Desktop",
   "main": "main.js",
   "scripts": {
