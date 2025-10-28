@@ -9,11 +9,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "standalone" / "run_desktop.py"
 DIST = ROOT / "standalone" / "dist" / "backend"
 NAME = "taiko-web-backend"
+FRONTEND_BUILD = ROOT / "client" / "build"
 
 DATA_DIRS = [
     ("web/templates", "web/templates"),
     ("web/static", "web/static"),
-    # если SPA: ("frontend/dist", "frontend/dist"),
+    ("client/build", "taiko_web_backend/_internal/public"),
 ]
 
 
@@ -24,6 +25,10 @@ def add_data_arg(src_rel, dst_rel):
 
 def main():
     os.chdir(ROOT)
+    if not FRONTEND_BUILD.is_dir() or not (FRONTEND_BUILD / "index.html").is_file():
+        raise RuntimeError(
+            f"Frontend build not found at {FRONTEND_BUILD}. Did you run the build step?"
+        )
     args = [
         sys.executable,
         "-m",

@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
+from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+
+project_root = Path(__file__).resolve().parent
+frontend_build = project_root / 'client' / 'build'
 
 datas = []
 binaries = []
@@ -16,10 +20,13 @@ hiddenimports += collect_submodules('lock')
 
 datas += collect_data_files('config', include_py_files=False)
 
+if frontend_build.is_dir():
+    datas += Tree(str(frontend_build), prefix='taiko_web_backend/_internal/public').toc
+    datas += Tree(str(frontend_build), prefix='taiko-web-backend/_internal/public').toc
+
 extra_data = [
     (Path('templates'), 'web/templates'),
     (Path('public'), 'web/static'),
-    (Path('client') / 'build', 'client/build'),
     (Path('taiko_web_backend') / '_internal' / 'public', 'taiko_web_backend/_internal/public'),
     (Path('taiko-web-backend') / '_internal' / 'public', 'taiko-web-backend/_internal/public'),
 ]

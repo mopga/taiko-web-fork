@@ -122,12 +122,18 @@ STATIC_DIR = _static_candidate
 
 
 def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
-    raw_candidates = [
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    resource_candidates = [
         Path(resource_path("taiko-web-backend", "_internal", "public")),
         Path(resource_path("taiko_web_backend", "_internal", "public")),
         Path(resource_path("client", "build")),
         Path(resource_path("web", "frontend")),
         Path(resource_path("public")),
+    ]
+    raw_candidates = [
+        base / "taiko_web_backend" / "_internal" / "public",
+        base / "taiko-web-backend" / "_internal" / "public",
+        *resource_candidates,
     ]
     candidates: list[Path] = []
     seen: set[str] = set()
@@ -146,9 +152,17 @@ def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
         raise RuntimeError("No frontend directory candidates available")
 
     for candidate in candidates:
-        if candidate.exists():
+        try:
+            index_path = candidate / "index.html"
+        except TypeError:
+            continue
+        if candidate.exists() and index_path.exists():
             return candidate, tuple(candidates)
 
+    LOGGER.error(
+        "frontend_dir=missing; candidates=%s",
+        [str(candidate) for candidate in candidates],
+    )
     return candidates[0], tuple(candidates)
 
 

@@ -94,10 +94,10 @@ try {
         throw "Expected catalog source log not found"
     }
 
-    Invoke-SmokeRequest -Method Head -Path '/' -ExpectedStatus @(200) -Assertion {
+    Invoke-SmokeRequest -Method Get -Path '/' -ExpectedStatus @(200) -Assertion {
         param($resp)
-        if (-not $resp.Headers['Content-Type'] -or $resp.Headers['Content-Type'] -notmatch 'text/html') {
-            throw "Root content type unexpected: $($resp.Headers['Content-Type'])"
+        if (-not $resp.Content -or $resp.Content -notmatch '</html>') {
+            throw "Root HTML not served (status=$($resp.StatusCode))"
         }
     }
 
@@ -133,53 +133,22 @@ try {
         throw "Songs response content type unexpected: $songsContentType"
     }
 
-    $rawSongsBody = $songsResponse.Content
-    $songsJson = $null
-
     try {
-        $songsJson = Invoke-RestMethod -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5 -ErrorAction Stop
+        $songsJson = $songsResponse.Content | ConvertFrom-Json -ErrorAction Stop
     } catch {
-        try {
-            if ([string]::IsNullOrWhiteSpace($rawSongsBody)) {
-                $songsJson = @()
-            } else {
-                $songsJson = $rawSongsBody | ConvertFrom-Json -ErrorAction Stop
-            }
-        } catch {
-            Write-Host "---- /api/songs raw body ----"
-            Write-Host $rawSongsBody
-            throw "Songs response is not valid JSON: $($_.Exception.Message)"
-        }
+        Write-Host "---- /api/songs raw body ----"
+        Write-Host $songsResponse.Content
+        throw "Songs response is not valid JSON: $($_.Exception.Message)"
     }
 
-    function Is-ArrayLike {
-        param($value)
-        return ($value -is [System.Collections.IEnumerable]) -and -not ($value -is [string]) -and -not ($value -is [System.Collections.IDictionary])
-    }
-
-    if ($null -eq $songsJson) {
+    if (-not $songsJson) {
         $songsJson = @()
     }
 
-    if (Is-ArrayLike $songsJson) {
-        # ok: already an array-like payload
-    } elseif ($songsJson -is [System.Collections.IDictionary]) {
-        if (-not $songsJson.Contains('items')) {
-            Write-Host "---- /api/songs raw body (dict without items) ----"
-            Write-Host $rawSongsBody
-            throw "Songs payload dictionary is missing items"
-        }
-
-        $items = $songsJson['items']
-        if (-not (Is-ArrayLike $items)) {
-            Write-Host "---- /api/songs raw body ----"
-            Write-Host $rawSongsBody
-            throw "'items' is not an array"
-        }
-    } else {
+    if ($songsJson.GetType().Name -ne 'Object[]') {
         Write-Host "---- /api/songs raw body ----"
-        Write-Host $rawSongsBody
-        throw "Songs payload must be an array or an object with 'items' array"
+        Write-Host $songsResponse.Content
+        throw "/api/songs is not array"
     }
 
     try {

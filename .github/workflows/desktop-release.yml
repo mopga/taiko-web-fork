@@ -70,7 +70,29 @@ jobs:
             throw "Missing required build icon at $iconPath"
           }
 
-      - name: Setup Node
+      - name: Setup Node (frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install PNPM
+        run: corepack enable && corepack prepare pnpm@latest --activate
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: client
+        run: pnpm build
+
+      - name: Assert frontend build exists
+        run: test -f client/build/index.html
+        shell: bash
+
+      - name: Setup Node (electron)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
