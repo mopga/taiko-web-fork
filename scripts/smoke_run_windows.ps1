@@ -108,7 +108,18 @@ try {
         } catch {
             throw "Songs response is not valid JSON"
         }
-        if ($data -isnot [System.Array]) {
+
+        $baseObject = [System.Management.Automation.PSObject]::AsPSObject($data).BaseObject
+        if ($null -eq $baseObject) {
+            throw "Songs payload is not an array"
+        }
+        if ($baseObject -is [string]) {
+            throw "Songs payload is not an array"
+        }
+        if ($baseObject -is [System.Collections.IDictionary]) {
+            throw "Songs payload is not an array"
+        }
+        if ($baseObject -isnot [System.Collections.IEnumerable]) {
             throw "Songs payload is not an array"
         }
     }
