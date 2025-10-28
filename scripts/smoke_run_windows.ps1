@@ -103,50 +103,55 @@ try {
 
     Invoke-SmokeRequest -Method Head -Path '/favicon.ico' -ExpectedStatus @(200, 304)
 
-    $songsResponse = $null
     $songsDeadline = (Get-Date).AddSeconds(45)
+    $songsHeaders = $null
+    $songsStatus = $null
+    $songsData = $null
     while ((Get-Date) -lt $songsDeadline) {
+        $songsHeaders = $null
+        $songsStatus = $null
         try {
-            $candidate = Invoke-WebRequest -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5
+            $songsDataCandidate = Invoke-RestMethod -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5 -ResponseHeadersVariable songsHeaders -StatusCodeVariable songsStatus
         } catch {
+            if ($songsStatus -ne 200) {
+                Start-Sleep -Seconds 1
+                continue
+            }
+            $songsDataCandidate = $null
+        }
+
+        if ($songsStatus -ne 200) {
             Start-Sleep -Seconds 1
             continue
         }
 
-        if ($candidate.StatusCode -ne 200) {
-            Start-Sleep -Seconds 1
-            continue
-        }
-
-        $songsResponse = $candidate
+        $songsData = $songsDataCandidate
         break
     }
 
-    if (-not $songsResponse) {
+    if ($songsStatus -ne 200) {
         throw "Timed out waiting for /api/songs to return 200"
     }
 
-    try {
-        $songsData = $songsResponse.Content | ConvertFrom-Json
-    } catch {
-        throw "Songs response is not valid JSON"
+    if (-not $songsHeaders -or -not $songsHeaders['Content-Type'] -or $songsHeaders['Content-Type'] -notmatch 'application/json') {
+        throw "Songs response content type unexpected: $($songsHeaders['Content-Type'])"
     }
 
     if ($null -eq $songsData) {
-        throw "Songs payload is null"
+        $songsData = @()
     }
 
-    function Test-IsSongsEnumerable {
+    function Test-IsArrayLike {
         param($value)
         if ($null -eq $value) { return $true }
         if ($value -is [string]) { return $false }
         if ($value -is [System.Collections.IDictionary]) { return $false }
         if ($value -is [System.Management.Automation.PSObject]) { return $false }
-        return $value -is [System.Collections.IEnumerable]
+        if ($value -is [System.Collections.IEnumerable]) { return $true }
+        return $value -is [System.Array]
     }
 
-    if ($songsData -is [System.Array] -or ($songsData -isnot [System.Management.Automation.PSObject] -and (Test-IsSongsEnumerable $songsData))) {
-        # Accept bare arrays or other enumerables (except strings/dicts)
+    if (Test-IsArrayLike $songsData) {
         $null = $songsData
     } else {
         $itemsValue = $null
@@ -156,7 +161,7 @@ try {
                 $itemsFound = $true
                 $itemsValue = $songsData['items']
             }
-        } else {
+        } elseif ($songsData -is [System.Management.Automation.PSObject]) {
             $itemsProperty = $songsData.PSObject.Properties['items']
             if ($itemsProperty) {
                 $itemsFound = $true
@@ -168,7 +173,11 @@ try {
             throw "Songs payload dictionary is missing items"
         }
 
-        if (-not (Test-IsSongsEnumerable $itemsValue)) {
+        if ($null -eq $itemsValue) {
+            $itemsValue = @()
+        }
+
+        if (-not (Test-IsArrayLike $itemsValue)) {
             throw "Songs payload items is not an array"
         }
     }

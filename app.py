@@ -156,6 +156,23 @@ FRONTEND_DIR, FRONTEND_DIR_CANDIDATES = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
 
+def JSONResponse(
+    *,
+    content: Any,
+    status_code: int = 200,
+    headers: Optional[Mapping[str, str]] = None,
+    media_type: str = "application/json",
+) -> Response:
+    response = jsonify(content)
+    response.status_code = status_code
+    # Ensure the negotiated content type is explicit for downstream health checks.
+    response.headers["Content-Type"] = media_type
+    if headers:
+        for key, value in headers.items():
+            response.headers[key] = value
+    return response
+
+
 RUN_PROFILE = os.getenv("PROFILE") or os.getenv("RUN_PROFILE", "web")
 DESKTOP_DATA_DIR_ENV = "DATA_DIR"
 DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
@@ -2035,12 +2052,16 @@ def route_api_songs():
         search_value = ''
 
     if CATALOG_SOURCE == 'filesystem':
-        payload = _load_filesystem_catalog_entries(
-            limit=limit_value,
-            skip=skip_value,
-            category_value=category_value,
-            search_value=search_value,
-        )
+        try:
+            payload = _load_filesystem_catalog_entries(
+                limit=limit_value,
+                skip=skip_value,
+                category_value=category_value,
+                search_value=search_value,
+            )
+        except Exception as exc:
+            app.logger.warning('filesystem catalog error: %s', exc, exc_info=app.logger.isEnabledFor(logging.DEBUG))
+            payload = []
     else:
         unavailable = _desktop_mongo_unavailable_response(api=True)
         if unavailable is not None:
@@ -2052,7 +2073,10 @@ def route_api_songs():
             search_value=search_value,
         )
 
-    response = make_response(jsonify(payload))
+    if payload is None:
+        payload = []
+
+    response = JSONResponse(content=payload, media_type='application/json')
     _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
     return response
 
@@ -2142,7 +2166,7 @@ def route_api_song_detail(song_id: str):
             response.headers['ETag'] = quoted_etag
         return response
 
-    response = make_response(jsonify(payload))
+    response = JSONResponse(content=payload, media_type='application/json')
     if quoted_etag:
         response.headers['ETag'] = quoted_etag
     response.headers['Cache-Control'] = cache_control
