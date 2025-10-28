@@ -5,17 +5,14 @@ This is reworked taiko-web version.
 ## Improvements
 
   - docker compose run once for all
-  - add win desktop HTA app for running
+  - add win desktop bundle building
   - add support for ./song directrory scanningg
   - add support for TJA files auto-patsing
   - add support for auto-adding songs to MongoDb at startup
   - add support for JP and EN songs
 
-## How to negin
 
-U need to install Docker for your system
-
-## How to run
+## How to run DEV docker mode
 
 Make container:
 
@@ -29,7 +26,7 @@ Run it:
 docker compose up -d
 ```
 
-## Desktop run
+## Desktop run for DEV
 
 The desktop profile stores persistent data under `DATA_DIR` (defaults to
 `~/.taiko-web-data` when the variable is not set). Sessions live in
@@ -37,7 +34,7 @@ The desktop profile stores persistent data under `DATA_DIR` (defaults to
 default to `$DATA_DIR/logs` when file logging is enabled. This directory also
 contains the `songs/` subfolder used by the scanner.
 
-### Quick start
+### Quick start standalone DEV version
 
 ```bash
 # Unix/macOS shell
