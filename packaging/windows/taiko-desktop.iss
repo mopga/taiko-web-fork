@@ -90,7 +90,7 @@ Source: "{#SOURCE_DIR}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 [Icons]
 Name: "{autoprograms}\Taiko Web Desktop"; Filename: "{app}\{#MAIN_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
 Name: "{autodesktop}\Taiko Web Desktop"; Filename: "{app}\{#MAIN_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
-Name: "{autoprograms}\Taiko Web Desktop Songs"; Filename: "explorer.exe"; Parameters: ""{app}\songs""; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
+Name: "{autoprograms}\Taiko Web Desktop Songs"; Filename: "{win}\explorer.exe"; Parameters: """{app}\songs"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
 
 [Run]
 Filename: "{app}\{#MAIN_EXE}"; Description: "Launch Taiko Web Desktop"; Flags: nowait postinstall skipifsilent
