@@ -4,8 +4,8 @@
   "productName": "Taiko Web Desktop",
   "main": "main.js",
   "scripts": {
-    "prebuild:backend": "python standalone/packaging/build_backend.py",
-    "build:backend": "python standalone/packaging/build_backend.py",
+    "prebuild:backend": "python ../packaging/build_backend.py",
+    "build:backend": "python ../packaging/build_backend.py",
     "dev": "cross-env ELECTRON_DEV=1 electron .",
     "build": "npm run build:backend && electron-builder --dir",
     "dist": "npm run build:backend && electron-builder --win --dir",
