@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          
+
           Install-Module -Name powershell-yaml -Force -Scope CurrentUser
           Import-Module powershell-yaml
 
@@ -194,17 +194,41 @@ jobs:
           } else {
             Write-Warning "builder-effective-config.yaml not found at $configPath"
           }
-
-      - name: Install Inno Setup 6
-        id: innosetup
+      - name: Ensure Inno Setup & resolve ISCC.exe
         shell: pwsh
         run: |
-          choco install innosetup --version=6.2.2 -y --no-progress
-          $isccPath = "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $isccPath)) {
-            throw "ISCC.exe not found at $isccPath"
+          $ErrorActionPreference = 'Stop'
+
+          # 1) Если уже установлен — не трогаем. Иначе ставим/обновляем.
+          $exists = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $exists) {
+            choco upgrade innosetup -y --no-progress
           }
-          "iscc=$isccPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          # 2) Находим ISCC.exe надёжно (PATH, Program Files, Program Files (x86))
+          $candidates = @()
+
+          $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if ($cmd) {
+            $candidates += $cmd.Source
+          }
+
+          $pf = $env:ProgramFiles
+          if ($pf) { $candidates += Join-Path $pf 'Inno Setup 6\ISCC.exe' }
+
+          $pf86 = ${env:ProgramFiles(x86)}
+          if ($pf86) { $candidates += Join-Path $pf86 'Inno Setup 6\ISCC.exe' }
+
+          $isccPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $isccPath) {
+            throw "ISCC.exe not found. Tried: `n$($candidates -join "`n")"
+          }
+
+          Write-Host "Using ISCC: $isccPath"
+          & $isccPath '/?'
+
+          $env:ISCC_PATH = $isccPath
 
       - name: Build installer
         shell: pwsh
@@ -212,7 +236,7 @@ jobs:
           TAIKO_DESKTOP_VERSION: ${{ steps.version.outputs.value }}
           DESKTOP_STAGING_DIR: ${{ github.workspace }}\standalone\electron\dist\win-unpacked
           TAIKO_INSTALLER_OUTPUT: ${{ github.workspace }}\standalone\electron\dist\installer
-          ISCC_PATH: ${{ steps.innosetup.outputs.iscc }}
+          ISCC_PATH: ${{ steps.innosetup.outputs.isccPath }}
         run: |
           $outDir = '${{ github.workspace }}\standalone\electron\dist\installer'
           if (Test-Path $outDir) {
