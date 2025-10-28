@@ -72,11 +72,11 @@ jobs:
           "value=$($package.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build desktop bundle
-        working-directory: standalone/electron
+        working-directory: ${{ github.workspace }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "true"
-        run: npm run dist
+        run: npm run dist --workspace ./standalone/electron
 
       - name: Verify staging artifacts
         shell: pwsh
