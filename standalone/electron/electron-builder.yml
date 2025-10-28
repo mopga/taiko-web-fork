@@ -28,7 +28,7 @@ win:
     - target: dir
       arch:
         - x64
-  icon: ../assets/launcher/app.ico
+  icon: build/icons/icon.ico
   artifactName: "TaikoWebDesktop-${version}-win-unpacked"
 
 mac:
