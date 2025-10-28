@@ -101,20 +101,28 @@ Type: dirifempty; Name: "{app}"
 [Code]
 procedure EnsureDesktopConfig;
 var
-  ConfigDir, ConfigPath, SongsDir, Payload: string;
+  ConfigDir, ConfigPath, SongsDir, EscSongsDir, Payload: string;
+
 begin
   ConfigDir := ExpandConstant('{userappdata}\Taiko Web Desktop');
-  ConfigPath := ConfigDir + '\\config.json';
+  ConfigPath := ConfigDir + '\config.json';
   SongsDir := ExpandConstant('{app}\songs');
-  ForceDirectories(ConfigDir);
-  ForceDirectories(SongsDir);
+
+  if not ForceDirectories(ConfigDir) then
+    Log('Failed to create ' + ConfigDir);
+  if not ForceDirectories(SongsDir) then
+    Log('Failed to create ' + SongsDir);
+
   if not FileExists(ConfigPath) then
   begin
-    Payload := '{ "songs_dir": "' + StringChange(SongsDir, '\\', '\\\\') + '" }';
+    EscSongsDir := SongsDir;
+    StringChange(EscSongsDir, '\', '\\');
+    StringChange(EscSongsDir, '"', '\"');
+
+    Payload := '{ "songs_dir": "' + EscSongsDir + '" }';
+
     if not SaveStringToFile(ConfigPath, Payload, False) then
-    begin
       Log('Failed to write desktop config to ' + ConfigPath);
-    end;
   end;
 end;
 
