@@ -1,74 +1,12 @@
 import json
 import re
+import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
-import sys
-import types
+from tests._helpers import load_app_module
 
-class _StubCollection:
-    def create_index(self, *args, **kwargs):
-        return None
-
-    def drop_index(self, *args, **kwargs):
-        return None
-
-    def update_one(self, *args, **kwargs):
-        return None
-
-
-class _StubDatabase:
-    def __init__(self):
-        self.users = _StubCollection()
-        self.songs = _StubCollection()
-        self.scores = _StubCollection()
-        self.song_scanner_state = _StubCollection()
-        self.counters = _StubCollection()
-
-
-class _StubMongoClient:
-    def __init__(self, *args, **kwargs):
-        self._db = _StubDatabase()
-
-    def __getitem__(self, name):
-        return self._db
-
-
-class _StubRedis:
-    def __init__(self, *args, **kwargs):
-        pass
-
-class _StubCache:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def init_app(self, *args, **kwargs):
-        pass
-
-    def cached(self, *args, **kwargs):
-        def _decorator(func):
-            return func
-        return _decorator
-
-class _StubSession:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def init_app(self, *args, **kwargs):
-        pass
-
-sys.modules.setdefault('redis', types.SimpleNamespace(Redis=_StubRedis))
-sys.modules.setdefault('flask_caching', types.SimpleNamespace(Cache=_StubCache))
-sys.modules.setdefault('flask_session', types.SimpleNamespace(Session=_StubSession))
-
-with mock.patch('pymongo.MongoClient', new=_StubMongoClient):
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    import app as taiko_app
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-import app as taiko_app
+taiko_app = load_app_module()
 
 
 class _ManifestCursor:
@@ -221,6 +159,9 @@ class SongsApiTestCase(unittest.TestCase):
     def setUp(self):
         self.app = taiko_app.app
         self.client = self.app.test_client()
+        catalog_patch = mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'mongo')
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
 
     def _patch_collections(self, manifest_entries, manifest_meta, songs_docs):
         manifest_collection = _ManifestCollection(manifest_entries, manifest_meta)
@@ -415,6 +356,19 @@ class SongsApiTestCase(unittest.TestCase):
 
         self.assertEqual(len(payload), len(songs_docs))
         self.assertEqual({item['id'] for item in payload}, {'song-1', 'song-2'})
+
+    def test_api_songs_filesystem_empty_returns_empty_list(self):
+        manifest_entries: list[dict] = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'fs-empty', 'count': 0}
+        songs_docs: list[dict] = []
+        manifest_store = _ManifestCollection(manifest_entries, manifest_meta)
+        songs_store = _SongsCollection(songs_docs)
+        with mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'filesystem'), \
+             mock.patch.object(taiko_app, '_get_manifest_store', return_value=manifest_store), \
+             mock.patch.object(taiko_app, '_get_song_store', return_value=songs_store):
+            response = self.client.get('/api/songs')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), [])
 
     def test_preserve_source_type(self):
         manifest_entries = []

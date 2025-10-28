@@ -80,15 +80,48 @@ ArchitecturesInstallIn64BitMode=x64
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Dirs]
+Name: "{app}\songs"; Flags: uninsneveruninstall
+Name: "{userappdata}\Taiko Web Desktop"; Flags: uninsneveruninstall
+
 [Files]
 Source: "{#SOURCE_DIR}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\Taiko Web Desktop"; Filename: "{app}\{#MAIN_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
 Name: "{autodesktop}\Taiko Web Desktop"; Filename: "{app}\{#MAIN_EXE}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
+Name: "{autoprograms}\Taiko Web Desktop Songs"; Filename: "explorer.exe"; Parameters: '"""{app}\songs"""'; WorkingDir: "{app}"; IconFilename: "{app}\assets\launcher\app.ico"
 
 [Run]
 Filename: "{app}\{#MAIN_EXE}"; Description: "Launch Taiko Web Desktop"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}"
+Type: dirifempty; Name: "{app}"
+
+[Code]
+procedure EnsureDesktopConfig;
+var
+  ConfigDir, ConfigPath, SongsDir, Payload: string;
+begin
+  ConfigDir := ExpandConstant('{userappdata}\Taiko Web Desktop');
+  ConfigPath := ConfigDir + '\\config.json';
+  SongsDir := ExpandConstant('{app}\songs');
+  ForceDirectories(ConfigDir);
+  ForceDirectories(SongsDir);
+  if not FileExists(ConfigPath) then
+  begin
+    Payload := '{ "songs_dir": "' + StringChange(SongsDir, '\\', '\\\\') + '" }';
+    if not SaveStringToFile(ConfigPath, Payload, False) then
+    begin
+      Log('Failed to write desktop config to ' + ConfigPath);
+    end;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    EnsureDesktopConfig;
+  end;
+end;

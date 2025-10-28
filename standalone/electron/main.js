@@ -16,6 +16,9 @@ let backendUrl = null;
 let backendReady = false;
 let isShuttingDown = false;
 let failureDialogOpen = false;
+let songsDir = '';
+let configPath = '';
+let desktopConfig = {};
 
 log.transports.file.level = 'info';
 log.info('Starting Taiko Web Desktop');
@@ -37,8 +40,16 @@ app.on('second-instance', () => {
   }
 });
 
-const songsDir = resolveDirectory('SONGS_DIR', path.join(app.getPath('music'), 'TaikoSongs'));
 const dataDir = resolveDirectory('DATA_DIR', app.getPath('userData'));
+({ songsDir, configPath, config: desktopConfig } = ensureDesktopConfig());
+const envSongsOverride = process.env.TAIKO_SONGS_DIR || process.env.SONGS_DIR;
+if (envSongsOverride) {
+  songsDir = path.resolve(envSongsOverride);
+  ensureDirectoryExists(songsDir);
+  log.info('Using songs directory override from environment at', songsDir);
+}
+log.info('Desktop config path', configPath);
+log.info('Songs directory configured at', songsDir);
 
 ipcMain.handle('open-songs-folder', async () => openSongsFolder());
 ipcMain.handle('toggle-fullscreen', async () => toggleFullscreen());
@@ -54,6 +65,67 @@ function resolveDirectory(envKey, fallbackPath) {
     fs.mkdirSync(target, { recursive: true });
   }
   return target;
+}
+
+function ensureDirectoryExists(targetPath) {
+  if (!fs.existsSync(targetPath)) {
+    fs.mkdirSync(targetPath, { recursive: true });
+  }
+  return targetPath;
+}
+
+function ensureDesktopConfig() {
+  const userDataDir = app.getPath('userData');
+  ensureDirectoryExists(userDataDir);
+  const targetConfigPath = path.join(userDataDir, 'config.json');
+  let needsPersist = false;
+  let configData = {};
+
+  if (fs.existsSync(targetConfigPath)) {
+    try {
+      const raw = fs.readFileSync(targetConfigPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        configData = parsed;
+      } else {
+        needsPersist = true;
+      }
+    } catch (error) {
+      log.warn('Failed to parse desktop config, recreating.', error);
+      needsPersist = true;
+    }
+  } else {
+    needsPersist = true;
+  }
+
+  const defaultSongsDir = path.join(resolveInstallRoot(), 'songs');
+  let configuredSongsDir = '';
+  if (configData && typeof configData.songs_dir === 'string') {
+    configuredSongsDir = configData.songs_dir.trim();
+  }
+  if (!configuredSongsDir) {
+    configuredSongsDir = defaultSongsDir;
+    needsPersist = true;
+  }
+
+  const absoluteSongsDir = path.resolve(configuredSongsDir);
+  if (configData.songs_dir !== absoluteSongsDir) {
+    configData.songs_dir = absoluteSongsDir;
+    needsPersist = true;
+  }
+
+  ensureDirectoryExists(absoluteSongsDir);
+
+  if (needsPersist) {
+    try {
+      fs.writeFileSync(targetConfigPath, JSON.stringify({ songs_dir: absoluteSongsDir }, null, 2), 'utf-8');
+      log.info('Persisted desktop config to', targetConfigPath);
+    } catch (error) {
+      log.error('Failed to persist desktop config', error);
+    }
+  }
+
+  return { songsDir: absoluteSongsDir, configPath: targetConfigPath, config: configData };
 }
 
 function resolveInstallRoot() {
@@ -339,12 +411,39 @@ function spawnBackend(port) {
     DATA_DIR: dataDir,
     SONGS_DIR: songsDir,
   };
-  const child = spawn(backendPath, [], {
+  env.TAIKO_SONGS_DIR = songsDir;
+  env.SONGS_DIR = songsDir;
+  if (configPath) {
+    env.TAIKO_DESKTOP_CONFIG_PATH = configPath;
+  }
+  const child = spawn(backendPath, ['--songs-dir', songsDir], {
     env,
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
     windowsHide: true,
   });
+  if (child.stdout) {
+    child.stdout.setEncoding('utf-8');
+    child.stdout.on('data', (chunk) => {
+      chunk
+        .toString()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .forEach((line) => log.info('[backend]', line));
+    });
+  }
+  if (child.stderr) {
+    child.stderr.setEncoding('utf-8');
+    child.stderr.on('data', (chunk) => {
+      chunk
+        .toString()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .forEach((line) => log.error('[backend]', line));
+    });
+  }
   child.once('error', (error) => {
     log.error('Backend process error', error);
     if (!isShuttingDown) {
@@ -368,18 +467,25 @@ function spawnBackend(port) {
   return child;
 }
 
-function httpRequest(method, url, timeout = 1000) {
+function httpRequest(method, url, timeout = 1000, allowedStatuses = []) {
   return new Promise((resolve, reject) => {
     const request = http.request(url, { method, timeout }, (response) => {
-      if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+      const statusCode = response.statusCode ?? 0;
+      const acceptable =
+        (statusCode >= 200 && statusCode < 300) || allowedStatuses.includes(statusCode);
+      if (acceptable) {
         response.resume();
-        resolve(true);
+        resolve({ statusCode });
       } else {
-        reject(new Error(`Unexpected status: ${response.statusCode}`));
+        const error = new Error(`Unexpected status: ${statusCode}`);
+        error.statusCode = statusCode;
+        reject(error);
       }
     });
     request.on('timeout', () => {
-      request.destroy(new Error('Request timed out'));
+      const timeoutError = new Error('Request timed out');
+      timeoutError.code = 'ETIMEDOUT';
+      request.destroy(timeoutError);
     });
     request.on('error', reject);
     request.end();
@@ -417,12 +523,30 @@ async function initiateShutdown() {
   backendReady = false;
   log.info('Initiating graceful shutdown');
 
+  let shutdownStatus = null;
   if (!process.env.ELECTRON_BACKEND_URL && backendUrl) {
     try {
-      await httpRequest('POST', `${normalizeBaseUrl(backendUrl)}/shutdown`, 1000);
-      log.info('Requested backend shutdown via HTTP');
+      const response = await httpRequest(
+        'POST',
+        `${normalizeBaseUrl(backendUrl)}/admin/shutdown`,
+        1500,
+        [404],
+      );
+      shutdownStatus = response.statusCode;
+      if (shutdownStatus === 404) {
+        log.info('Backend shutdown endpoint unavailable (404); will terminate process manually.');
+      } else {
+        log.info('Requested backend shutdown via HTTP');
+      }
     } catch (error) {
-      log.warn('Failed to request backend shutdown', error.message);
+      if (error && error.statusCode === 404) {
+        shutdownStatus = 404;
+        log.info('Backend shutdown endpoint returned 404; terminating manually.');
+      } else if (error && error.code === 'ETIMEDOUT') {
+        log.warn('Backend shutdown request timed out; forcing termination.');
+      } else {
+        log.warn('Failed to request backend shutdown', error ? error.message : error);
+      }
     }
   }
 
@@ -436,19 +560,35 @@ async function initiateShutdown() {
         }
       };
 
-      const timer = setTimeout(() => {
+      const shutdownTimeoutMs = 1500;
+      let timer = null;
+      const forceTerminate = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         if (backendProcess && backendProcess.pid) {
           log.warn('Forcing backend termination');
           treeKill(backendProcess.pid, 'SIGKILL', cleanup);
         } else {
           cleanup();
         }
-      }, 5000);
+      };
+
+      timer = setTimeout(forceTerminate, shutdownTimeoutMs);
 
       backendProcess.once('exit', () => {
-        clearTimeout(timer);
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         cleanup();
       });
+
+      if (shutdownStatus === 404) {
+        forceTerminate();
+        return;
+      }
 
       try {
         if (isWindows) {
@@ -462,8 +602,7 @@ async function initiateShutdown() {
         }
       } catch (error) {
         log.warn('Error sending SIGTERM to backend', error.message);
-        clearTimeout(timer);
-        cleanup();
+        forceTerminate();
       }
     });
   }
