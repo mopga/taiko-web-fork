@@ -22,7 +22,6 @@ datas += collect_data_files('config', include_py_files=False)
 
 if frontend_build.is_dir():
     datas += Tree(str(frontend_build), prefix='taiko_web_backend/_internal/public').toc
-    datas += Tree(str(frontend_build), prefix='taiko-web-backend/_internal/public').toc
 
 extra_data = [
     (Path('templates'), 'web/templates'),

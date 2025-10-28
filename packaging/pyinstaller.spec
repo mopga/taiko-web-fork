@@ -41,7 +41,6 @@ for folder in ("templates", "assets", "public", "standalone/static", "standalone
 
 if os.path.isdir(frontend_build):
     datas.extend(Tree(frontend_build, prefix="taiko_web_backend/_internal/public").toc)
-    datas.extend(Tree(frontend_build, prefix="taiko-web-backend/_internal/public").toc)
 
 for module in ("jinja2", "markupsafe", "flask"):
     module_datas, module_binaries, module_hiddenimports = collect_all(module)

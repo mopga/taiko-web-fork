@@ -141,14 +141,15 @@ try {
         throw "Songs response is not valid JSON: $($_.Exception.Message)"
     }
 
-    if (-not $songsJson) {
-        $songsJson = @()
+    if ($null -eq $songsJson) {
+        $songsArray = @()
+    } else {
+        $songsArray = @($songsJson)
     }
-
-    if ($songsJson.GetType().Name -ne 'Object[]') {
+    if (-not ($songsArray -is [System.Collections.IEnumerable])) {
         Write-Host "---- /api/songs raw body ----"
         Write-Host $songsResponse.Content
-        throw "/api/songs is not array"
+        throw "/api/songs: not an enumerable"
     }
 
     try {
