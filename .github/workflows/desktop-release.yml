@@ -195,60 +195,103 @@ jobs:
             Write-Warning "builder-effective-config.yaml not found at $configPath"
           }
       - name: Ensure Inno Setup & resolve ISCC.exe
+        id: innosetup
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           # 1) Если уже установлен — не трогаем. Иначе ставим/обновляем.
           $exists = Get-Command iscc.exe -ErrorAction SilentlyContinue
-          if (-not $exists) {
+          if (-not $exists -and -not $env:ISCC_PATH) {
             choco upgrade innosetup -y --no-progress
           }
 
-          # 2) Находим ISCC.exe надёжно (PATH, Program Files, Program Files (x86))
-          $candidates = @()
+          # 0) Надёжно резолвим путь к ISCC
+          $iscc = $env:ISCC_PATH
+          if (-not $iscc) {
+            # fallback: попробуем найти в PATH
+            $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
 
-          $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
-          if ($cmd) {
-            $candidates += $cmd.Source
+            if (-not $iscc) {
+              $candidates = @()
+              $pf = $env:ProgramFiles
+              if ($pf) { $candidates += Join-Path $pf 'Inno Setup 6\ISCC.exe' }
+              $pf86 = ${env:ProgramFiles(x86)}
+              if ($pf86) { $candidates += Join-Path $pf86 'Inno Setup 6\ISCC.exe' }
+              $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            }
           }
 
-          $pf = $env:ProgramFiles
-          if ($pf) { $candidates += Join-Path $pf 'Inno Setup 6\ISCC.exe' }
+          # нормализуем строку (снимем кавычки и пробелы/CRLF)
+          if ($iscc) { $iscc = $iscc.Trim(" `t`r`n'`"") }
 
-          $pf86 = ${env:ProgramFiles(x86)}
-          if ($pf86) { $candidates += Join-Path $pf86 'Inno Setup 6\ISCC.exe' }
-
-          $isccPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          if (-not $isccPath) {
-            throw "ISCC.exe not found. Tried: `n$($candidates -join "`n")"
+          # финальная проверка
+          if (-not $iscc -or -not (Test-Path $iscc)) {
+            throw "ISCC_PATH is invalid or empty. Got: '$($env:ISCC_PATH)'; resolved: '$iscc'"
           }
 
-          Write-Host "Using ISCC: $isccPath"
-          $null = (& $isccPath '/?' | Out-Host)
-          $global:LASTEXITCODE = 0
-
-          $env:ISCC_PATH = $isccPath
-          "ISCC_PATH=$isccPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Using ISCC: $iscc"
+          $env:ISCC_PATH = $iscc
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "isccPath=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build installer
         shell: pwsh
+        working-directory: ${{ github.workspace }}
         env:
           TAIKO_DESKTOP_VERSION: ${{ steps.version.outputs.value }}
           DESKTOP_STAGING_DIR: ${{ github.workspace }}\standalone\electron\dist\win-unpacked
           TAIKO_INSTALLER_OUTPUT: ${{ github.workspace }}\standalone\electron\dist\installer
           ISCC_PATH: ${{ steps.innosetup.outputs.isccPath }}
         run: |
-          $outDir = '${{ github.workspace }}\standalone\electron\dist\installer'
-          if (Test-Path $outDir) {
-            Remove-Item $outDir -Recurse -Force
+          $ErrorActionPreference = 'Stop'
+
+          # Подготовим выходную директорию заранее, чтобы Resolve-Path сработал
+          $outDirRaw = $env:TAIKO_INSTALLER_OUTPUT
+          if ([string]::IsNullOrWhiteSpace($outDirRaw)) { throw 'TAIKO_INSTALLER_OUTPUT is not set' }
+          if (Test-Path $outDirRaw) {
+            Remove-Item $outDirRaw -Recurse -Force
           }
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          & $env:ISCC_PATH 'packaging\windows\taiko-desktop.iss'
-          if ($LASTEXITCODE -ne 0) {
-            throw "ISCC compilation failed with exit code $LASTEXITCODE"
+          New-Item -ItemType Directory -Force -Path $outDirRaw | Out-Null
+
+          # 0) Надёжно резолвим путь к ISCC
+          $iscc = $env:ISCC_PATH
+          if (-not $iscc) {
+            # fallback: попробуем найти в PATH
+            $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
           }
+
+          # нормализуем строку (снимем кавычки и пробелы/CRLF)
+          if ($iscc) { $iscc = $iscc.Trim(" `t`r`n'`"") }
+
+          # финальная проверка
+          if (-not $iscc -or -not (Test-Path $iscc)) {
+            throw "ISCC_PATH is invalid or empty. Got: '$($env:ISCC_PATH)'; resolved: '$iscc'"
+          }
+
+          Write-Host "Using ISCC: $iscc"
+
+          # 1) Подготовим параметры
+          $version = $env:TAIKO_DESKTOP_VERSION
+          $stage   = (Resolve-Path $env:DESKTOP_STAGING_DIR)
+          $outDir  = (Resolve-Path $env:TAIKO_INSTALLER_OUTPUT)
+          $iss     = (Resolve-Path 'packaging/windows/taiko-desktop.iss')
+
+          # sanity-check инпутов
+          @($stage, $outDir, $iss) | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Path not found: $_" }
+          }
+
+          # 2) Вызов ISCC — строго в кавычках
+          & "$iscc" `
+            "/DMyVersion=$version" `
+            "/DMyDistDir=$stage" `
+            "/DMyOutputDir=$outDir" `
+            "$iss"
+
+          if ($LASTEXITCODE -ne 0) { throw "ISCC compilation failed with exit code $LASTEXITCODE" }
 
       - name: Collect installer artifact
         id: installer
