@@ -26,7 +26,6 @@ if frontend_build.is_dir():
 extra_data = [
     (Path('templates'), 'web/templates'),
     (Path('public'), 'web/static'),
-    (Path('taiko_web_backend') / '_internal' / 'public', 'taiko_web_backend/_internal/public'),
 ]
 for source_path, target in extra_data:
     if source_path.exists():
