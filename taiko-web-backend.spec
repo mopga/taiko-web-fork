@@ -20,6 +20,8 @@ extra_data = [
     (Path('templates'), 'web/templates'),
     (Path('public'), 'web/static'),
     (Path('client') / 'build', 'client/build'),
+    (Path('taiko_web_backend') / '_internal' / 'public', 'taiko_web_backend/_internal/public'),
+    (Path('taiko-web-backend') / '_internal' / 'public', 'taiko-web-backend/_internal/public'),
 ]
 for source_path, target in extra_data:
     if source_path.exists():

@@ -221,6 +221,9 @@ class SongsApiTestCase(unittest.TestCase):
     def setUp(self):
         self.app = taiko_app.app
         self.client = self.app.test_client()
+        catalog_patch = mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'mongo')
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
 
     def _patch_collections(self, manifest_entries, manifest_meta, songs_docs):
         manifest_collection = _ManifestCollection(manifest_entries, manifest_meta)
@@ -415,6 +418,19 @@ class SongsApiTestCase(unittest.TestCase):
 
         self.assertEqual(len(payload), len(songs_docs))
         self.assertEqual({item['id'] for item in payload}, {'song-1', 'song-2'})
+
+    def test_api_songs_filesystem_empty_returns_empty_list(self):
+        manifest_entries: list[dict] = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'fs-empty', 'count': 0}
+        songs_docs: list[dict] = []
+        manifest_store = _ManifestCollection(manifest_entries, manifest_meta)
+        songs_store = _SongsCollection(songs_docs)
+        with mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'filesystem'), \
+             mock.patch.object(taiko_app, '_get_manifest_store', return_value=manifest_store), \
+             mock.patch.object(taiko_app, '_get_song_store', return_value=songs_store):
+            response = self.client.get('/api/songs')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), [])
 
     def test_preserve_source_type(self):
         manifest_entries = []

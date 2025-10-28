@@ -15,7 +15,7 @@ import threading
 import signal
 import time
 import unicodedata
-from typing import Callable, Iterable, Mapping, Optional, cast
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, cast
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -607,6 +607,92 @@ def _resolve_catalog_assume_valid() -> bool:
     return False
 
 
+def _normalize_catalog_source_token(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    token = str(value).strip().lower()
+    if not token:
+        return None
+    mapping = {
+        "mongo": "mongo",
+        "mongodb": "mongo",
+        "db": "mongo",
+        "filesystem": "filesystem",
+        "fs": "filesystem",
+        "file": "filesystem",
+        "file_system": "filesystem",
+    }
+    return mapping.get(token)
+
+
+def _host_value_is_configured(value: object) -> bool:
+    if isinstance(value, str):
+        tokens = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        tokens = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        return False
+    if not tokens:
+        return False
+    default_hosts = {"127.0.0.1:27017", "localhost:27017"}
+    return any(token not in default_hosts for token in tokens)
+
+
+def _has_valid_mongo_dsn(*, config_module: object) -> bool:
+    string_candidates = [
+        os.environ.get("CATALOG_MONGO_DSN"),
+        os.environ.get("MONGO_DSN"),
+        os.environ.get("TAIKO_WEB_MONGO_URI"),
+        os.environ.get("MONGO_URI"),
+    ]
+    config_mongo = getattr(config_module, "MONGO", None)
+    if isinstance(config_mongo, Mapping):
+        string_candidates.extend([
+            config_mongo.get("uri"),
+            config_mongo.get("dsn"),
+        ])
+        host_candidate = config_mongo.get("host")
+    else:
+        host_candidate = None
+    for candidate in string_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return True
+    host_env_names = ("TAIKO_WEB_MONGO_HOST", "MONGO_HOST", "MONGO_HOSTS")
+    if any(isinstance(os.environ.get(name), str) and os.environ.get(name).strip() for name in host_env_names):
+        return True
+    if _host_value_is_configured(host_candidate):
+        return True
+    return False
+
+
+def _resolve_catalog_source(*, run_profile: str, config_module: object) -> str:
+    explicit_env_raw = os.environ.get("CATALOG_SOURCE")
+    explicit_env = _normalize_catalog_source_token(explicit_env_raw)
+    if explicit_env:
+        return explicit_env
+    if explicit_env_raw and explicit_env is None:
+        LOGGER.warning("Unknown CATALOG_SOURCE=%s; defaulting to mongo", explicit_env_raw)
+    legacy_env = os.environ.get("USE_MONGO_CATALOG")
+    if legacy_env is not None:
+        try:
+            return "mongo" if _parse_bool_env(str(legacy_env)) else "filesystem"
+        except AttributeError:
+            return "mongo" if legacy_env else "filesystem"
+    config_override = _normalize_catalog_source_token(
+        getattr(config_module, "CATALOG_SOURCE", None)
+    )
+    if config_override:
+        return config_override
+    legacy_config = getattr(config_module, "USE_MONGO_CATALOG", None)
+    if legacy_config is not None:
+        return "mongo" if bool(legacy_config) else "filesystem"
+    if run_profile == "desktop":
+        if _has_valid_mongo_dsn(config_module=config_module):
+            return "mongo"
+        return "filesystem"
+    return "mongo"
+
+
 def is_modes_manifest_enabled() -> bool:
     env_value = os.environ.get(_FEATURE_MODES_MANIFEST_ENV)
     if env_value is not None:
@@ -653,6 +739,7 @@ def _load_config_module():
 
 config = _load_config_module()
 
+CATALOG_SOURCE = _resolve_catalog_source(run_profile=RUN_PROFILE, config_module=config)
 CATALOG_ASSUME_VALID = _resolve_catalog_assume_valid()
 CATALOG_ASSUME_VALID_INT = 1 if CATALOG_ASSUME_VALID else 0
 
@@ -913,6 +1000,12 @@ def create_app():
     if songs_dir_value is None:
         songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
     SONGS_DIR_PATH = Path(songs_dir_value).expanduser().resolve()
+    app_instance.logger.info(
+        'profile=%s catalog_source=%s songs_dir=%s',
+        RUN_PROFILE,
+        CATALOG_SOURCE,
+        SONGS_DIR_PATH,
+    )
     app_instance.logger.info('Songs dir: %s', SONGS_DIR_PATH)
     if not SONGS_DIR_PATH.exists():
         app_instance.logger.warning('Songs directory %s does not exist; library will start empty', SONGS_DIR_PATH)
@@ -1622,11 +1715,252 @@ def route_api_preview():
     return redirect(get_config()['songs_baseurl'] + '%s/preview.mp3' % song_id)
 
 
+def _serialize_catalog_entry(
+    entry: Mapping[str, Any], *, manifest_entry: Optional[Mapping[str, Any]] = None
+) -> Optional[dict[str, Any]]:
+    sources: list[Mapping[str, Any]] = []
+    if isinstance(entry, Mapping):
+        sources.append(entry)
+    if isinstance(manifest_entry, Mapping):
+        sources.append(manifest_entry)
+
+    def _first(key: str, default: object = None) -> object:
+        for source in sources:
+            if key in source:
+                value = source.get(key)
+                if value is not None:
+                    return value
+        return default
+
+    stable_id = _first('scanner_stable_id')
+    if not isinstance(stable_id, str) or not stable_id:
+        fallback = _first('id') or _first('song_id')
+        if isinstance(fallback, str) and fallback:
+            stable_id = fallback
+        else:
+            return None
+
+    title_value = _first('title', stable_id)
+    subtitle_value = _first('subtitle', '')
+    category_value = _first('category', '')
+    category_id_value = _first('category_id', 0)
+    duration_value = _first('duration_ms', 0)
+    preview_available = bool(_first('preview_available', False))
+    source_type_value = _first('source_type', 'tja') or 'tja'
+    is_playable_value = _first('is_playable', False)
+    paths_value = _first('paths', {})
+
+    combined_entry: dict[str, Any] = {}
+    for source in sources[::-1]:
+        combined_entry.update(source)
+
+    try:
+        duration_ms = int(duration_value) if duration_value is not None else 0
+    except (TypeError, ValueError):
+        duration_ms = 0
+
+    playable_flag = bool(is_playable_value)
+    if not playable_flag and CATALOG_ASSUME_VALID:
+        playable_flag = True
+
+    if isinstance(paths_value, Mapping):
+        filtered_paths = {
+            key: value
+            for key in ('tja_url', 'audio_url', 'dir_url')
+            if (value := paths_value.get(key))
+        }
+    else:
+        filtered_paths = {}
+
+    item: dict[str, Any] = {
+        'id': stable_id,
+        'title': title_value if isinstance(title_value, str) else str(title_value),
+        'subtitle': subtitle_value if isinstance(subtitle_value, str) else '',
+        'category': category_value if isinstance(category_value, str) else '',
+        'category_id': _coerce_int(category_id_value, 0),
+        'duration_ms': duration_ms,
+        'preview_available': preview_available,
+        'source_type': source_type_value if isinstance(source_type_value, str) and source_type_value else 'tja',
+        'paths': filtered_paths,
+        'is_playable': bool(playable_flag),
+        'difficulties': _normalize_difficulties(combined_entry, assume_valid=CATALOG_ASSUME_VALID),
+    }
+    return item
+
+
+def _load_mongo_catalog_entries(
+    *,
+    limit: Optional[int],
+    skip: int,
+    category_value: str,
+    search_value: str,
+) -> list[dict[str, Any]]:
+    songs_collection = getattr(db, 'songs', None)
+    if songs_collection is None:
+        return []
+
+    filters: dict[str, Any] = {'is_hidden': {'$ne': True}, 'is_playable': True}
+    if category_value:
+        filters['category'] = category_value
+    if search_value:
+        filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
+
+    projection = {
+        '_id': 0,
+        'id': 1,
+        'scanner_stable_id': 1,
+        'title': 1,
+        'subtitle': 1,
+        'category': 1,
+        'category_id': 1,
+        'duration_ms': 1,
+        'preview_available': 1,
+        'source_type': 1,
+        'paths': 1,
+        'is_playable': 1,
+        'difficulties': 1,
+    }
+
+    try:
+        cursor = songs_collection.find(filters, projection).sort([
+            ('title', 1),
+            ('scanner_stable_id', 1),
+            ('id', 1),
+        ])
+        if skip:
+            cursor = cursor.skip(skip)
+        if isinstance(limit, int):
+            cursor = cursor.limit(limit)
+        raw_payload = [dict(doc) for doc in cursor if isinstance(doc, Mapping)]
+    except Exception:
+        app.logger.exception('Failed to query songs catalog')
+        return []
+
+    stable_ids = [
+        entry.get('scanner_stable_id')
+        for entry in raw_payload
+        if isinstance(entry.get('scanner_stable_id'), str)
+    ]
+    manifest_map = _load_manifest_entries_for_ids(stable_ids)
+
+    payload: list[dict[str, Any]] = []
+    for entry in raw_payload:
+        stable_id = entry.get('scanner_stable_id')
+        manifest_entry = manifest_map.get(stable_id) if isinstance(stable_id, str) else None
+        item = _serialize_catalog_entry(entry, manifest_entry=manifest_entry)
+        if item is not None:
+            payload.append(item)
+    return payload
+
+
+def _load_filesystem_catalog_entries(
+    *,
+    limit: Optional[int],
+    skip: int,
+    category_value: str,
+    search_value: str,
+) -> list[dict[str, Any]]:
+    store = _get_song_store()
+    if store is None:
+        return []
+
+    projection = {
+        '_id': 0,
+        'id': 1,
+        'song_id': 1,
+        'scanner_stable_id': 1,
+        'title': 1,
+        'subtitle': 1,
+        'category': 1,
+        'category_id': 1,
+        'duration_ms': 1,
+        'preview_available': 1,
+        'source_type': 1,
+        'paths': 1,
+        'is_playable': 1,
+        'is_hidden': 1,
+        'disabled': 1,
+        'difficulties': 1,
+    }
+
+    try:
+        cursor = store.find({}, projection=projection)
+    except Exception:
+        app.logger.exception('Failed to load filesystem songs catalog')
+        return []
+
+    docs: list[dict[str, Any]] = []
+    stable_ids: list[str] = []
+    for raw_doc in cursor:
+        if not isinstance(raw_doc, Mapping):
+            continue
+        doc = dict(raw_doc)
+        stable_id = (
+            doc.get('scanner_stable_id')
+            or doc.get('id')
+            or doc.get('song_id')
+        )
+        if not isinstance(stable_id, str) or not stable_id:
+            continue
+        doc['scanner_stable_id'] = stable_id
+        docs.append(doc)
+        stable_ids.append(stable_id)
+
+    manifest_map = _load_manifest_entries_for_ids(stable_ids)
+
+    filtered: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
+    for doc in docs:
+        manifest_entry_raw = manifest_map.get(doc['scanner_stable_id'])
+        manifest_entry = manifest_entry_raw if isinstance(manifest_entry_raw, Mapping) else {}
+        if doc.get('is_hidden') is True:
+            continue
+        if doc.get('disabled') is True:
+            continue
+        if manifest_entry.get('is_hidden') is True:
+            continue
+        if manifest_entry.get('disabled') is True:
+            continue
+        playable_flag = bool(doc.get('is_playable')) or bool(manifest_entry.get('is_playable'))
+        if not playable_flag and not CATALOG_ASSUME_VALID:
+            continue
+        category_candidate = doc.get('category')
+        if not isinstance(category_candidate, str) or not category_candidate.strip():
+            category_candidate = manifest_entry.get('category') if isinstance(manifest_entry.get('category'), str) else ''
+        if category_value and category_candidate != category_value:
+            continue
+        if search_value:
+            title_candidate = doc.get('title')
+            if not isinstance(title_candidate, str) or not title_candidate.strip():
+                manifest_title = manifest_entry.get('title')
+                title_candidate = manifest_title if isinstance(manifest_title, str) else ''
+            if not title_candidate.strip().lower().startswith(search_value):
+                continue
+        filtered.append((doc, manifest_entry))
+
+    filtered.sort(
+        key=lambda pair: (
+            str((pair[0].get('title') or pair[1].get('title') or '')).casefold(),
+            str(pair[0].get('scanner_stable_id') or pair[1].get('id') or ''),
+        )
+    )
+
+    start_index = max(skip, 0)
+    if isinstance(limit, int):
+        slice_pairs = filtered[start_index:start_index + limit]
+    else:
+        slice_pairs = filtered[start_index:]
+
+    payload: list[dict[str, Any]] = []
+    for doc, manifest_entry in slice_pairs:
+        item = _serialize_catalog_entry(doc, manifest_entry=manifest_entry)
+        if item is not None:
+            payload.append(item)
+    return payload
+
+
 @app.route(basedir + 'api/songs')
 def route_api_songs():
-    unavailable = _desktop_mongo_unavailable_response(api=True)
-    if unavailable is not None:
-        return unavailable
+    app.logger.debug('api_songs: catalog_source=%s', CATALOG_SOURCE)
     cache_control = 'public, max-age=86400, stale-while-revalidate=600'
     vary_header = 'If-None-Match, Accept-Encoding'
 
@@ -1647,95 +1981,46 @@ def route_api_songs():
         _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
         return response
 
-    songs_collection = getattr(db, 'songs', None)
-    if songs_collection is None:
-        response = make_response(jsonify([]))
-        _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
-        return response
-
     limit_param = request.args.get('limit', type=int)
     page_param = request.args.get('page', type=int)
     use_pagination = limit_param is not None or page_param is not None
 
     if use_pagination:
-        limit = limit_param if isinstance(limit_param, int) else 200
-        limit = max(1, min(limit, 200))
-        page = page_param if isinstance(page_param, int) else 1
-        page = max(page, 1)
-        skip = (page - 1) * limit
+        limit_value = limit_param if isinstance(limit_param, int) else 200
+        limit_value = max(1, min(limit_value, 200))
+        page_value = page_param if isinstance(page_param, int) else 1
+        page_value = max(page_value, 1)
+        skip_value = (page_value - 1) * limit_value
     else:
-        limit = None
-        skip = 0
+        limit_value = None
+        skip_value = 0
 
-    filters: dict[str, object] = {'is_hidden': {'$ne': True}, 'is_playable': True}
     category_param = request.args.get('category', '')
-    if isinstance(category_param, str):
-        category_value = category_param.strip()
-        if category_value:
-            filters['category'] = category_value
+    category_value = category_param.strip() if isinstance(category_param, str) else ''
 
     search_param = request.args.get('q', '')
     if isinstance(search_param, str):
         search_value = search_param.strip().lower()
-        if search_value:
-            filters['title_lc'] = {'$regex': f'^{re.escape(search_value)}'}
+    else:
+        search_value = ''
 
-    projection = {'_id': 0}
-    projection.update({
-        'id': 1, 'scanner_stable_id': 1,
-        'title': 1, 'subtitle': 1,
-        'category': 1, 'category_id': 1,
-        'duration_ms': 1, 'preview_available': 1,
-        'source_type': 1,
-        'paths': 1,
-        'is_playable': 1,
-        'difficulties': 1,
-    })
-
-    try:
-        cursor = songs_collection.find(filters, projection).sort([
-            ('title', 1),
-            ('scanner_stable_id', 1),
-            ('id', 1),
-        ])
-        if skip:
-            cursor = cursor.skip(skip)
-        if isinstance(limit, int):
-            cursor = cursor.limit(limit)
-        raw_payload = list(cursor)
-    except Exception:
-        app.logger.exception('Failed to query songs catalog')
-        raw_payload = []
-
-    payload: list[dict[str, object]] = []
-    for entry in raw_payload:
-        if not isinstance(entry, dict):
-            continue
-        item = dict(entry)
-        item['id'] = item.pop('scanner_stable_id', item.get('id'))
-        item['subtitle'] = item['subtitle'] if isinstance(item.get('subtitle'), str) else ''
-        item['difficulties'] = _normalize_difficulties(entry, assume_valid=CATALOG_ASSUME_VALID)
-        item['is_playable'] = bool(item.get('is_playable')) or bool(CATALOG_ASSUME_VALID)
-        item['preview_available'] = bool(item.get('preview_available'))
-        source_type_value = item.get('source_type')
-        if not isinstance(source_type_value, str) or not source_type_value:
-            item['source_type'] = 'tja'
-        duration_value = item.get('duration_ms')
-        try:
-            item['duration_ms'] = int(duration_value) if duration_value is not None else 0
-        except (TypeError, ValueError):
-            item['duration_ms'] = 0
-        item['category_id'] = _coerce_int(item.get('category_id'), 0)
-        paths_value = item.get('paths')
-        if isinstance(paths_value, dict):
-            item['paths'] = {
-                key: v
-                for key in ('tja_url', 'audio_url', 'dir_url')
-                if (v := paths_value.get(key))
-            }
-        else:
-            item['paths'] = {}
-        payload.append(item)
+    if CATALOG_SOURCE == 'filesystem':
+        payload = _load_filesystem_catalog_entries(
+            limit=limit_value,
+            skip=skip_value,
+            category_value=category_value,
+            search_value=search_value,
+        )
+    else:
+        unavailable = _desktop_mongo_unavailable_response(api=True)
+        if unavailable is not None:
+            return unavailable
+        payload = _load_mongo_catalog_entries(
+            limit=limit_value,
+            skip=skip_value,
+            category_value=category_value,
+            search_value=search_value,
+        )
 
     response = make_response(jsonify(payload))
     _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)

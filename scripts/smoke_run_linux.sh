@@ -53,6 +53,18 @@ fail() {
 
 wait_for_health || fail
 
+for _ in $(seq 1 30); do
+  if grep -q "profile=desktop catalog_source=filesystem" "$LOG_FILE" 2>/dev/null; then
+    catalog_logged=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${catalog_logged:-}" ]]; then
+  echo "Expected catalog source log not found" >&2
+  fail
+fi
+
 check_status HEAD / 200 || fail
 content_type=$(curl -sI "$BASE_URL/" | awk 'tolower($1)=="content-type:" {print tolower($2)}')
 if [[ "$content_type" != text/html* ]]; then

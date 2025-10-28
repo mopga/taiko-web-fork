@@ -78,6 +78,21 @@ try {
         throw "healthz check failed"
     }
 
+    $catalogLogged = $false
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not $catalogLogged -and (Get-Date) -lt $deadline) {
+        if (Test-Path $stdoutLog -PathType Leaf) {
+            if (Select-String -Path $stdoutLog -Pattern 'profile=desktop catalog_source=filesystem' -Quiet) {
+                $catalogLogged = $true
+                break
+            }
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $catalogLogged) {
+        throw "Expected catalog source log not found"
+    }
+
     Invoke-SmokeRequest -Method Head -Path '/' -ExpectedStatus @(200) -Assertion {
         param($resp)
         if (-not $resp.Headers['Content-Type'] -or $resp.Headers['Content-Type'] -notmatch 'text/html') {
@@ -89,9 +104,12 @@ try {
     Invoke-SmokeRequest -Method Get -Path '/api/songs' -ExpectedStatus @(200) -Assertion {
         param($resp)
         try {
-            $null = $resp.Content | ConvertFrom-Json
+            $data = $resp.Content | ConvertFrom-Json
         } catch {
             throw "Songs response is not valid JSON"
+        }
+        if ($data -isnot [System.Array]) {
+            throw "Songs payload is not an array"
         }
     }
 
