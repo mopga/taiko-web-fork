@@ -152,34 +152,26 @@ try {
         }
     }
 
+    function Is-ArrayLike {
+        param($value)
+        return ($value -is [System.Collections.IEnumerable]) -and -not ($value -is [string]) -and -not ($value -is [System.Collections.IDictionary])
+    }
+
     if ($null -eq $songsJson) {
         $songsJson = @()
     }
 
-    $songsObject = [System.Management.Automation.PSObject]::AsPSObject($songsJson)
-    $songsBase = $songsObject.BaseObject
-
-    $isEnumerable = $songsBase -is [System.Collections.IEnumerable]
-    $isDictionary = $songsBase -is [System.Collections.IDictionary]
-    $isString = $songsBase -is [string]
-
-    if ($isEnumerable -and -not $isDictionary -and -not $isString) {
-        $null = $songsBase
-    } elseif ($isDictionary) {
-        if (-not $songsObject.Properties.Name.Contains('items')) {
+    if (Is-ArrayLike $songsJson) {
+        # ok: already an array-like payload
+    } elseif ($songsJson -is [System.Collections.IDictionary]) {
+        if (-not $songsJson.Contains('items')) {
             Write-Host "---- /api/songs raw body (dict without items) ----"
             Write-Host $rawSongsBody
             throw "Songs payload dictionary is missing items"
         }
 
-        $itemsValue = $songsObject.Properties['items'].Value
-        $itemsPs = [System.Management.Automation.PSObject]::AsPSObject($itemsValue)
-        $itemsBase = $itemsPs.BaseObject
-        $itemsEnumerable = $itemsBase -is [System.Collections.IEnumerable]
-        $itemsDictionary = $itemsBase -is [System.Collections.IDictionary]
-        $itemsString = $itemsBase -is [string]
-
-        if (-not $itemsEnumerable -or $itemsDictionary -or $itemsString) {
+        $items = $songsJson['items']
+        if (-not (Is-ArrayLike $items)) {
             Write-Host "---- /api/songs raw body ----"
             Write-Host $rawSongsBody
             throw "'items' is not an array"
