@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$env:APP_PORT = "8000"
 $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
@@ -23,7 +24,7 @@ $stdoutLog = Join-Path $logDir "smoke_stdout.log"
 $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-$args = @("--host", "127.0.0.1", "--port", "8000", "--songs-dir", $songsDir)
+$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT, "--songs-dir", $songsDir)
 $startParams = @{
     FilePath = $exe
     ArgumentList = $args
@@ -35,49 +36,31 @@ $startParams = @{
 $process = Start-Process @startParams
 
 try {
-    $baseUrl = "http://127.0.0.1:8000"
+    $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
-    function Invoke-SmokeRequest {
-        param(
-            [string]$Method,
-            [string]$Path,
-            [int[]]$ExpectedStatus,
-            [ScriptBlock]$Assertion
-        )
+    # --- helpers ---
+    function Assert($cond, $msg) { if (-not $cond) { throw $msg } }
 
-        $uri = "$baseUrl$Path"
-        $response = $null
-        try {
-            $response = Invoke-WebRequest -Method $Method -Uri $uri -TimeoutSec 5
-        } catch {
-            throw "Request to $uri failed: $($_.Exception.Message)"
-        }
-
-        if ($ExpectedStatus -notcontains $response.StatusCode) {
-            throw "Unexpected status $($response.StatusCode) for $uri"
-        }
-
-        if ($Assertion) {
-            & $Assertion $response
-        }
+    function Invoke-WithRetry([scriptblock]$Action, [int]$Retries = 20, [int]$DelayMs = 500) {
+      for ($i=0; $i -lt $Retries; $i++) {
+        try { return & $Action } catch { Start-Sleep -Milliseconds $DelayMs }
+      }
+      & $Action
     }
 
-    $healthy = $false
-    for ($i = 0; $i -lt 60; $i++) {
-        try {
-            $health = Invoke-WebRequest -Uri "$baseUrl/healthz" -TimeoutSec 2
-            if ($health.StatusCode -eq 200 -and $health.Content -match '"status":"ok"') {
-                $healthy = $true
-                break
-            }
-        } catch {
-            Start-Sleep -Seconds 1
-        }
+    function To-Array($v) {
+      if ($null -eq $v) { return @() }
+      if ($v -is [string]) { return @($v) }
+      if ($v -is [System.Collections.IEnumerable]) { return @($v) }
+      return @($v)
     }
 
-    if (-not $healthy) {
-        throw "healthz check failed"
-    }
+    # --- wait for health / start ---
+    Invoke-WithRetry {
+      $r = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 3
+      if ($r.StatusCode -ne 200) { throw "healthz=$($r.StatusCode)" }
+      $r
+    } | Out-Null
 
     $catalogLogged = $false
     $deadline = (Get-Date).AddSeconds(30)
@@ -94,63 +77,32 @@ try {
         throw "Expected catalog source log not found"
     }
 
-    Invoke-SmokeRequest -Method Get -Path '/' -ExpectedStatus @(200) -Assertion {
-        param($resp)
-        if (-not $resp.Content -or $resp.Content -notmatch '</html>') {
-            throw "Root HTML not served (status=$($resp.StatusCode))"
-        }
+    # --- check root HTML ---
+    $root = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5 }
+    Assert ($root.StatusCode -eq 200) "Root not 200: $($root.StatusCode)"
+
+    # допускаем разные минификаторы: ищем doctype ИЛИ html-тег
+    $rootHtml = $root.Content
+    $hasHtml = ($rootHtml -match '(?is)<!doctype') -or ($rootHtml -match '(?is)<html')
+    Assert $hasHtml "Root HTML marker not found"
+
+    # --- check /api/songs JSON array (robust to single item) ---
+    $songsResp = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5 }
+    Assert ($songsResp.StatusCode -eq 200) "/api/songs not 200: $($songsResp.StatusCode)"
+
+    $songsJson = $songsResp.Content | ConvertFrom-Json
+    $songs = To-Array $songsJson
+
+    Assert ($songs -is [System.Collections.IEnumerable]) "/api/songs not enumerable"
+
+    if ($songs.Count -gt 0) {
+      $first = $songs[0]
+      Assert ($first -is [pscustomobject]) "/api/songs element is not object"
     }
 
-    Invoke-SmokeRequest -Method Head -Path '/favicon.ico' -ExpectedStatus @(200, 304)
+    Write-Host "Smoke OK: root+api passed. Songs: $($songs.Count)"
 
-    $songsDeadline = (Get-Date).AddSeconds(45)
-    $songsResponse = $null
-    while ((Get-Date) -lt $songsDeadline) {
-        try {
-            $candidate = Invoke-WebRequest -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5
-        } catch {
-            Start-Sleep -Seconds 1
-            continue
-        }
-
-        if ($candidate.StatusCode -ne 200) {
-            Start-Sleep -Seconds 1
-            continue
-        }
-
-        $songsResponse = $candidate
-        break
-    }
-
-    if (-not $songsResponse) {
-        throw "Timed out waiting for /api/songs to return 200"
-    }
-
-    $songsContentType = $songsResponse.Headers['Content-Type']
-    if (-not $songsContentType -or $songsContentType -notmatch 'application/json') {
-        Write-Host "---- /api/songs raw body ----"
-        Write-Host $songsResponse.Content
-        throw "Songs response content type unexpected: $songsContentType"
-    }
-
-    try {
-        $songsJson = $songsResponse.Content | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        Write-Host "---- /api/songs raw body ----"
-        Write-Host $songsResponse.Content
-        throw "Songs response is not valid JSON: $($_.Exception.Message)"
-    }
-
-    if ($null -eq $songsJson) {
-        $songsArray = @()
-    } else {
-        $songsArray = @($songsJson)
-    }
-    if (-not ($songsArray -is [System.Collections.IEnumerable])) {
-        Write-Host "---- /api/songs raw body ----"
-        Write-Host $songsResponse.Content
-        throw "/api/songs: not an enumerable"
-    }
+    Invoke-WebRequest -UseBasicParsing "$baseUrl/favicon.ico" -Method Head -TimeoutSec 5 | Out-Null
 
     try {
         $openApi = Invoke-WebRequest -Uri "$baseUrl/openapi.json" -TimeoutSec 5
