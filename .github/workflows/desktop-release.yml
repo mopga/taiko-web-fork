@@ -275,9 +275,9 @@ jobs:
 
           # 1) Подготовим параметры
           $version = $env:TAIKO_DESKTOP_VERSION
-          $stage   = (Resolve-Path $env:DESKTOP_STAGING_DIR)
-          $outDir  = (Resolve-Path $env:TAIKO_INSTALLER_OUTPUT)
-          $iss     = (Resolve-Path 'packaging/windows/taiko-desktop.iss')
+          $stage   = (Resolve-Path $env:DESKTOP_STAGING_DIR).Path
+          $outDir  = (Resolve-Path $env:TAIKO_INSTALLER_OUTPUT).Path
+          $iss     = (Resolve-Path 'packaging/windows/taiko-desktop.iss').Path
 
           # sanity-check инпутов
           @($stage, $outDir, $iss) | ForEach-Object {
