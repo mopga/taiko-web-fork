@@ -1,74 +1,12 @@
 import json
 import re
+import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
-import sys
-import types
+from tests._helpers import load_app_module
 
-class _StubCollection:
-    def create_index(self, *args, **kwargs):
-        return None
-
-    def drop_index(self, *args, **kwargs):
-        return None
-
-    def update_one(self, *args, **kwargs):
-        return None
-
-
-class _StubDatabase:
-    def __init__(self):
-        self.users = _StubCollection()
-        self.songs = _StubCollection()
-        self.scores = _StubCollection()
-        self.song_scanner_state = _StubCollection()
-        self.counters = _StubCollection()
-
-
-class _StubMongoClient:
-    def __init__(self, *args, **kwargs):
-        self._db = _StubDatabase()
-
-    def __getitem__(self, name):
-        return self._db
-
-
-class _StubRedis:
-    def __init__(self, *args, **kwargs):
-        pass
-
-class _StubCache:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def init_app(self, *args, **kwargs):
-        pass
-
-    def cached(self, *args, **kwargs):
-        def _decorator(func):
-            return func
-        return _decorator
-
-class _StubSession:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def init_app(self, *args, **kwargs):
-        pass
-
-sys.modules.setdefault('redis', types.SimpleNamespace(Redis=_StubRedis))
-sys.modules.setdefault('flask_caching', types.SimpleNamespace(Cache=_StubCache))
-sys.modules.setdefault('flask_session', types.SimpleNamespace(Session=_StubSession))
-
-with mock.patch('pymongo.MongoClient', new=_StubMongoClient):
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    import app as taiko_app
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-import app as taiko_app
+taiko_app = load_app_module()
 
 
 class _ManifestCursor:

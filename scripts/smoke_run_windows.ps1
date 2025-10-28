@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
+$env:PROFILE = "desktop"
 
 $songsDir = Join-Path (Get-Location) "_songs"
 if (Test-Path $songsDir) {
@@ -101,53 +102,67 @@ try {
     }
 
     Invoke-SmokeRequest -Method Head -Path '/favicon.ico' -ExpectedStatus @(200, 304)
-    Invoke-SmokeRequest -Method Get -Path '/api/songs' -ExpectedStatus @(200) -Assertion {
-        param($resp)
+
+    $songsResponse = $null
+    $songsDeadline = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $songsDeadline) {
         try {
-            $data = $resp.Content | ConvertFrom-Json
+            $candidate = Invoke-WebRequest -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5
         } catch {
-            throw "Songs response is not valid JSON"
+            Start-Sleep -Seconds 1
+            continue
         }
 
-        if ($null -eq $data) {
-            throw "Songs payload is empty"
+        if ($candidate.StatusCode -ne 200) {
+            Start-Sleep -Seconds 1
+            continue
         }
 
-        $psData = [System.Management.Automation.PSObject]::AsPSObject($data)
-        $baseObject = $psData.BaseObject
+        $songsResponse = $candidate
+        break
+    }
 
-        if ($baseObject -is [System.Collections.IDictionary]) {
-            $itemsProp = $psData.Properties['items']
-            if (-not $itemsProp) {
-                throw "Songs payload dictionary is missing items"
-            }
+    if (-not $songsResponse) {
+        throw "Timed out waiting for /api/songs to return 200"
+    }
 
-            $items = $itemsProp.Value
-            if ($null -eq $items) {
-                throw "Songs payload items is null"
-            }
+    try {
+        $songsData = $songsResponse.Content | ConvertFrom-Json
+    } catch {
+        throw "Songs response is not valid JSON"
+    }
 
-            $itemsBase = [System.Management.Automation.PSObject]::AsPSObject($items).BaseObject
-            if ($itemsBase -is [string]) {
-                throw "Songs payload items is not an array"
-            }
-            if ($itemsBase -is [System.Collections.IDictionary]) {
-                throw "Songs payload items is not an array"
-            }
-            if ($itemsBase -isnot [System.Collections.IEnumerable]) {
-                throw "Songs payload items is not an array"
-            }
+    if ($null -eq $songsData) {
+        throw "Songs payload is empty"
+    }
 
-            return
+    $songsObject = [System.Management.Automation.PSObject]::AsPSObject($songsData)
+    $songsBase = $songsObject.BaseObject
+
+    if ($songsBase -is [System.Collections.IDictionary]) {
+        $itemsProp = $songsObject.Properties['items']
+        if (-not $itemsProp) {
+            throw "Songs payload dictionary is missing items"
         }
 
-        if ($baseObject -is [string]) {
+        $itemsValue = $itemsProp.Value
+        if ($null -eq $itemsValue) {
+            throw "Songs payload items is null"
+        }
+
+        $itemsObject = [System.Management.Automation.PSObject]::AsPSObject($itemsValue)
+        $itemsBase = $itemsObject.BaseObject
+        if ($itemsBase -is [string] -or $itemsBase -is [System.Collections.IDictionary]) {
+            throw "Songs payload items is not an array"
+        }
+        if ($itemsBase -isnot [System.Collections.IEnumerable]) {
+            throw "Songs payload items is not an array"
+        }
+    } else {
+        if ($songsBase -is [string] -or $songsBase -is [System.Collections.IDictionary]) {
             throw "Songs payload is not an array"
         }
-        if ($baseObject -is [System.Collections.IDictionary]) {
-            throw "Songs payload is not an array"
-        }
-        if ($baseObject -isnot [System.Collections.IEnumerable]) {
+        if ($songsBase -isnot [System.Collections.IEnumerable]) {
             throw "Songs payload is not an array"
         }
     }

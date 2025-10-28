@@ -9,10 +9,14 @@ BASE_URL="http://127.0.0.1:8000"
 
 mkdir -p "$DATA_DIR" "$SONGS_DIR" "$LOG_DIR"
 
-RUN_PROFILE=desktop DATA_DIR="$DATA_DIR" ./dist/backend/taiko-web-backend/taiko-web-backend --host 127.0.0.1 --port 8000 --songs-dir "$SONGS_DIR" >"$LOG_FILE" 2>&1 &
+RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" ./dist/backend/taiko-web-backend/taiko-web-backend --host 127.0.0.1 --port 8000 --songs-dir "$SONGS_DIR" >"$LOG_FILE" 2>&1 &
 PID=$!
+songs_payload_file=""
 cleanup() {
   kill "$PID" 2>/dev/null || true
+  if [[ -n "$songs_payload_file" && -f "$songs_payload_file" ]]; then
+    rm -f "$songs_payload_file"
+  fi
 }
 trap cleanup EXIT
 
@@ -74,8 +78,22 @@ fi
 
 check_status HEAD /favicon.ico 200 304 || fail
 
-songs_payload=$(curl -sf --max-time 5 "$BASE_URL/api/songs") || fail
-printf '%s' "$songs_payload" | python - <<'PY' || fail
+songs_payload_file=$(mktemp)
+songs_status=""
+for _ in $(seq 1 45); do
+  songs_status=$(curl -s -w '%{http_code}' --max-time 5 "$BASE_URL/api/songs" -o "$songs_payload_file")
+  if [[ "$songs_status" == "200" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ "${songs_status:-}" != "200" ]]; then
+  echo "Timed out waiting for /api/songs 200" >&2
+  fail
+fi
+
+python <<'PY' <"$songs_payload_file" || fail
 import json
 import sys
 
@@ -83,8 +101,15 @@ try:
     data = json.load(sys.stdin)
 except Exception as exc:  # pragma: no cover - smoke guard
     raise SystemExit(f'Invalid JSON: {exc}')
-if not isinstance(data, list):
-    raise SystemExit('Songs payload is not a list')
+
+if isinstance(data, dict):
+    items = data.get('items', [])
+    if not isinstance(items, list):
+        raise SystemExit('Songs payload items is not a list')
+elif isinstance(data, list):
+    pass
+else:
+    raise SystemExit('Songs payload must be a list or dict with items list')
 PY
 
 openapi_status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/openapi.json")

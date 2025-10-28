@@ -123,6 +123,8 @@ STATIC_DIR = _static_candidate
 
 def _resolve_frontend_dir() -> Path:
     candidates = [
+        Path(resource_path("taiko-web-backend", "_internal", "public")),
+        Path(resource_path("taiko_web_backend", "_internal", "public")),
         Path(resource_path("client", "build")),
         Path(resource_path("web", "frontend")),
         Path(resource_path("public")),
@@ -143,7 +145,7 @@ FRONTEND_DIR = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
 
-RUN_PROFILE = os.getenv("RUN_PROFILE", "web")
+RUN_PROFILE = os.getenv("PROFILE") or os.getenv("RUN_PROFILE", "web")
 DESKTOP_DATA_DIR_ENV = "DATA_DIR"
 DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
 
@@ -740,6 +742,10 @@ def _load_config_module():
 config = _load_config_module()
 
 CATALOG_SOURCE = _resolve_catalog_source(run_profile=RUN_PROFILE, config_module=config)
+try:
+    setattr(config, "CATALOG_SOURCE", CATALOG_SOURCE)
+except Exception:
+    LOGGER.debug("Failed to set config.CATALOG_SOURCE", exc_info=True)
 CATALOG_ASSUME_VALID = _resolve_catalog_assume_valid()
 CATALOG_ASSUME_VALID_INT = 1 if CATALOG_ASSUME_VALID else 0
 

@@ -2,7 +2,9 @@ import os
 from types import SimpleNamespace
 from unittest import mock
 
-import app as taiko_app
+from tests._helpers import load_app_module
+
+taiko_app = load_app_module()
 
 
 def test_resolve_catalog_source_desktop_without_dsn():
