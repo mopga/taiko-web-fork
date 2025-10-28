@@ -35,71 +35,29 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
           $backendScript = 'standalone/packaging/build_backend.py'
-          if (-not (Test-Path $backendScript)) {
-            throw "Missing backend build script at $backendScript"
-          }
+          if (-not (Test-Path $backendScript)) { throw "Missing backend build script at $backendScript" }
 
           $builderConfig = 'standalone/electron/electron-builder.yml'
-          if (-not (Test-Path $builderConfig)) {
-            throw "Missing electron-builder configuration at $builderConfig"
-          }
+          if (-not (Test-Path $builderConfig)) { throw "Missing electron-builder configuration at $builderConfig" }
 
-          function Get-IndentedValue {
-            param(
-              [string[]]$Lines,
-              [string]$SectionName,
-              [string]$KeyName
-            )
+          $cfg = Get-Content $builderConfig -Raw | ConvertFrom-Yaml
 
-            for ($i = 0; $i -lt $Lines.Count; $i++) {
-              $line = $Lines[$i]
-              $trimmed = $line.Trim()
-              if (-not $trimmed -or $trimmed.StartsWith('#')) {
-                continue
-              }
-
-              $indent = $line.Length - $line.TrimStart().Length
-              if ($trimmed -eq "$SectionName:") {
-                $sectionIndent = $indent
-                for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
-                  $inner = $Lines[$j]
-                  $innerTrim = $inner.Trim()
-                  if (-not $innerTrim -or $innerTrim.StartsWith('#')) {
-                    continue
-                  }
-                  $innerIndent = $inner.Length - $inner.TrimStart().Length
-                  if ($innerIndent -le $sectionIndent) {
-                    break
-                  }
-                  if ($innerTrim -match "^$KeyName:\s*(.+)$") {
-                    $value = $Matches[1].Trim()
-                    return $value.Trim('\"\'')
-                  }
-                }
-              }
-            }
-            return $null
-          }
-
-          $builderLines = Get-Content $builderConfig
-          $winIcon = Get-IndentedValue -Lines $builderLines -SectionName 'win' -KeyName 'icon'
-          if (-not $winIcon) {
-            throw 'electron-builder configuration must define win.icon'
-          }
+          $winIcon = $cfg.win.icon
+          if ([string]::IsNullOrWhiteSpace($winIcon)) { throw 'electron-builder configuration must define win.icon' }
 
           $iconPath = Join-Path 'standalone/electron' $winIcon
-          if (-not (Test-Path $iconPath)) {
-            throw "Missing Windows icon referenced by electron-builder: $iconPath"
-          }
+          if (-not (Test-Path $iconPath)) { throw "Missing Windows icon referenced by electron-builder: $iconPath" }
 
-          $buildResources = Get-IndentedValue -Lines $builderLines -SectionName 'directories' -KeyName 'buildResources'
+          $buildResources = $cfg.directories.buildResources
           if ($buildResources) {
             $resources = Join-Path 'standalone/electron' $buildResources
-            if (-not (Test-Path $resources)) {
-              throw "Missing buildResources directory referenced by electron-builder: $resources"
-            }
+            if (-not (Test-Path $resources)) { throw "Missing buildResources directory referenced by electron-builder: $resources" }
           }
+
+          Write-Host "win.icon = $winIcon"
+          Write-Host "directories.buildResources = $buildResources"
 
       - name: Validate build icons
         shell: pwsh
