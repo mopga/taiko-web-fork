@@ -109,10 +109,38 @@ try {
             throw "Songs response is not valid JSON"
         }
 
-        $baseObject = [System.Management.Automation.PSObject]::AsPSObject($data).BaseObject
-        if ($null -eq $baseObject) {
-            throw "Songs payload is not an array"
+        if ($null -eq $data) {
+            throw "Songs payload is empty"
         }
+
+        $psData = [System.Management.Automation.PSObject]::AsPSObject($data)
+        $baseObject = $psData.BaseObject
+
+        if ($baseObject -is [System.Collections.IDictionary]) {
+            $itemsProp = $psData.Properties['items']
+            if (-not $itemsProp) {
+                throw "Songs payload dictionary is missing items"
+            }
+
+            $items = $itemsProp.Value
+            if ($null -eq $items) {
+                throw "Songs payload items is null"
+            }
+
+            $itemsBase = [System.Management.Automation.PSObject]::AsPSObject($items).BaseObject
+            if ($itemsBase -is [string]) {
+                throw "Songs payload items is not an array"
+            }
+            if ($itemsBase -is [System.Collections.IDictionary]) {
+                throw "Songs payload items is not an array"
+            }
+            if ($itemsBase -isnot [System.Collections.IEnumerable]) {
+                throw "Songs payload items is not an array"
+            }
+
+            return
+        }
+
         if ($baseObject -is [string]) {
             throw "Songs payload is not an array"
         }
