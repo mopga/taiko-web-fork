@@ -3,16 +3,54 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import io
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-LOGGER = logging.getLogger("taiko.desktop")
-
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+
+_FALLBACK_STREAMS: list[io.TextIOBase] = []
+
+
+def _ensure_stream(name: str) -> io.TextIOBase:
+    stream = getattr(sys, name, None)
+    if stream is None:
+        handle = open(os.devnull, "w", encoding="utf-8")
+        setattr(sys, name, handle)
+        _FALLBACK_STREAMS.append(handle)
+        return handle
+    return stream
+
+
+def _configure_logging() -> None:
+    stdout = _ensure_stream("stdout")
+    _ensure_stream("stderr")
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    handler = logging.StreamHandler(stdout)
+    handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(logger_name)
+        logger.propagate = True
+        logger.handlers.clear()
+
+
+@atexit.register
+def _close_fallback_streams() -> None:
+    for stream in _FALLBACK_STREAMS:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+LOGGER = logging.getLogger("taiko.desktop")
 
 
 def _resolve_host_port(args: argparse.Namespace) -> tuple[str, int]:
@@ -119,6 +157,8 @@ def _run_uvicorn(app, *, host: str, port: int) -> None:
         access_log=True,
         lifespan="off",
     )
+    config.use_colors = False
+    config.log_config = None
     server = uvicorn.Server(config)
 
     previous_handlers = {
@@ -171,6 +211,7 @@ def _run_waitress(app, *, host: str, port: int) -> None:
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
+    _configure_logging()
     args = _parse_args(argv)
     data_dir = _resolve_data_dir(args.data_dir)
     _prepare_environment(data_dir=data_dir)

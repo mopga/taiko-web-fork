@@ -6,7 +6,9 @@ const log = require('electron-log');
 const treeKill = require('tree-kill');
 const { spawn } = require('child_process');
 
+const APP_ID = 'com.taiko.web.desktop';
 const isDev = process.env.ELECTRON_DEV === '1';
+const isWindows = process.platform === 'win32';
 
 let mainWindow = null;
 let backendProcess = null;
@@ -16,7 +18,11 @@ let isShuttingDown = false;
 let failureDialogOpen = false;
 
 log.transports.file.level = 'info';
-log.info('Starting Taiko Web Desktop (Fork)');
+log.info('Starting Taiko Web Desktop');
+
+if (isWindows) {
+  app.setAppUserModelId(APP_ID);
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -48,6 +54,32 @@ function resolveDirectory(envKey, fallbackPath) {
     fs.mkdirSync(target, { recursive: true });
   }
   return target;
+}
+
+function resolveInstallRoot() {
+  if (isDev) {
+    return path.resolve(__dirname, '..', '..');
+  }
+  if (process.platform === 'darwin') {
+    return path.resolve(process.execPath, '..', '..');
+  }
+  return path.dirname(process.execPath);
+}
+
+function resolveAssetPath(...segments) {
+  if (!isDev && process.platform === 'darwin') {
+    return path.join(resolveInstallRoot(), 'Resources', 'assets', 'launcher', ...segments);
+  }
+  return path.join(resolveInstallRoot(), 'assets', 'launcher', ...segments);
+}
+
+function resolveLauncherIcon() {
+  const candidate = resolveAssetPath('app.ico');
+  if (fs.existsSync(candidate)) {
+    return candidate;
+  }
+  log.warn('Launcher icon not found at', candidate);
+  return null;
 }
 
 function openSongsFolder() {
@@ -155,6 +187,7 @@ function createWindow() {
   }
 
   const preloadPath = path.join(__dirname, 'preload.js');
+  const windowIcon = resolveLauncherIcon();
 
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -162,6 +195,7 @@ function createWindow() {
     useContentSize: true,
     show: false,
     backgroundColor: '#000000',
+    icon: windowIcon || undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -196,39 +230,97 @@ function createWindow() {
   return mainWindow;
 }
 
-async function findAvailablePort(startPort = 3123, attempts = 20) {
-  let port = startPort;
-  for (let i = 0; i < attempts; i += 1) {
-    const available = await new Promise((resolve) => {
-      const server = http.createServer();
-      server.once('error', (err) => {
-        log.warn(`Port ${port} unavailable: ${err.code || err.message}`);
-        try {
-          server.close(() => resolve(false));
-        } catch (closeError) {
-          resolve(false);
-        }
-      });
-      server.listen(port, '127.0.0.1', () => {
-        server.close(() => resolve(true));
-      });
-      server.on('close', () => {});
-      server.unref();
+function parsePortCandidate(value) {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+    return null;
+  }
+  return parsed;
+}
+
+async function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = http.createServer();
+    const cleanUp = () => {
+      try {
+        server.close();
+      } catch (error) {
+        log.warn('Port check cleanup error', error.message);
+      }
+    };
+    server.once('error', () => {
+      cleanUp();
+      resolve(false);
     });
-    if (available) {
+    server.listen(port, '127.0.0.1', () => {
+      cleanUp();
+      resolve(true);
+    });
+    server.unref();
+  });
+}
+
+async function findFreePort() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const port = await new Promise((resolve, reject) => {
+      const server = http.createServer();
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        const chosenPort = typeof address === 'object' && address ? address.port : null;
+        server.close(() => resolve(chosenPort));
+      });
+    });
+    if (typeof port === 'number' && port > 0) {
       return port;
     }
-    port += 1;
   }
-  throw new Error('Unable to find free port for backend');
+  throw new Error('Unable to allocate free port for backend');
+}
+
+async function allocateBackendPort() {
+  const candidates = [
+    ['TAIKO_DESKTOP_PORT', process.env.TAIKO_DESKTOP_PORT],
+    ['PORT', process.env.PORT],
+    ['UVICORN_PORT', process.env.UVICORN_PORT],
+  ];
+  for (const [name, value] of candidates) {
+    const candidate = parsePortCandidate(value);
+    if (!candidate) {
+      continue;
+    }
+    if (await isPortAvailable(candidate)) {
+      log.info(`Using configured port ${candidate} from ${name}`);
+      return candidate;
+    }
+    log.warn(`Configured port ${candidate} from ${name} is unavailable; falling back.`);
+  }
+  const dynamicPort = await findFreePort();
+  log.info('Allocated dynamic backend port', dynamicPort);
+  return dynamicPort;
 }
 
 function resolveBackendBinary() {
-  const exeName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
-  const backendPath = isDev
-    ? path.resolve(__dirname, '..', '..', 'dist', 'backend', exeName)
-    : path.join(process.resourcesPath, 'dist', 'backend', exeName);
-  return backendPath;
+  const exeName = isWindows ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+  if (isDev) {
+    const candidates = [
+      path.resolve(__dirname, '..', '..', 'dist', 'backend', exeName),
+      path.resolve(__dirname, '..', 'dist', 'backend', exeName),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return candidates[0];
+  }
+  if (!isDev && process.platform === 'darwin') {
+    return path.join(resolveInstallRoot(), 'Resources', 'backend', exeName);
+  }
+  return path.join(resolveInstallRoot(), 'backend', exeName);
 }
 
 function spawnBackend(port) {
@@ -249,23 +341,9 @@ function spawnBackend(port) {
   };
   const child = spawn(backendPath, [], {
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: false,
-  });
-  const limitLine = (line) => (line.length > 4096 ? `${line.slice(0, 4096)}…` : line);
-  child.stdout.on('data', (chunk) => {
-    chunk
-      .toString()
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .forEach((line) => log.info('[backend]', limitLine(line)));
-  });
-  child.stderr.on('data', (chunk) => {
-    chunk
-      .toString()
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .forEach((line) => log.error('[backend]', limitLine(line)));
+    stdio: 'ignore',
+    detached: true,
+    windowsHide: true,
   });
   child.once('error', (error) => {
     log.error('Backend process error', error);
@@ -373,7 +451,15 @@ async function initiateShutdown() {
       });
 
       try {
-        backendProcess.kill('SIGTERM');
+        if (isWindows) {
+          treeKill(backendProcess.pid, 'SIGTERM', (error) => {
+            if (error) {
+              log.warn('Error sending SIGTERM to backend', error.message);
+            }
+          });
+        } else {
+          backendProcess.kill('SIGTERM');
+        }
       } catch (error) {
         log.warn('Error sending SIGTERM to backend', error.message);
         clearTimeout(timer);
@@ -394,7 +480,7 @@ async function handleBackendFailure(message) {
     buttons: ['Retry', 'Quit'],
     defaultId: 0,
     cancelId: 1,
-    title: 'Taiko Web Desktop (Fork)',
+    title: 'Taiko Web Desktop',
     message,
     detail: 'Would you like to retry starting the backend or quit the application?',
   });
@@ -432,7 +518,7 @@ async function startBackendFlow() {
       return;
     }
 
-    const port = await findAvailablePort();
+    const port = await allocateBackendPort();
     backendUrl = normalizeBaseUrl(`http://127.0.0.1:${port}`);
     spawnBackend(port);
     const healthy = await waitForHealthz(backendUrl);

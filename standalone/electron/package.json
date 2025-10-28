@@ -1,14 +1,14 @@
 {
   "name": "taiko-web-desktop",
   "version": "0.1.0",
-  "productName": "Taiko Web Desktop (Fork)",
+  "productName": "Taiko Web Desktop",
   "main": "main.js",
   "scripts": {
     "prebuild:backend": "python standalone/packaging/build_backend.py",
     "build:backend": "python standalone/packaging/build_backend.py",
     "dev": "cross-env ELECTRON_DEV=1 electron .",
     "build": "npm run build:backend && electron-builder --dir",
-    "dist": "npm run build:backend && electron-builder",
+    "dist": "npm run build:backend && electron-builder --win --dir",
     "lint": "eslint ."
   },
   "devDependencies": {

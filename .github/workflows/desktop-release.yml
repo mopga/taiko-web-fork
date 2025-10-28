@@ -22,21 +22,21 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    outputs:
+      installer-name: ${{ steps.installer.outputs.name }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug event context
+      - name: Validate launcher icon
+        shell: pwsh
         run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "repository=${{ github.repository }}"
+          if (-not (Test-Path 'assets\launcher\app.ico')) {
+            throw 'Missing required icon at assets\launcher\app.ico'
+          }
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -50,58 +50,123 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install Python dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
           pip install pyinstaller pyinstaller-hooks-contrib
 
-      - name: Install Electron deps
+      - name: Install Electron dependencies
         working-directory: standalone/electron
         run: npm install
 
-      - name: Build installer
+      - name: Determine desktop version
+        id: version
+        shell: pwsh
+        run: |
+          $package = Get-Content 'standalone/electron/package.json' | ConvertFrom-Json
+          if (-not $package.version) {
+            throw 'Unable to read package version from standalone/electron/package.json'
+          }
+          "value=$($package.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build desktop bundle
         working-directory: standalone/electron
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "true"
         run: npm run dist
 
-      - name: Upload artifacts
+      - name: Verify staging artifacts
+        shell: pwsh
+        run: |
+          $root = Resolve-Path 'standalone/electron/dist/win-unpacked'
+          $expected = @(
+            Join-Path $root 'Taiko Web Desktop.exe',
+            Join-Path $root 'backend/taiko-web-backend.exe',
+            Join-Path $root 'assets/launcher/app.ico'
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path $path)) {
+              throw "Missing build artifact: $path"
+            }
+          }
+
+      - name: Install Inno Setup 6
+        id: innosetup
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.2.2 -y --no-progress
+          $isccPath = "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $isccPath)) {
+            throw "ISCC.exe not found at $isccPath"
+          }
+          "iscc=$isccPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build installer
+        shell: pwsh
+        env:
+          TAIKO_DESKTOP_VERSION: ${{ steps.version.outputs.value }}
+          DESKTOP_STAGING_DIR: ${{ github.workspace }}\standalone\electron\dist\win-unpacked
+          TAIKO_INSTALLER_OUTPUT: ${{ github.workspace }}\standalone\electron\dist\installer
+          ISCC_PATH: ${{ steps.innosetup.outputs.iscc }}
+        run: |
+          $outDir = '${{ github.workspace }}\standalone\electron\dist\installer'
+          if (Test-Path $outDir) {
+            Remove-Item $outDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          & $env:ISCC_PATH 'packaging\windows\taiko-desktop.iss'
+          if ($LASTEXITCODE -ne 0) {
+            throw "ISCC compilation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Collect installer artifact
+        id: installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'standalone/electron/dist/installer' -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) {
+            throw 'Installer executable was not produced'
+          }
+          "path=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "name=$($installer.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-${{ runner.os }}
-          path: standalone/electron/dist/*
+          name: taiko-web-desktop-windows
+          path: ${{ steps.installer.outputs.path }}
 
   release:
-    needs: build
+    needs: build-windows
     runs-on: ubuntu-latest
     if: >
       github.event_name != 'pull_request' &&
       (github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/main'))
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-Windows
-          path: dist/Windows
-        continue-on-error: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-macOS
-          path: dist/macOS
-        continue-on-error: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-Linux
-          path: dist/Linux
-        continue-on-error: true
+      - uses: actions/checkout@v4
 
-      - name: Prepare upload directory
+      - uses: actions/download-artifact@v4
+        with:
+          name: taiko-web-desktop-windows
+          path: release
+
+      - name: Prepare release payload
         run: |
-          mkdir -p upload
-          if [ -d dist ]; then
-            cp -R dist/* upload/ 2>/dev/null || true
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*.exe)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "Expected installer artifact" >&2
+            exit 1
           fi
+          if [ ! -f RELEASE_NOTES.md ]; then
+            echo "RELEASE_NOTES.md is missing" >&2
+            exit 1
+          fi
+          cp RELEASE_NOTES.md release/RELEASE_NOTES.md
 
       - name: Generate tag and name
         id: gen
@@ -129,22 +194,21 @@ jobs:
           else
             PRERELEASE="${{ github.event.inputs.prerelease }}"
           fi
-          echo "tag=$TAG"  >> $GITHUB_OUTPUT
-          echo "name=$NAME" >> $GITHUB_OUTPUT
-          echo "draft=$DRAFT" >> $GITHUB_OUTPUT
-          echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+          echo "tag=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "draft=$DRAFT" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        if: >
-          github.event_name != 'pull_request' &&
-          (github.ref_type == 'tag' || startsWith(github.ref, 'refs/heads/main'))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.gen.outputs.tag }}
           name: ${{ steps.gen.outputs.name }}
           draft: ${{ steps.gen.outputs.draft }}
           prerelease: ${{ steps.gen.outputs.prerelease }}
-          files: upload/**/*
-          generate_release_notes: true
+          body_path: release/RELEASE_NOTES.md
+          files: |
+            release/*.exe
+            release/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
