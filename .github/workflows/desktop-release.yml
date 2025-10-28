@@ -101,11 +101,12 @@ jobs:
             }
           }
 
-      - name: Validate launcher icon
+      - name: Validate build icons
         shell: pwsh
         run: |
-          if (-not (Test-Path 'assets\launcher\app.ico')) {
-            throw 'Missing required icon at assets\launcher\app.ico'
+          $iconPath = 'standalone\electron\build\icons\icon.ico'
+          if (-not (Test-Path $iconPath)) {
+            throw "Missing required build icon at $iconPath"
           }
 
       - name: Setup Node
