@@ -2073,10 +2073,34 @@ def route_api_songs():
             search_value=search_value,
         )
 
+    normalized_payload: list[Any]
     if payload is None:
-        payload = []
+        normalized_payload = []
+    elif isinstance(payload, dict):
+        normalized_payload = []
+        for key in ('items', 'songs', 'data'):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                normalized_payload = candidate
+                break
+            if isinstance(candidate, (tuple, set)):
+                normalized_payload = list(candidate)
+                break
+        else:
+            app.logger.warning('Unexpected /api/songs dict payload without items/songs/data; normalizing to []')
+    elif isinstance(payload, list):
+        normalized_payload = payload
+    elif isinstance(payload, (tuple, set)):
+        normalized_payload = list(payload)
+    elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        normalized_payload = list(payload)
+    elif isinstance(payload, Iterable) and not isinstance(payload, (str, bytes, bytearray)):
+        normalized_payload = list(payload)
+    else:
+        app.logger.warning('Unexpected /api/songs payload type %s; normalizing to []', type(payload).__name__)
+        normalized_payload = []
 
-    response = JSONResponse(content=payload, media_type='application/json')
+    response = JSONResponse(content=normalized_payload, media_type='application/json')
     _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
     return response
 

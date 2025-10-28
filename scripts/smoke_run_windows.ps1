@@ -104,82 +104,90 @@ try {
     Invoke-SmokeRequest -Method Head -Path '/favicon.ico' -ExpectedStatus @(200, 304)
 
     $songsDeadline = (Get-Date).AddSeconds(45)
-    $songsHeaders = $null
-    $songsStatus = $null
-    $songsData = $null
+    $songsResponse = $null
     while ((Get-Date) -lt $songsDeadline) {
-        $songsHeaders = $null
-        $songsStatus = $null
         try {
-            $songsDataCandidate = Invoke-RestMethod -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5 -ResponseHeadersVariable songsHeaders -StatusCodeVariable songsStatus
+            $candidate = Invoke-WebRequest -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5
         } catch {
-            if ($songsStatus -ne 200) {
-                Start-Sleep -Seconds 1
-                continue
-            }
-            $songsDataCandidate = $null
-        }
-
-        if ($songsStatus -ne 200) {
             Start-Sleep -Seconds 1
             continue
         }
 
-        $songsData = $songsDataCandidate
+        if ($candidate.StatusCode -ne 200) {
+            Start-Sleep -Seconds 1
+            continue
+        }
+
+        $songsResponse = $candidate
         break
     }
 
-    if ($songsStatus -ne 200) {
+    if (-not $songsResponse) {
         throw "Timed out waiting for /api/songs to return 200"
     }
 
-    if (-not $songsHeaders -or -not $songsHeaders['Content-Type'] -or $songsHeaders['Content-Type'] -notmatch 'application/json') {
-        throw "Songs response content type unexpected: $($songsHeaders['Content-Type'])"
+    $songsContentType = $songsResponse.Headers['Content-Type']
+    if (-not $songsContentType -or $songsContentType -notmatch 'application/json') {
+        Write-Host "---- /api/songs raw body ----"
+        Write-Host $songsResponse.Content
+        throw "Songs response content type unexpected: $songsContentType"
     }
 
-    if ($null -eq $songsData) {
-        $songsData = @()
-    }
+    $rawSongsBody = $songsResponse.Content
+    $songsJson = $null
 
-    function Test-IsArrayLike {
-        param($value)
-        if ($null -eq $value) { return $true }
-        if ($value -is [string]) { return $false }
-        if ($value -is [System.Collections.IDictionary]) { return $false }
-        if ($value -is [System.Management.Automation.PSObject]) { return $false }
-        if ($value -is [System.Collections.IEnumerable]) { return $true }
-        return $value -is [System.Array]
-    }
-
-    if (Test-IsArrayLike $songsData) {
-        $null = $songsData
-    } else {
-        $itemsValue = $null
-        $itemsFound = $false
-        if ($songsData -is [System.Collections.IDictionary]) {
-            if ($songsData.Contains('items')) {
-                $itemsFound = $true
-                $itemsValue = $songsData['items']
+    try {
+        $songsJson = Invoke-RestMethod -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        try {
+            if ([string]::IsNullOrWhiteSpace($rawSongsBody)) {
+                $songsJson = @()
+            } else {
+                $songsJson = $rawSongsBody | ConvertFrom-Json -ErrorAction Stop
             }
-        } elseif ($songsData -is [System.Management.Automation.PSObject]) {
-            $itemsProperty = $songsData.PSObject.Properties['items']
-            if ($itemsProperty) {
-                $itemsFound = $true
-                $itemsValue = $itemsProperty.Value
-            }
+        } catch {
+            Write-Host "---- /api/songs raw body ----"
+            Write-Host $rawSongsBody
+            throw "Songs response is not valid JSON: $($_.Exception.Message)"
         }
+    }
 
-        if (-not $itemsFound) {
+    if ($null -eq $songsJson) {
+        $songsJson = @()
+    }
+
+    $songsObject = [System.Management.Automation.PSObject]::AsPSObject($songsJson)
+    $songsBase = $songsObject.BaseObject
+
+    $isEnumerable = $songsBase -is [System.Collections.IEnumerable]
+    $isDictionary = $songsBase -is [System.Collections.IDictionary]
+    $isString = $songsBase -is [string]
+
+    if ($isEnumerable -and -not $isDictionary -and -not $isString) {
+        $null = $songsBase
+    } elseif ($isDictionary) {
+        if (-not $songsObject.Properties.Name.Contains('items')) {
+            Write-Host "---- /api/songs raw body (dict without items) ----"
+            Write-Host $rawSongsBody
             throw "Songs payload dictionary is missing items"
         }
 
-        if ($null -eq $itemsValue) {
-            $itemsValue = @()
-        }
+        $itemsValue = $songsObject.Properties['items'].Value
+        $itemsPs = [System.Management.Automation.PSObject]::AsPSObject($itemsValue)
+        $itemsBase = $itemsPs.BaseObject
+        $itemsEnumerable = $itemsBase -is [System.Collections.IEnumerable]
+        $itemsDictionary = $itemsBase -is [System.Collections.IDictionary]
+        $itemsString = $itemsBase -is [string]
 
-        if (-not (Test-IsArrayLike $itemsValue)) {
-            throw "Songs payload items is not an array"
+        if (-not $itemsEnumerable -or $itemsDictionary -or $itemsString) {
+            Write-Host "---- /api/songs raw body ----"
+            Write-Host $rawSongsBody
+            throw "'items' is not an array"
         }
+    } else {
+        Write-Host "---- /api/songs raw body ----"
+        Write-Host $rawSongsBody
+        throw "Songs payload must be an array or an object with 'items' array"
     }
 
     try {
