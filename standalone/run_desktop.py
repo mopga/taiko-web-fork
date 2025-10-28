@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
+from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
@@ -101,6 +103,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=None,
         help="Select the HTTP server implementation",
     )
+    parser.add_argument(
+        "--songs-dir",
+        dest="songs_dir",
+        default=None,
+        help=(
+            "Override the songs directory (defaults to $TAIKO_SONGS_DIR, $SONGS_DIR, "
+            "the desktop config, or ~/Music/TaikoSongs)"
+        ),
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -112,6 +123,41 @@ def _resolve_data_dir(value: Optional[str]) -> Path:
         path = Path.home() / ".taiko-web-data"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _resolve_songs_dir(value: Optional[str]) -> Path:
+    source = "default"
+    config_path: Optional[Path] = None
+
+    if value:
+        candidate = Path(value).expanduser()
+        source = "cli"
+    else:
+        env_candidate = os.environ.get("TAIKO_SONGS_DIR") or os.environ.get("SONGS_DIR")
+        if env_candidate:
+            candidate = Path(env_candidate).expanduser()
+            source = "env"
+        else:
+            config_candidate, config_path = resolve_songs_dir_from_config(logger=LOGGER)
+            if config_candidate:
+                candidate = config_candidate
+                source = "config"
+            else:
+                candidate = Path.home() / "Music" / "TaikoSongs"
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        LOGGER.warning("desktop.songs_dir ensure_failed path=%s", candidate, exc_info=True)
+    resolved = candidate.expanduser().resolve()
+
+    if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
+        try:
+            os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
+        except Exception:
+            os.environ[DESKTOP_CONFIG_ENV] = str(config_path)
+
+    LOGGER.info("desktop.songs_dir resolved path=%s source=%s", resolved, source)
+    return resolved
 
 
 def _prepare_environment(*, data_dir: Path) -> None:
@@ -214,7 +260,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     _configure_logging()
     args = _parse_args(argv)
     data_dir = _resolve_data_dir(args.data_dir)
+    songs_dir = _resolve_songs_dir(args.songs_dir)
     _prepare_environment(data_dir=data_dir)
+    os.environ["TAIKO_SONGS_DIR"] = str(songs_dir)
+    os.environ["SONGS_DIR"] = str(songs_dir)
 
     host, port = _resolve_host_port(args)
     server_choice = (args.server or os.environ.get("TAIKO_DESKTOP_SERVER") or "uvicorn").lower()
@@ -222,6 +271,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     from app import app as flask_app
 
     _log_startup(server=server_choice, host=host, port=port, data_dir=data_dir, app=flask_app)
+    LOGGER.info("desktop.songs_dir path=%s", songs_dir)
 
     try:
         if server_choice == "waitress":

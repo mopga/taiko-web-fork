@@ -3895,6 +3895,7 @@ class SongScanner:
         valid_chart_count = sum(1 for chart in charts if chart.valid)
         if valid_chart_count == 0:
             import_issues.append('no-valid-course')
+        self._metrics.increment('tja_valid_total', valid_chart_count)
 
         normalized_title = _normalise_title_key(title_value)
 
@@ -5492,6 +5493,11 @@ class SongScanner:
                     active_stack.close()
             self._active_refresher_stack = None
 
+            if isinstance(summary, dict):
+                metrics_snapshot = self._metrics.snapshot()
+                if metrics_snapshot:
+                    summary.setdefault('metrics', {}).update(metrics_snapshot)
+
             self._active_summary = None
 
         return summary
@@ -7067,6 +7073,7 @@ class _ScanMetrics:
             'tja_mapped_course_total': 0,
             'tja_skipped_no_course_total': 0,
             'tja_skipped_unknown_course_total': 0,
+            'tja_valid_total': 0,
         }
         self._last_logged = 0.0
 
@@ -7093,4 +7100,8 @@ class _ScanMetrics:
         with self._lock:
             self._last_logged = 0.0
             self._maybe_log_locked()
+
+    def snapshot(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self._counters)
 

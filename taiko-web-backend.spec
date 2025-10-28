@@ -1,13 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 datas = []
 binaries = []
-hiddenimports = ['bcrypt', 'cffi', '_cffi_backend']
+hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 tmp_ret = collect_all('bcrypt')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cffi')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports += collect_submodules('storage')
+hiddenimports += collect_submodules('tools')
+hiddenimports += collect_submodules('lock')
+
+datas += collect_data_files('config', include_py_files=False)
+
+extra_data = [
+    (Path('templates'), 'web/templates'),
+    (Path('public'), 'web/static'),
+    (Path('client') / 'build', 'client/build'),
+]
+for source_path, target in extra_data:
+    if source_path.exists():
+        datas.append((str(source_path), target.replace('\\', '/')))
 
 
 a = Analysis(
