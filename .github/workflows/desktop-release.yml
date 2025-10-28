@@ -45,18 +45,57 @@ jobs:
             throw "Missing electron-builder configuration at $builderConfig"
           }
 
-          $builder = Get-Content $builderConfig | ConvertFrom-Yaml
-          if (-not $builder.win.icon) {
+          function Get-IndentedValue {
+            param(
+              [string[]]$Lines,
+              [string]$SectionName,
+              [string]$KeyName
+            )
+
+            for ($i = 0; $i -lt $Lines.Count; $i++) {
+              $line = $Lines[$i]
+              $trimmed = $line.Trim()
+              if (-not $trimmed -or $trimmed.StartsWith('#')) {
+                continue
+              }
+
+              $indent = $line.Length - $line.TrimStart().Length
+              if ($trimmed -eq "$SectionName:") {
+                $sectionIndent = $indent
+                for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
+                  $inner = $Lines[$j]
+                  $innerTrim = $inner.Trim()
+                  if (-not $innerTrim -or $innerTrim.StartsWith('#')) {
+                    continue
+                  }
+                  $innerIndent = $inner.Length - $inner.TrimStart().Length
+                  if ($innerIndent -le $sectionIndent) {
+                    break
+                  }
+                  if ($innerTrim -match "^$KeyName:\s*(.+)$") {
+                    $value = $Matches[1].Trim()
+                    return $value.Trim('\"\'')
+                  }
+                }
+              }
+            }
+            return $null
+          }
+
+          $builderLines = Get-Content $builderConfig
+          $winIcon = Get-IndentedValue -Lines $builderLines -SectionName 'win' -KeyName 'icon'
+          if (-not $winIcon) {
             throw 'electron-builder configuration must define win.icon'
           }
 
-          $iconPath = Join-Path 'standalone/electron' $builder.win.icon
+          $iconPath = Join-Path 'standalone/electron' $winIcon
           if (-not (Test-Path $iconPath)) {
             throw "Missing Windows icon referenced by electron-builder: $iconPath"
           }
 
-          if ($builder.directories.buildResources) {
-            $resources = Join-Path 'standalone/electron' $builder.directories.buildResources
+          $buildResources = Get-IndentedValue -Lines $builderLines -SectionName 'directories' -KeyName 'buildResources'
+          if ($buildResources) {
+            $resources = Join-Path 'standalone/electron' $buildResources
             if (-not (Test-Path $resources)) {
               throw "Missing buildResources directory referenced by electron-builder: $resources"
             }
@@ -158,12 +197,28 @@ jobs:
           $pathsToCheck += $expectedMain
           $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend.exe')
           $pathsToCheck += (Join-Path $rootPath 'assets/launcher/app.ico')
-          $pathsToCheck += (Join-Path $rootPath 'resources/app')
+          $resourcesDir = Join-Path $rootPath 'resources'
+          $pathsToCheck += $resourcesDir
 
+          $missing = @()
           foreach ($item in $pathsToCheck) {
             if (-not (Test-Path $item)) {
-              throw "Missing build artifact: $item"
+              $missing += $item
             }
+          }
+
+          if (-not (Test-Path $resourcesDir)) {
+            $missing += 'resources directory missing'
+          } else {
+            $resourcesPath = Join-Path $resourcesDir 'app'
+            $resourcesArchive = Join-Path $resourcesDir 'app.asar'
+            if (-not (Test-Path $resourcesPath) -and -not (Test-Path $resourcesArchive)) {
+              $missing += 'resources/app or resources/app.asar'
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            throw "Missing build artifact(s): $($missing -join ', ')"
           }
 
           Get-ChildItem -Path $rootPath -Recurse | Select-Object FullName, Length | Out-String | Write-Host
