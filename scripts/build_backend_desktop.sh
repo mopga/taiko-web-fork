@@ -2,6 +2,6 @@
 set -euo pipefail
 
 rm -rf build/backend dist/backend
-pyinstaller packaging/pyinstaller.spec --distpath dist/backend --workpath build/backend --clean
+python standalone/packaging/build_backend.py
 
 echo "✅ Build completed: dist/backend/taiko-web-backend"

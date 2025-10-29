@@ -104,11 +104,11 @@ or from the workflow run summary. Each release ships the following files:
 All desktop builds honour the `DATA_DIR` environment variable. When it is not
 set the backend falls back to a platform-specific per-user data directory for
 the SQLite database and session files. Songs are bundled and discovered
-exclusively from the `songs/` directory next to the backend binary:
+exclusively from the `songs/` directory next to the backend binary (for any
+packaging format, including installers, zips, and tarballs):
 
-- Windows installer: `%APPDATA%\taiko-web-backend\songs\`
-- Windows portable zip: `<extracted-folder>\songs\`
-- macOS/Linux tarballs: `<extracted-folder>/songs/`
+- Windows: `<install-dir>\songs\`
+- macOS/Linux: `<install-dir>/songs/`
 
 Drop each `.tja`/`.tjc` chart into its own subdirectory inside that `songs/`
 folder and restart the backend to rescan the library.

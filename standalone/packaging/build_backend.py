@@ -2,130 +2,52 @@
 
 from __future__ import annotations
 
-import os
-import platform
-import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-import PyInstaller.__main__
 
-ROOT = Path(__file__).resolve().parents[2]
-ENTRY = ROOT / "standalone" / "run_desktop.py"
-DIST_DIR = ROOT / "standalone" / "dist" / "backend"
-BUILD_DIR = ROOT / "standalone" / "dist" / "build-backend"
-NAME = "taiko-web-backend"
-
-
-def _add_data_arg(src: Path, target: str) -> str:
-    separator = ";" if platform.system() == "Windows" else ":"
-    return f"{src}{separator}{target}"
-
-
-def _collect_additional_data() -> list[str]:
-    data_args: list[str] = []
-    public_dir = ROOT / "public"
-    if not public_dir.exists():
-        raise RuntimeError(f"Frontend assets are missing at {public_dir}")
-    data_args.append(_add_data_arg(public_dir, "public"))
-
-    templates_dir = ROOT / "templates"
-    if templates_dir.exists():
-        data_args.append(_add_data_arg(templates_dir, "templates"))
-
-    return data_args
-
-
-def _pyinstaller_args() -> list[str]:
-    args: list[str] = [
-        str(ENTRY),
-        "--name",
-        NAME,
-        "--onedir",
-        "--clean",
-        "--noconfirm",
-        "--distpath",
-        str(DIST_DIR),
-        "--workpath",
-        str(BUILD_DIR),
-        "--specpath",
-        str(BUILD_DIR),
-        "--hidden-import",
-        "bcrypt",
-        "--hidden-import",
-        "cffi",
-        "--hidden-import",
-        "_cffi_backend",
-        "--collect-all",
-        "bcrypt",
-        "--collect-all",
-        "cffi",
-    ]
-
-    if platform.system() == "Windows":
-        args.append("--noconsole")
-
-    for add_data in _collect_additional_data():
-        args.extend(["--add-data", add_data])
-
-    return args
-
-
-def _ensure_clean_dirs() -> None:
-    if DIST_DIR.exists():
-        shutil.rmtree(DIST_DIR)
-    DIST_DIR.mkdir(parents=True, exist_ok=True)
-    if BUILD_DIR.exists():
-        shutil.rmtree(BUILD_DIR)
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _ensure_songs_dir(bundle_root: Path) -> None:
-    songs = bundle_root / "songs"
-    songs.mkdir(parents=True, exist_ok=True)
-
-
-def _validate_binaries(bundle_root: Path) -> None:
-    binary = bundle_root / ("taiko-web-backend.exe" if os.name == "nt" else "taiko-web-backend")
-    if not binary.exists():
-        tree = "\n".join(str(p) for p in bundle_root.rglob("*"))
-        raise FileNotFoundError(
-            f"Expected backend binary not found at {binary}. Current bundle contents:\n{tree}"
-        )
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = ROOT.parent / "taiko-web-backend.spec"
+DIST = ROOT / "dist" / "backend"
+BUILD = ROOT / "dist" / "build-backend"
+APP_NAME = "taiko-web-backend"
 
 
 def build_backend() -> None:
-    _ensure_clean_dirs()
+    DIST.mkdir(parents=True, exist_ok=True)
+    BUILD.mkdir(parents=True, exist_ok=True)
 
-    pyinstaller_args = _pyinstaller_args()
-    print("[build_backend] Invoking PyInstaller with:")
-    for part in pyinstaller_args:
-        print("  ", part)
+    cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        str(SPEC),
+        "--noconfirm",
+        "--clean",
+        "--distpath",
+        str(DIST),
+        "--workpath",
+        str(BUILD),
+        "--specpath",
+        str(BUILD),
+    ]
+    print("[build_backend]", " ".join(cmd))
+    subprocess.check_call(cmd)
 
-    PyInstaller.__main__.run(pyinstaller_args)
+    app_dir = DIST / APP_NAME
+    if not app_dir.exists():
+        raise FileNotFoundError(f"PyInstaller did not create bundle at {app_dir}")
 
-    bundle_root = DIST_DIR / NAME
-    if not bundle_root.exists():
-        candidates = [p for p in DIST_DIR.iterdir() if p.is_dir()]
-        if len(candidates) == 1:
-            fallback = candidates[0]
-            print(
-                "[build_backend] Expected bundle directory missing; renaming",
-                fallback,
-                "to",
-                bundle_root,
-            )
-            fallback.rename(bundle_root)
-        else:
-            candidate_listing = "\n".join(str(p) for p in candidates) or "<none>"
-            raise RuntimeError(
-                "PyInstaller did not create bundle at"
-                f" {bundle_root}. Found directories:\n{candidate_listing}"
-            )
+    binary_name = "taiko-web-backend.exe" if sys.platform.startswith("win") else "taiko-web-backend"
+    binary_path = app_dir / binary_name
+    if not binary_path.exists():
+        raise FileNotFoundError(f"Expected backend binary not found at {binary_path}")
 
-    _ensure_songs_dir(bundle_root)
-    _validate_binaries(bundle_root)
-    print(f"[build_backend] Done. Binaries at: {bundle_root}")
+    songs_dir = app_dir / "songs"
+    songs_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[build_backend] Built at: {app_dir}")
 
 
 def main() -> None:  # pragma: no cover - exercised in CI

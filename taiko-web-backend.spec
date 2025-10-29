@@ -5,7 +5,8 @@ from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 project_root = Path(__file__).resolve().parent
-frontend_build = project_root / 'client' / 'build'
+public_dir = project_root / "public"
+templates_dir = project_root / "templates"
 
 datas = []
 binaries = []
@@ -20,20 +21,17 @@ hiddenimports += collect_submodules('lock')
 
 datas += collect_data_files('config', include_py_files=False)
 
-if frontend_build.is_dir():
-    datas += Tree(str(frontend_build), prefix='taiko_web_backend/_internal/public').toc
+if public_dir.is_dir():
+    datas += Tree(str(public_dir), prefix='public').toc
+else:
+    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
 
-extra_data = [
-    (Path('templates'), 'web/templates'),
-    (Path('public'), 'web/static'),
-]
-for source_path, target in extra_data:
-    if source_path.exists():
-        datas.append((str(source_path), target.replace('\\', '/')))
+if templates_dir.is_dir():
+    datas += Tree(str(templates_dir), prefix='templates').toc
 
 
 a = Analysis(
-    ['standalone\\run_desktop.py'],
+    [str(project_root / 'standalone' / 'run_desktop.py')],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -66,4 +64,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='taiko-web-backend',
+    distpath=str(project_root / 'standalone' / 'dist' / 'backend'),
 )
