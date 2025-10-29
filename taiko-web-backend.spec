@@ -9,7 +9,7 @@ project_root = Path(os.getcwd()).resolve()
 public_dir = project_root / "public"
 templates_dir = project_root / "templates"
 
-datas = []
+datas: list = []
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 
@@ -26,9 +26,9 @@ hiddenimports += collect_submodules('storage')
 hiddenimports += collect_submodules('tools')
 hiddenimports += collect_submodules('lock')
 
-datas.append(Tree(str(public_dir), prefix='public'))
+datas += Tree(str(public_dir), prefix='public')
 if templates_dir.is_dir():
-    datas.append(Tree(str(templates_dir), prefix='templates'))
+    datas += Tree(str(templates_dir), prefix='templates')
 
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
@@ -75,5 +75,4 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name='taiko-web-backend',
-    distpath=str(project_root / 'standalone' / 'dist' / 'backend'),
 )

@@ -1129,28 +1129,20 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
-    profile = 'desktop' if is_desktop() else 'web'
-
-    if profile == 'web':
-        payload = {
+    if not is_desktop():
+        return jsonify({
             'status': 'ok',
             'mongo': 'ok',
             'profile': 'web',
-        }
-        return jsonify(payload), 200
+        }), 200
 
+    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
     payload = {
         'status': 'ok',
         'profile': 'desktop',
     }
-
-    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
     if sqlite_path:
-        try:
-            resolved_path = str(Path(sqlite_path).resolve())
-        except Exception:
-            resolved_path = str(sqlite_path)
-        payload['db_path'] = resolved_path
+        payload['db_path'] = str(Path(sqlite_path).resolve())
 
     return jsonify(payload), 200
 
