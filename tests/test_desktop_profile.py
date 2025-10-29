@@ -36,11 +36,9 @@ def test_desktop_healthz(tmp_path, monkeypatch):
     assert payload["status"] == "ok"
     assert payload["ok"] is True
     assert payload["profile"] == "desktop"
-    assert payload["db"] == "sqlite"
-    assert payload["sessions"] == "cachelib"
+    assert payload["mongo"] is None
     expected_db_path = str((tmp_path / "taiko.db").resolve())
     assert payload.get("db_path") == expected_db_path
-    assert payload.get("path") == expected_db_path
 
 
 def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):

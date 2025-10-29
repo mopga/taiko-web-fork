@@ -1129,19 +1129,16 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
-    try:
-        profile = 'desktop' if is_desktop() else 'web'
-        payload = {
-            'ok': True,
-            'status': 'ok',
-            'profile': profile,
-            'db': 'sqlite' if profile == 'desktop' else 'mongo',
-        }
+    profile = 'desktop' if is_desktop() else 'web'
 
-        session_backend = current_app.config.get('SESSION_BACKEND') or current_app.config.get('SESSION_TYPE')
-        if session_backend:
-            payload['sessions'] = session_backend
+    payload = {
+        'ok': True,
+        'status': 'ok',
+        'profile': profile,
+        'mongo': 'ok' if profile == 'web' else None,
+    }
 
+    if profile == 'desktop':
         sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
         if sqlite_path:
             try:
@@ -1149,18 +1146,8 @@ def route_healthcheck():
             except Exception:
                 resolved_path = str(sqlite_path)
             payload['db_path'] = resolved_path
-            payload['path'] = resolved_path
-        else:
-            payload['db_path'] = None
 
-        if profile == 'web':
-            payload.setdefault('mongo', 'ok')
-            payload.setdefault('redis', 'ok')
-
-        return jsonify(payload), 200
-    except Exception as exc:  # pragma: no cover - defensive guard for smoke tests
-        current_app.logger.exception('healthz failed')
-        return jsonify({'ok': False, 'error': str(exc)}), 200
+    return jsonify(payload), 200
 
 
 @app.route('/admin/shutdown', methods=['POST'])

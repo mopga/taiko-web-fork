@@ -26,9 +26,9 @@ hiddenimports += collect_submodules('storage')
 hiddenimports += collect_submodules('tools')
 hiddenimports += collect_submodules('lock')
 
-datas += Tree(str(public_dir), prefix='public').toc
+datas.append(Tree(str(public_dir), prefix='public'))
 if templates_dir.is_dir():
-    datas += Tree(str(templates_dir), prefix='templates').toc
+    datas.append(Tree(str(templates_dir), prefix='templates'))
 
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
