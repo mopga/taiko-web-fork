@@ -79,6 +79,15 @@ jobs:
       - name: Pre-check pnpm
         run: pnpm -v
 
+      - name: Pre-create pnpm store dir (required for actions/cache@v4)
+        shell: pwsh
+        run: |
+          $store = pnpm store path --silent
+          if (-not (Test-Path $store)) {
+            New-Item -ItemType Directory -Force -Path $store | Out-Null
+          }
+          Write-Host "pnpm store dir: $store"
+
       - name: Setup Node (frontend)
         uses: actions/setup-node@v4
         with:
