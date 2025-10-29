@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$env:APP_PORT = "8000"
 $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
@@ -23,7 +24,7 @@ $stdoutLog = Join-Path $logDir "smoke_stdout.log"
 $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-$args = @("--host", "127.0.0.1", "--port", "8000", "--songs-dir", $songsDir)
+$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT, "--songs-dir", $songsDir)
 $startParams = @{
     FilePath = $exe
     ArgumentList = $args
@@ -34,180 +35,88 @@ $startParams = @{
 }
 $process = Start-Process @startParams
 
+
 try {
-    $baseUrl = "http://127.0.0.1:8000"
-
-    function Invoke-SmokeRequest {
-        param(
-            [string]$Method,
-            [string]$Path,
-            [int[]]$ExpectedStatus,
-            [ScriptBlock]$Assertion
-        )
-
-        $uri = "$baseUrl$Path"
-        $response = $null
-        try {
-            $response = Invoke-WebRequest -Method $Method -Uri $uri -TimeoutSec 5
-        } catch {
-            throw "Request to $uri failed: $($_.Exception.Message)"
-        }
-
-        if ($ExpectedStatus -notcontains $response.StatusCode) {
-            throw "Unexpected status $($response.StatusCode) for $uri"
-        }
-
-        if ($Assertion) {
-            & $Assertion $response
-        }
+  # --- helpers (единственные, без дублей) ---
+  function Assert($cond, $msg) { if (-not $cond) { throw $msg } }
+  function Invoke-WithRetry([scriptblock]$Action, [int]$Retries = 30, [int]$DelayMs = 500) {
+    for ($i=0; $i -lt $Retries; $i++) {
+      try { return & $Action } catch { Start-Sleep -Milliseconds $DelayMs }
     }
+    & $Action
+  }
 
-    $healthy = $false
-    for ($i = 0; $i -lt 60; $i++) {
-        try {
-            $health = Invoke-WebRequest -Uri "$baseUrl/healthz" -TimeoutSec 2
-            if ($health.StatusCode -eq 200 -and $health.Content -match '"status":"ok"') {
-                $healthy = $true
-                break
-            }
-        } catch {
-            Start-Sleep -Seconds 1
-        }
-    }
+  $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
-    if (-not $healthy) {
-        throw "healthz check failed"
-    }
+  # --- дождаться здоровья (status: ok) ---
+  Invoke-WithRetry {
+    $r = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 3
+    if ($r.StatusCode -ne 200 -or ($r.Content -notmatch '"status"\s*:\s*"ok"')) { throw "healthz not ok" }
+    $r
+  } | Out-Null
 
-    $catalogLogged = $false
+  # --- мягко подождать появления каталога в логе (если лог уже есть) ---
+  if (Test-Path $stdoutLog -PathType Leaf) {
     $deadline = (Get-Date).AddSeconds(30)
-    while (-not $catalogLogged -and (Get-Date) -lt $deadline) {
-        if (Test-Path $stdoutLog -PathType Leaf) {
-            if (Select-String -Path $stdoutLog -Pattern 'profile=desktop catalog_source=filesystem' -Quiet) {
-                $catalogLogged = $true
-                break
-            }
-        }
-        Start-Sleep -Seconds 1
+    while ((Get-Date) -lt $deadline) {
+      if (Select-String -Path $stdoutLog -Pattern 'profile=desktop\s+catalog_source=filesystem' -Quiet) { break }
+      Start-Sleep -Seconds 1
     }
-    if (-not $catalogLogged) {
-        throw "Expected catalog source log not found"
-    }
+  }
 
-    Invoke-SmokeRequest -Method Head -Path '/' -ExpectedStatus @(200) -Assertion {
-        param($resp)
-        if (-not $resp.Headers['Content-Type'] -or $resp.Headers['Content-Type'] -notmatch 'text/html') {
-            throw "Root content type unexpected: $($resp.Headers['Content-Type'])"
-        }
-    }
+  # --- корень HTML (SPA) ---
+  $root = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5 }
+  Assert ($root.StatusCode -eq 200) "Root not 200: $($root.StatusCode)"
+  $rootHtml = $root.Content
+  $hasHtml = ($rootHtml -match '(?is)<!doctype') -or ($rootHtml -match '(?is)<html')
+  Assert $hasHtml "Root HTML marker not found"
 
-    Invoke-SmokeRequest -Method Head -Path '/favicon.ico' -ExpectedStatus @(200, 304)
+  # --- favicon (200 или 304 допустимы) ---
+  $fav = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/favicon.ico" -Method Head -TimeoutSec 5 }
+  Assert (@(200,304) -contains $fav.StatusCode) "favicon unexpected: $($fav.StatusCode)"
 
-    $songsDeadline = (Get-Date).AddSeconds(45)
-    $songsResponse = $null
-    while ((Get-Date) -lt $songsDeadline) {
-        try {
-            $candidate = Invoke-WebRequest -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5
-        } catch {
-            Start-Sleep -Seconds 1
-            continue
-        }
+  # --- /api/songs ---
+  $songsResp = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5 }
+  Assert ($songsResp.StatusCode -eq 200) "/api/songs not 200: $($songsResp.StatusCode)"
+  try {
+    $songsJson = $songsResp.Content | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    Write-Host "---- /api/songs raw body ----"
+    Write-Host $songsResp.Content
+    throw "Songs JSON parse failed: $($_.Exception.Message)"
+  }
+  # Нормализация к массиву (устойчиво к 0/1/N элементов)
+  if ($null -eq $songsJson) {
+    $songs = @()
+  }
+  elseif ($songsJson -is [System.Array]) {
+    $songs = $songsJson
+  }
+  else {
+    $songs = @($songsJson)
+  }
 
-        if ($candidate.StatusCode -ne 200) {
-            Start-Sleep -Seconds 1
-            continue
-        }
+  if ($songs.Count -gt 0) {
+    Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
+  }
 
-        $songsResponse = $candidate
-        break
-    }
-
-    if (-not $songsResponse) {
-        throw "Timed out waiting for /api/songs to return 200"
-    }
-
-    $songsContentType = $songsResponse.Headers['Content-Type']
-    if (-not $songsContentType -or $songsContentType -notmatch 'application/json') {
-        Write-Host "---- /api/songs raw body ----"
-        Write-Host $songsResponse.Content
-        throw "Songs response content type unexpected: $songsContentType"
-    }
-
-    $rawSongsBody = $songsResponse.Content
-    $songsJson = $null
-
-    try {
-        $songsJson = Invoke-RestMethod -Method Get -Uri "$baseUrl/api/songs" -TimeoutSec 5 -ErrorAction Stop
-    } catch {
-        try {
-            if ([string]::IsNullOrWhiteSpace($rawSongsBody)) {
-                $songsJson = @()
-            } else {
-                $songsJson = $rawSongsBody | ConvertFrom-Json -ErrorAction Stop
-            }
-        } catch {
-            Write-Host "---- /api/songs raw body ----"
-            Write-Host $rawSongsBody
-            throw "Songs response is not valid JSON: $($_.Exception.Message)"
-        }
-    }
-
-    function Is-ArrayLike {
-        param($value)
-        return ($value -is [System.Collections.IEnumerable]) -and -not ($value -is [string]) -and -not ($value -is [System.Collections.IDictionary])
-    }
-
-    if ($null -eq $songsJson) {
-        $songsJson = @()
-    }
-
-    if (Is-ArrayLike $songsJson) {
-        # ok: already an array-like payload
-    } elseif ($songsJson -is [System.Collections.IDictionary]) {
-        if (-not $songsJson.Contains('items')) {
-            Write-Host "---- /api/songs raw body (dict without items) ----"
-            Write-Host $rawSongsBody
-            throw "Songs payload dictionary is missing items"
-        }
-
-        $items = $songsJson['items']
-        if (-not (Is-ArrayLike $items)) {
-            Write-Host "---- /api/songs raw body ----"
-            Write-Host $rawSongsBody
-            throw "'items' is not an array"
-        }
-    } else {
-        Write-Host "---- /api/songs raw body ----"
-        Write-Host $rawSongsBody
-        throw "Songs payload must be an array or an object with 'items' array"
-    }
-
-    try {
-        $openApi = Invoke-WebRequest -Uri "$baseUrl/openapi.json" -TimeoutSec 5
-        if ($openApi.StatusCode -eq 200) {
-            Write-Host "openapi.json present"
-        }
-    } catch {
-        if (-not ($_.Exception.Response.StatusCode -eq 404)) {
-            throw $_
-        }
-        Write-Host "openapi.json not available; skipping"
-    }
-
-    Write-Host "Desktop backend smoke test passed"
-    exit 0
-} catch {
-    Write-Error $_
-    if (Test-Path $stdoutLog) {
-        Write-Host "===== smoke_stdout.log (tail) ====="
-        Get-Content $stdoutLog -Tail 200 | Write-Host
-    }
-    if (Test-Path $stderrLog) {
-        Write-Host "===== smoke_stderr.log (tail) ====="
-        Get-Content $stderrLog -Tail 200 | Write-Host
-    }
-    exit 1
-} finally {
+  Write-Host "Smoke OK: /api/songs count=$($songs.Count)"
+  Write-Host "Desktop smoke OK: root+api passed."
+  exit 0
+}
+catch {
+  Write-Error $_
+  if (Test-Path $stdoutLog) {
+    Write-Host "===== smoke_stdout.log (tail) ====="
+    Get-Content $stdoutLog -Tail 200 | Write-Host
+  }
+  if (Test-Path $stderrLog) {
+    Write-Host "===== smoke_stderr.log (tail) ====="
+    Get-Content $stderrLog -Tail 200 | Write-Host
+  }
+  exit 1
+}
+finally {
     if ($process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }

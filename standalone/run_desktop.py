@@ -20,6 +20,20 @@ DEFAULT_PORT = 8000
 _FALLBACK_STREAMS: list[io.TextIOBase] = []
 
 
+def _resolve_logging_level(value: object, *, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            resolved = logging.getLevelName(value.upper())
+            if isinstance(resolved, int):
+                return resolved
+            return int(value)
+        except Exception:
+            return default
+    return default
+
+
 def _ensure_stream(name: str) -> io.TextIOBase:
     stream = getattr(sys, name, None)
     if stream is None:
@@ -32,11 +46,34 @@ def _ensure_stream(name: str) -> io.TextIOBase:
 
 def _configure_logging() -> None:
     stdout = _ensure_stream("stdout")
-    _ensure_stream("stderr")
+    stderr = _ensure_stream("stderr")
+    root_logger = logging.getLogger()
+
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+
+    level = _resolve_logging_level(os.getenv("TAIKO_LOGLEVEL", "INFO"), default=logging.INFO)
+    root_logger.setLevel(level)
+
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    handler = logging.StreamHandler(stdout)
-    handler.setFormatter(formatter)
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+
+    file_handler = logging.FileHandler("desktop.log", encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    try:
+        if stdout and not os.getenv("PYTEST_CURRENT_TEST"):
+            console_level = _resolve_logging_level(
+                os.getenv("TAIKO_CONSOLE_LEVEL", "WARNING"), default=logging.WARNING
+            )
+            console_handler = logging.StreamHandler(stdout)
+            console_handler.setLevel(console_level)
+            console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+            root_logger.addHandler(console_handler)
+    except Exception:
+        pass
+
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logger = logging.getLogger(logger_name)
         logger.propagate = True

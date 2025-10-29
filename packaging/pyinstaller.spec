@@ -2,12 +2,14 @@
 
 import inspect
 import os
+from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
 _spec_file = os.path.abspath(inspect.getfile(inspect.currentframe()))
 project_root = os.path.abspath(os.path.join(os.path.dirname(_spec_file), os.pardir))
+frontend_build = os.path.join(project_root, "client", "build")
 
 def _data_tuple(relative_path):
     source_path = os.path.join(project_root, relative_path)
@@ -36,6 +38,9 @@ hiddenimports = [
 
 for folder in ("templates", "assets", "public", "standalone/static", "standalone/templates"):
     datas.extend(_data_tuple(folder))
+
+if os.path.isdir(frontend_build):
+    datas.extend(Tree(frontend_build, prefix="taiko_web_backend/_internal/public").toc)
 
 for module in ("jinja2", "markupsafe", "flask"):
     module_datas, module_binaries, module_hiddenimports = collect_all(module)
