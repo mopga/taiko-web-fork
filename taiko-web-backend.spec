@@ -35,7 +35,7 @@ hiddenimports += collect_submodules('lock')
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
     pathex=[str(project_root)],
-    binaries=[]
+    binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
