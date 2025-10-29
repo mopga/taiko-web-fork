@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from storage.mongo_store import MongoManifestStore, MongoSongStore
+from server.paths import data_dir
 
 try:  # optional import for desktop profile
     from storage.sqlite_store import SQLiteStorage
@@ -55,13 +55,12 @@ def create_storage_bundle(
         return getattr(database, 'songs_manifest', None)
 
     if run_profile == 'desktop' and SQLiteStorage is not None:
-        data_dir_value: Union[str, Path, None] = data_directory
-        if data_dir_value is None:
-            data_dir_value = os.environ.get('DATA_DIR')
-        if data_dir_value is None:
-            data_dir_value = Path.home() / '.taiko-web-data'
-        data_dir = Path(data_dir_value)
-        db_path = data_dir / 'taiko.db'
+        if data_directory is not None:
+            data_dir_path = Path(data_directory)
+        else:
+            data_dir_path = data_dir()
+        data_dir_path.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir_path / 'taiko.db'
         sqlite_storage = SQLiteStorage(db_path)
         song_store = sqlite_storage.song_store
         manifest_store = sqlite_storage.manifest_store

@@ -7,16 +7,13 @@ New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
-$songsDir = Join-Path (Get-Location) "_songs"
-if (Test-Path $songsDir) {
-    Remove-Item $songsDir -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
-
-$exe = "dist\backend\taiko-web-backend\taiko-web-backend.exe"
+$exe = "standalone\dist\backend\taiko-web-backend\taiko-web-backend.exe"
 if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
+
+$songsDir = Join-Path (Split-Path $exe) "songs"
+New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
 
 $logDir = Join-Path (Get-Location) "_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -24,7 +21,8 @@ $stdoutLog = Join-Path $logDir "smoke_stdout.log"
 $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT, "--songs-dir", $songsDir)
+$env:PORT = $env:APP_PORT
+$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT)
 $startParams = @{
     FilePath = $exe
     ArgumentList = $args
@@ -49,11 +47,26 @@ try {
   $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
   # --- дождаться здоровья (status: ok) ---
-  Invoke-WithRetry {
+  $healthResponse = Invoke-WithRetry {
     $r = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 3
     if ($r.StatusCode -ne 200 -or ($r.Content -notmatch '"status"\s*:\s*"ok"')) { throw "healthz not ok" }
     $r
-  } | Out-Null
+  }
+  $healthJson = $null
+  try {
+    $healthJson = $healthResponse.Content | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    Write-Host "---- /healthz raw body ----"
+    Write-Host $healthResponse.Content
+    throw "healthz JSON parse failed: $($_.Exception.Message)"
+  }
+  Assert ($healthJson.profile -eq 'desktop') "Unexpected profile: $($healthJson.profile)"
+  $dbPath = $healthJson.db_path
+  Assert ($dbPath) "db_path missing from /healthz payload"
+  Assert (Test-Path -LiteralPath $dbPath) "db_path does not exist: $dbPath"
+  $dbResolved = (Resolve-Path -LiteralPath $dbPath).Path
+  $expectedRoot = (Resolve-Path -LiteralPath $env:DATA_DIR).Path
+  Assert ($dbResolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) "db_path not under DATA_DIR"
 
   # --- мягко подождать появления каталога в логе (если лог уже есть) ---
   if (Test-Path $stdoutLog -PathType Leaf) {
@@ -98,6 +111,24 @@ try {
 
   if ($songs.Count -gt 0) {
     Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
+    $first = $songs[0]
+    Assert ($first.is_playable) "First song is not playable"
+    $difficulties = $first.difficulties
+    Assert ($null -ne $difficulties) "First song missing difficulties"
+    $diffProps = @()
+    if ($difficulties -is [pscustomobject]) {
+      $diffProps = ($difficulties | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+    } elseif ($difficulties -is [System.Collections.IDictionary]) {
+      $diffProps = $difficulties.Keys
+    }
+    Assert ($diffProps.Count -gt 0) "First song has no difficulties"
+    foreach ($name in $diffProps) {
+      $value = $difficulties.$name
+      if ($difficulties -is [System.Collections.IDictionary]) {
+        $value = $difficulties[$name]
+      }
+      Assert ($value -is [pscustomobject] -or $value -is [System.Collections.IDictionary]) "Difficulty $name is not an object"
+    }
   }
 
   Write-Host "Smoke OK: /api/songs count=$($songs.Count)"

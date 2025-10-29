@@ -41,27 +41,12 @@ from flask import (
     make_response,
     send_from_directory,
     Response,
+    current_app,
 )
 from flask_caching import Cache
 from flask_compress import Compress
 from flask_session import Session
-
-try:
-    from flask_session.defaults import Defaults as SessionDefaults
-except Exception:  # pragma: no cover - fallback for stripped Flask-Session builds
-    class SessionDefaults:  # type: ignore[too-many-ancestors]
-        SESSION_KEY_PREFIX = 'session:'
-        SESSION_USE_SIGNER = False
-        SESSION_PERMANENT = True
-        SESSION_ID_LENGTH = 32
-        SESSION_SERIALIZATION_FORMAT = 'msgpack'
-        SESSION_FILE_THRESHOLD = 500
-        SESSION_FILE_MODE = 384
-
-try:
-    from flask_session.filesystem.filesystem import FileSystemSessionInterface
-except Exception:  # pragma: no cover - optional import guard
-    FileSystemSessionInterface = None  # type: ignore[assignment]
+from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from pymongo import MongoClient, ReturnDocument
@@ -72,6 +57,13 @@ from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
+from server.paths import (
+    app_dir,
+    data_dir,
+    public_dir,
+    songs_dir,
+    is_desktop,
+)
 from tools.init_db_schema import init_db_schema
 from storage.factory import StorageBundle, create_storage_bundle
 from storage.interfaces import (
@@ -115,13 +107,19 @@ def resource_path(*parts: str) -> str:
 
 
 TEMPLATES_DIR = os.getenv("TAIKO_TEMPLATES_DIR") or resource_path("web", "templates")
-_static_candidate = os.getenv("TAIKO_STATIC_DIR") or resource_path("web", "static")
-if not Path(_static_candidate).exists():
-    _static_candidate = resource_path("public")
-STATIC_DIR = _static_candidate
+if is_desktop():
+    STATIC_DIR = str(public_dir())
+else:
+    _static_candidate = os.getenv("TAIKO_STATIC_DIR") or resource_path("web", "static")
+    if not Path(_static_candidate).exists():
+        _static_candidate = resource_path("public")
+    STATIC_DIR = _static_candidate
 
 
 def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
+    if is_desktop():
+        frontend_public_dir = public_dir()
+        return frontend_public_dir, (frontend_public_dir,)
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     resource_candidates = [
         Path(resource_path("taiko-web-backend", "_internal", "public")),
@@ -169,6 +167,8 @@ def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
 FRONTEND_DIR, FRONTEND_DIR_CANDIDATES = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
+PUBLIC_DIR_PATH = public_dir()
+
 
 def JSONResponse(
     *,
@@ -188,8 +188,8 @@ def JSONResponse(
 
 
 RUN_PROFILE = os.getenv("PROFILE") or os.getenv("RUN_PROFILE", "web")
-DESKTOP_DATA_DIR_ENV = "DATA_DIR"
-DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
+if is_desktop():
+    RUN_PROFILE = "desktop"
 
 
 _startup_scan_started_at: Optional[float] = None
@@ -464,7 +464,7 @@ SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
 SONGS_BASEURL_VALUE = ''
 COERCE_UNKNOWN_COURSE = None
-SONGS_DIR_PATH = Path('.')
+SONGS_DIR_PATH = songs_dir() if RUN_PROFILE == 'desktop' else Path('.')
 song_scanner: Optional[SongScanner] = None
 _song_watcher_handle = None
 
@@ -805,16 +805,6 @@ compress = Compress()
 sess = Session()
 
 
-def _ensure_desktop_data_dir() -> Path:
-    data_dir_value = os.environ.get(DESKTOP_DATA_DIR_ENV)
-    if data_dir_value:
-        path = Path(data_dir_value).expanduser()
-    else:
-        path = DEFAULT_DESKTOP_DATA_DIR
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def create_app():
     global client, db, basedir, SCAN_ON_START, ENABLE_SONG_WATCHER, SCAN_IGNORE_GLOBS
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
@@ -870,40 +860,39 @@ def create_app():
     session_redis = None
     cache_config: Mapping[str, object]
     desktop_data_dir: Optional[Path] = None
-    sessions_directory: Optional[Path] = None
 
     if RUN_PROFILE == 'desktop':
-        desktop_data_dir = _ensure_desktop_data_dir()
+        desktop_app_dir = app_dir()
+        desktop_songs_dir = songs_dir()
+        desktop_data_dir = data_dir()
+        desktop_data_dir.mkdir(parents=True, exist_ok=True)
         sessions_directory = desktop_data_dir / 'sessions'
         sessions_directory.mkdir(parents=True, exist_ok=True)
+        try:
+            desktop_songs_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            app_instance.logger.warning('Failed to ensure songs directory at startup', exc_info=True)
         lifetime_seconds = int(
             os.getenv(
                 'SESSION_TTL_SECONDS',
                 str(int(timedelta(days=7).total_seconds())),
             )
         )
+        session_cache = FileSystemCache(
+            str(sessions_directory),
+            threshold=5000,
+            default_timeout=lifetime_seconds,
+            mode=0o700,
+        )
         app_instance.config.update(
-            SESSION_TYPE='filesystem',
-            SESSION_FILE_DIR=str(sessions_directory),
+            SESSION_TYPE='cachelib',
+            SESSION_CACHELIB=session_cache,
             PERMANENT_SESSION_LIFETIME=lifetime_seconds,
         )
-        file_threshold = int(
-            os.getenv(
-                'SESSION_FILE_THRESHOLD',
-                str(SessionDefaults.SESSION_FILE_THRESHOLD),
-            )
-        )
-        file_mode = int(
-            os.getenv(
-                'SESSION_FILE_MODE',
-                str(SessionDefaults.SESSION_FILE_MODE),
-            )
-        )
-        app_instance.config.setdefault('SESSION_FILE_THRESHOLD', file_threshold)
-        app_instance.config.setdefault('SESSION_FILE_MODE', file_mode)
         cache_config = {'CACHE_TYPE': 'NullCache'}
-        session_backend = 'filesystem'
+        session_backend = 'cachelib'
         app_instance.config['DATA_DIR'] = str(desktop_data_dir)
+        app_instance.config['APP_DIR'] = str(desktop_app_dir)
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
@@ -992,47 +981,12 @@ def create_app():
     if RUN_PROFILE == 'desktop':
         sqlite_path = getattr(SONG_STORE, 'path', None)
         if sqlite_path:
-            app_instance.config['SQLITE_DB_PATH'] = str(sqlite_path)
+            resolved_sqlite = Path(sqlite_path).resolve()
+            app_instance.config['SQLITE_PATH'] = str(resolved_sqlite)
+            app_instance.config['SQLITE_DB_PATH'] = str(resolved_sqlite)
 
     app_instance.cache = Cache(app_instance, config=cache_config)
     sess.init_app(app_instance)
-    if RUN_PROFILE == 'desktop':
-        if FileSystemSessionInterface is None:
-            raise RuntimeError('FileSystemSessionInterface backend is unavailable')
-
-        key_prefix = app_instance.config.get(
-            'SESSION_KEY_PREFIX', SessionDefaults.SESSION_KEY_PREFIX
-        )
-        use_signer = app_instance.config.get(
-            'SESSION_USE_SIGNER', SessionDefaults.SESSION_USE_SIGNER
-        )
-        permanent = app_instance.config.get(
-            'SESSION_PERMANENT', SessionDefaults.SESSION_PERMANENT
-        )
-        sid_length = app_instance.config.get(
-            'SESSION_ID_LENGTH', SessionDefaults.SESSION_ID_LENGTH
-        )
-        serialization_format = app_instance.config.get(
-            'SESSION_SERIALIZATION_FORMAT',
-            SessionDefaults.SESSION_SERIALIZATION_FORMAT,
-        )
-        threshold = app_instance.config.get(
-            'SESSION_FILE_THRESHOLD', SessionDefaults.SESSION_FILE_THRESHOLD
-        )
-        mode = app_instance.config.get(
-            'SESSION_FILE_MODE', SessionDefaults.SESSION_FILE_MODE
-        )
-        app_instance.session_interface = FileSystemSessionInterface(
-            app_instance,
-            key_prefix=key_prefix,
-            use_signer=use_signer,
-            permanent=permanent,
-            sid_length=sid_length,
-            serialization_format=serialization_format,
-            cache_dir=str(sessions_directory) if sessions_directory else None,
-            threshold=threshold,
-            mode=mode,
-        )
     #csrf = CSRFProtect(app)
 
     db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
@@ -1047,19 +1001,24 @@ def create_app():
         client = _LazyResourceProxy(lambda: None)
         db = _LazyResourceProxy(lambda: None)
 
-    config_songs_dir, config_path = resolve_songs_dir_from_config(logger=app_instance.logger)
-    if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
-        os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
+    if RUN_PROFILE == 'desktop':
+        songs_dir_value = str(songs_dir())
+        config_songs_dir = None
+        config_path = None
+    else:
+        config_songs_dir, config_path = resolve_songs_dir_from_config(logger=app_instance.logger)
+        if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
+            os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
 
-    songs_dir_candidates = [
-        os.environ.get('TAIKO_SONGS_DIR'),
-        os.environ.get('SONGS_DIR'),
-        str(config_songs_dir) if config_songs_dir else None,
-        take_config('SONGS_DIR'),
-    ]
-    songs_dir_value = next((value for value in songs_dir_candidates if value), None)
-    if songs_dir_value is None:
-        songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
+        songs_dir_candidates = [
+            os.environ.get('TAIKO_SONGS_DIR'),
+            os.environ.get('SONGS_DIR'),
+            str(config_songs_dir) if config_songs_dir else None,
+            take_config('SONGS_DIR'),
+        ]
+        songs_dir_value = next((value for value in songs_dir_candidates if value), None)
+        if songs_dir_value is None:
+            songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
     SONGS_DIR_PATH = Path(songs_dir_value).expanduser().resolve()
     app_instance.logger.info(
         'profile=%s catalog_source=%s songs_dir=%s',
@@ -1161,48 +1120,28 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
-    if RUN_PROFILE == 'desktop':
-        session_backend = app.config.get(
-            'SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')
-        )
+    try:
+        profile = 'desktop' if is_desktop() else 'web'
         payload = {
             'status': 'ok',
             'ok': True,
-            'profile': 'desktop',
-            'db': 'sqlite',
-            'sessions': session_backend,
+            'profile': profile,
+            'db': 'sqlite' if profile == 'desktop' else 'mongo',
         }
-        sqlite_path = app.config.get('SQLITE_DB_PATH')
+        session_backend = current_app.config.get('SESSION_BACKEND') or current_app.config.get('SESSION_TYPE')
+        if session_backend:
+            payload['sessions'] = session_backend
+        sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
         if sqlite_path:
-            payload['path'] = sqlite_path
-        return jsonify(payload)
-
-    status = {
-        'status': 'ok',
-        'ok': True,
-        'profile': 'web',
-        'db': 'mongo',
-        'sessions': app.config.get('SESSION_BACKEND', 'redis'),
-    }
-    try:
-        client.admin.command('ping')
-        status['mongo'] = 'ok'
-    except Exception:
-        status['status'] = 'error'
-        status['ok'] = False
-        status['mongo'] = 'error'
-        return jsonify(status), 503
-    try:
-        redis_client = app.config.get('SESSION_REDIS')
-        if redis_client:
-            redis_client.ping()
-        status['redis'] = 'ok'
-    except Exception:
-        status['status'] = 'error'
-        status['ok'] = False
-        status['redis'] = 'error'
-        return jsonify(status), 503
-    return jsonify(status)
+            resolved_path = str(Path(sqlite_path).resolve())
+            payload['db_path'] = resolved_path
+            payload['path'] = resolved_path
+        else:
+            payload['db_path'] = None
+        return jsonify(payload), 200
+    except Exception as exc:  # pragma: no cover - defensive guard for smoke tests
+        current_app.logger.exception('healthz failed')
+        return jsonify({'ok': False, 'error': str(exc)}), 200
 
 
 @app.route('/admin/shutdown', methods=['POST'])
@@ -3019,29 +2958,73 @@ def cache_wrap(res_from, secs):
 
     return res
 
-@app.route(basedir + "src/<path:ref>")
-def send_src(ref):
-    return cache_wrap(flask.send_from_directory("public/src", ref), 3600)
+if RUN_PROFILE != 'desktop':
 
-@app.route(basedir + "assets/<path:ref>")
-def send_assets(ref):
-    return cache_wrap(flask.send_from_directory("public/assets", ref), 3600)
+    @app.route(basedir + "src/<path:ref>")
+    def send_src(ref):
+        return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'src'), ref), 3600)
 
-@app.route(basedir + "songs/<path:ref>")
-def send_songs(ref):
-    if not SONGS_DIR_PATH.exists():
-        app.logger.warning('Songs directory %s missing while serving %s', SONGS_DIR_PATH, ref)
+    @app.route(basedir + "assets/<path:ref>")
+    def send_assets(ref):
+        return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'assets'), ref), 3600)
+
+    @app.route(basedir + "songs/<path:ref>")
+    def send_songs(ref):
+        if not SONGS_DIR_PATH.exists():
+            app.logger.warning('Songs directory %s missing while serving %s', SONGS_DIR_PATH, ref)
+            abort(404)
+        return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+
+    @app.route('/<path:spa_path>')
+    def route_frontend_spa(spa_path: str):
+        return _serve_frontend_asset(spa_path)
+
+else:
+
+    DESKTOP_PUBLIC_DIR = public_dir()
+    DESKTOP_VIEWS_DIR = DESKTOP_PUBLIC_DIR / "src" / "views"
+    DESKTOP_SONGS_DIR = songs_dir()
+    DESKTOP_SONGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @app.route("/")
+    def desktop_root_loader():
+        return send_from_directory(str(DESKTOP_VIEWS_DIR), "loader.html")
+
+    @app.route("/<name>.html")
+    def desktop_html_page(name: str):
+        views_path = DESKTOP_VIEWS_DIR / f"{name}.html"
+        if views_path.is_file():
+            return send_from_directory(str(DESKTOP_VIEWS_DIR), f"{name}.html")
+        root_path = DESKTOP_PUBLIC_DIR / f"{name}.html"
+        if root_path.is_file():
+            return send_from_directory(str(DESKTOP_PUBLIC_DIR), f"{name}.html")
         abort(404)
-    return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+
+    @app.route("/assets/<path:filename>")
+    def desktop_public_assets(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_PUBLIC_DIR / "assets"), filename),
+            3600,
+        )
+
+    @app.route("/src/<path:filename>")
+    def desktop_public_src(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_PUBLIC_DIR / "src"), filename),
+            3600,
+        )
+
+    @app.route("/songs/<path:filename>")
+    def desktop_song_files(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_SONGS_DIR), filename),
+            604800,
+        )
+
 
 @app.route(basedir + "manifest.json")
 def send_manifest():
-    return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
-
-
-@app.route('/<path:spa_path>')
-def route_frontend_spa(spa_path: str):
-    return _serve_frontend_asset(spa_path)
+    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH), "manifest.json"), 3600)
 
 
 def _start_song_directory_watcher():

@@ -7,6 +7,7 @@ const treeKill = require('tree-kill');
 const { spawn } = require('child_process');
 
 const APP_ID = 'com.taiko.web.desktop';
+const BACKEND_PORT = 8000;
 const isDev = process.env.ELECTRON_DEV === '1';
 const isWindows = process.platform === 'win32';
 
@@ -16,9 +17,8 @@ let backendUrl = null;
 let backendReady = false;
 let isShuttingDown = false;
 let failureDialogOpen = false;
+let backendRoot = '';
 let songsDir = '';
-let configPath = '';
-let desktopConfig = {};
 
 log.transports.file.level = 'info';
 log.info('Starting Taiko Web Desktop');
@@ -40,15 +40,9 @@ app.on('second-instance', () => {
   }
 });
 
-const dataDir = resolveDirectory('DATA_DIR', app.getPath('userData'));
-({ songsDir, configPath, config: desktopConfig } = ensureDesktopConfig());
-const envSongsOverride = process.env.TAIKO_SONGS_DIR || process.env.SONGS_DIR;
-if (envSongsOverride) {
-  songsDir = path.resolve(envSongsOverride);
-  ensureDirectoryExists(songsDir);
-  log.info('Using songs directory override from environment at', songsDir);
-}
-log.info('Desktop config path', configPath);
+backendRoot = resolveBackendRoot();
+songsDir = ensureSongsDirectory(backendRoot);
+log.info('Backend root resolved to', backendRoot);
 log.info('Songs directory configured at', songsDir);
 
 ipcMain.handle('open-songs-folder', async () => openSongsFolder());
@@ -59,14 +53,6 @@ ipcMain.handle('graceful-quit', async () => {
   return true;
 });
 
-function resolveDirectory(envKey, fallbackPath) {
-  const target = process.env[envKey] ? path.resolve(process.env[envKey]) : fallbackPath;
-  if (!fs.existsSync(target)) {
-    fs.mkdirSync(target, { recursive: true });
-  }
-  return target;
-}
-
 function ensureDirectoryExists(targetPath) {
   if (!fs.existsSync(targetPath)) {
     fs.mkdirSync(targetPath, { recursive: true });
@@ -74,58 +60,30 @@ function ensureDirectoryExists(targetPath) {
   return targetPath;
 }
 
-function ensureDesktopConfig() {
-  const userDataDir = app.getPath('userData');
-  ensureDirectoryExists(userDataDir);
-  const targetConfigPath = path.join(userDataDir, 'config.json');
-  let needsPersist = false;
-  let configData = {};
-
-  if (fs.existsSync(targetConfigPath)) {
-    try {
-      const raw = fs.readFileSync(targetConfigPath, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        configData = parsed;
-      } else {
-        needsPersist = true;
-      }
-    } catch (error) {
-      log.warn('Failed to parse desktop config, recreating.', error);
-      needsPersist = true;
-    }
+function resolveBackendRoot() {
+  const exeName = isWindows ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+  const candidates = [];
+  if (isDev) {
+    candidates.push(path.resolve(__dirname, '..', '..', 'dist', 'backend', 'taiko-web-backend'));
+    candidates.push(path.resolve(__dirname, '..', 'dist', 'backend', 'taiko-web-backend'));
   } else {
-    needsPersist = true;
+    const installRoot = resolveInstallRoot();
+    candidates.push(path.join(installRoot, 'resources', 'app', 'backend'));
+    candidates.push(path.join(installRoot, 'resources', 'backend'));
+    candidates.push(path.join(installRoot, 'backend'));
   }
-
-  const defaultSongsDir = path.join(resolveInstallRoot(), 'songs');
-  let configuredSongsDir = '';
-  if (configData && typeof configData.songs_dir === 'string') {
-    configuredSongsDir = configData.songs_dir.trim();
-  }
-  if (!configuredSongsDir) {
-    configuredSongsDir = defaultSongsDir;
-    needsPersist = true;
-  }
-
-  const absoluteSongsDir = path.resolve(configuredSongsDir);
-  if (configData.songs_dir !== absoluteSongsDir) {
-    configData.songs_dir = absoluteSongsDir;
-    needsPersist = true;
-  }
-
-  ensureDirectoryExists(absoluteSongsDir);
-
-  if (needsPersist) {
-    try {
-      fs.writeFileSync(targetConfigPath, JSON.stringify({ songs_dir: absoluteSongsDir }, null, 2), 'utf-8');
-      log.info('Persisted desktop config to', targetConfigPath);
-    } catch (error) {
-      log.error('Failed to persist desktop config', error);
+  for (const candidate of candidates) {
+    const binaryCandidate = path.join(candidate, exeName);
+    if (fs.existsSync(binaryCandidate)) {
+      return candidate;
     }
   }
+  return candidates[0];
+}
 
-  return { songsDir: absoluteSongsDir, configPath: targetConfigPath, config: configData };
+function ensureSongsDirectory(root) {
+  const target = path.join(root, 'songs');
+  return ensureDirectoryExists(target);
 }
 
 function resolveInstallRoot() {
@@ -302,17 +260,6 @@ function createWindow() {
   return mainWindow;
 }
 
-function parsePortCandidate(value) {
-  if (!value) {
-    return null;
-  }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
-    return null;
-  }
-  return parsed;
-}
-
 async function isPortAvailable(port) {
   return new Promise((resolve) => {
     const server = http.createServer();
@@ -335,67 +282,28 @@ async function isPortAvailable(port) {
   });
 }
 
-async function findFreePort() {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const port = await new Promise((resolve, reject) => {
-      const server = http.createServer();
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
-        const address = server.address();
-        const chosenPort = typeof address === 'object' && address ? address.port : null;
-        server.close(() => resolve(chosenPort));
-      });
-    });
-    if (typeof port === 'number' && port > 0) {
-      return port;
-    }
-  }
-  throw new Error('Unable to allocate free port for backend');
-}
-
 async function allocateBackendPort() {
-  const candidates = [
-    ['TAIKO_DESKTOP_PORT', process.env.TAIKO_DESKTOP_PORT],
-    ['PORT', process.env.PORT],
-    ['UVICORN_PORT', process.env.UVICORN_PORT],
-  ];
-  for (const [name, value] of candidates) {
-    const candidate = parsePortCandidate(value);
-    if (!candidate) {
-      continue;
-    }
-    if (await isPortAvailable(candidate)) {
-      log.info(`Using configured port ${candidate} from ${name}`);
-      return candidate;
-    }
-    log.warn(`Configured port ${candidate} from ${name} is unavailable; falling back.`);
+  const desired = BACKEND_PORT;
+  const envPort = process.env.PORT ? Number(process.env.PORT) : null;
+  if (envPort && envPort !== desired) {
+    log.warn(`Ignoring PORT=${envPort}; desktop build uses fixed port ${desired}`);
   }
-  const dynamicPort = await findFreePort();
-  log.info('Allocated dynamic backend port', dynamicPort);
-  return dynamicPort;
+  const available = await isPortAvailable(desired);
+  if (!available) {
+    throw new Error(`Backend port ${desired} is unavailable. Is another instance running?`);
+  }
+  return desired;
 }
 
 function resolveBackendBinary() {
   const exeName = isWindows ? 'taiko-web-backend.exe' : 'taiko-web-backend';
-  if (isDev) {
-    const candidates = [
-      path.resolve(__dirname, '..', '..', 'dist', 'backend', exeName),
-      path.resolve(__dirname, '..', 'dist', 'backend', exeName),
-    ];
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    return candidates[0];
-  }
-  if (!isDev && process.platform === 'darwin') {
-    return path.join(resolveInstallRoot(), 'Resources', 'backend', exeName);
-  }
-  return path.join(resolveInstallRoot(), 'backend', exeName);
+  const root = backendRoot || resolveBackendRoot();
+  return path.join(root, exeName);
 }
 
 function spawnBackend(port) {
+  backendRoot = backendRoot || resolveBackendRoot();
+  songsDir = ensureSongsDirectory(backendRoot);
   const backendPath = resolveBackendBinary();
   if (!fs.existsSync(backendPath)) {
     throw new Error(`Backend binary not found at ${backendPath}`);
@@ -405,19 +313,11 @@ function spawnBackend(port) {
   const env = {
     ...process.env,
     RUN_PROFILE: 'desktop',
-    TAIKO_DESKTOP_HOST: '127.0.0.1',
-    TAIKO_DESKTOP_PORT: String(chosenPort),
     PORT: String(chosenPort),
-    DATA_DIR: dataDir,
-    SONGS_DIR: songsDir,
   };
-  env.TAIKO_SONGS_DIR = songsDir;
-  env.SONGS_DIR = songsDir;
-  if (configPath) {
-    env.TAIKO_DESKTOP_CONFIG_PATH = configPath;
-  }
-  const child = spawn(backendPath, ['--songs-dir', songsDir], {
+  const child = spawn(backendPath, [], {
     env,
+    cwd: backendRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
     windowsHide: true,

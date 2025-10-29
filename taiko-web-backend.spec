@@ -1,13 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from pathlib import Path
 
 from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
-project_root = Path(__file__).resolve().parent
-frontend_build = project_root / 'client' / 'build'
+# PyInstaller executes the spec with the working directory set to the spec's
+# location. ``__file__`` is not defined in this context, so rely on the process
+# cwd instead.
+project_root = Path(os.getcwd()).resolve()
+public_dir = project_root / "public"
+templates_dir = project_root / "templates"
 
 datas = []
+collect_targets = []
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 tmp_ret = collect_all('bcrypt')
@@ -20,21 +26,17 @@ hiddenimports += collect_submodules('lock')
 
 datas += collect_data_files('config', include_py_files=False)
 
-if frontend_build.is_dir():
-    datas += Tree(str(frontend_build), prefix='taiko_web_backend/_internal/public').toc
+if public_dir.is_dir():
+    collect_targets.append(Tree(str(public_dir), prefix='public'))
+else:
+    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
 
-extra_data = [
-    (Path('templates'), 'web/templates'),
-    (Path('public'), 'web/static'),
-]
-for source_path, target in extra_data:
-    if source_path.exists():
-        datas.append((str(source_path), target.replace('\\', '/')))
-
+if templates_dir.is_dir():
+    collect_targets.append(Tree(str(templates_dir), prefix='templates'))
 
 a = Analysis(
-    ['standalone\\run_desktop.py'],
-    pathex=[],
+    [str(project_root / 'standalone' / 'run_desktop.py')],
+    pathex=[str(project_root)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -66,4 +68,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    *collect_targets,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='taiko-web-backend',
 )

@@ -28,26 +28,29 @@ docker compose up -d
 
 ## Desktop run for DEV
 
-The desktop profile stores persistent data under `DATA_DIR` (defaults to
-`~/.taiko-web-data` when the variable is not set). Sessions live in
-`$DATA_DIR/sessions`, the SQLite database in `$DATA_DIR/taiko.db`, and logs
-default to `$DATA_DIR/logs` when file logging is enabled. This directory also
-contains the `songs/` subfolder used by the scanner.
+The desktop profile stores persistent state under `DATA_DIR` (a per-user data
+directory when the variable is not set). Sessions live in `$DATA_DIR/sessions`,
+the SQLite database in `$DATA_DIR/taiko.db`, and logs default to
+`$DATA_DIR/logs` when file logging is enabled. Song charts are **not** read from
+`DATA_DIR`: the scanner always watches the `songs/` folder next to the running
+backend binary (when developing from sources that resolves to `<repo-root>/songs`).
 
 ### Quick start standalone DEV version
 
 ```bash
 # Unix/macOS shell
-RUN_PROFILE=desktop DATA_DIR="$HOME/.taiko-web-data" python -m standalone.run_desktop --port 8000
+RUN_PROFILE=desktop python -m standalone.run_desktop --port 8000
 
 # Windows PowerShell
-$env:RUN_PROFILE="desktop"; $env:DATA_DIR="$env:USERPROFILE\.taiko-web-data"; python -m standalone.run_desktop --port 8000
+$env:RUN_PROFILE="desktop"; python -m standalone.run_desktop --port 8000
 
 # Windows cmd.exe
 set RUN_PROFILE=desktop
-set DATA_DIR=%USERPROFILE%\.taiko-web-data
 python -m standalone.run_desktop --port 8000
 ```
+
+To relocate the SQLite database and session files, set `DATA_DIR` before
+launching the backend (for example `export DATA_DIR=/path/to/taiko-data`).
 
 ## Desktop binaries
 
@@ -98,10 +101,17 @@ or from the workflow run summary. Each release ships the following files:
   RUN_PROFILE=desktop ./taiko-web-backend --port 8000
   ```
 
-All desktop builds honour the `DATA_DIR` environment variable (defaults to
-`~/.taiko-web-data` on Linux/macOS and `%USERPROFILE%\.taiko-web-data` on
-Windows). Songs must live under `$DATA_DIR/songs`, regardless of how the backend
-was installed.
+All desktop builds honour the `DATA_DIR` environment variable. When it is not
+set the backend falls back to a platform-specific per-user data directory for
+the SQLite database and session files. Songs are bundled and discovered
+exclusively from the `songs/` directory next to the backend binary (for any
+packaging format, including installers, zips, and tarballs):
+
+- Windows: `<install-dir>\songs\`
+- macOS/Linux: `<install-dir>/songs/`
+
+Drop each `.tja`/`.tjc` chart into its own subdirectory inside that `songs/`
+folder and restart the backend to rescan the library.
 
 > **Note**
 > The Windows binaries are unsigned, so SmartScreen may display a warning. Use
@@ -132,12 +142,14 @@ pip install -r requirements.txt
 # First run (Desktop)
 # profile and directories can be set explicitly
 export RUN_PROFILE=desktop
-export DATA_DIR="${HOME}/.taiko-web-data"
+# Optional: override where the SQLite DB and sessions live
+# export DATA_DIR="/path/to/taiko-data"
 # Windows PowerShell:
-# $env:RUN_PROFILE="desktop"; $env:DATA_DIR="$env:USERPROFILE\.taiko-web-data"
+# $env:RUN_PROFILE="desktop"
+# $env:DATA_DIR="C:\\path\\to\\taiko-data"  # optional
 # Windows cmd.exe:
 # set RUN_PROFILE=desktop
-# set DATA_DIR=%USERPROFILE%\.taiko-web-data
+# set DATA_DIR=C:\path\to\taiko-data  # optional
 
 # start the local server (uvicorn by default)
 python -m standalone.run_desktop --port 8000
@@ -158,11 +170,11 @@ server via `TAIKO_DESKTOP_SERVER`.
 Open: http://127.0.0.1:8000/healthz — it should respond with:
 
 ```
-{"ok": true, "profile": "desktop", "db": "sqlite", "sessions": "filesystem"}
+{"ok": true, "status": "ok", "profile": "desktop", "db": "sqlite", "db_path": "<DATA_DIR>/taiko.db", "sessions": "filesystem"}
 ```
 
 The desktop profile disables Mongo-backed features; the `/healthz` response
-surfaces `db="sqlite"` to reflect the local storage layer in use.
+surfaces the embedded SQLite backend and the absolute path to the database file.
 
 Then visit http://127.0.0.1:8000/ — the web UI ships with the backend and works
 out of the box without an additional Node/webpack build step.
@@ -172,18 +184,26 @@ out of the box without an additional Node/webpack build step.
 - SQLite DB: `${DATA_DIR}/taiko.db`
 - Sessions: `${DATA_DIR}/sessions`
 - Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
-- Songs: `${DATA_DIR}/songs`
+- Songs: `<install-dir>/songs` (when running from sources this resolves to `<repo-root>/songs`)
 
 ### Adding songs
 
-By default, the desktop profile scans for songs in `${DATA_DIR}/songs/` (for
-example, `~/.taiko-web-data/songs/` on Linux and macOS or
-`%USERPROFILE%\.taiko-web-data\songs\` on Windows). Each song belongs in its
-own directory that contains a `.tja` or `.tjc` chart file and optional audio or
-background assets:
+The desktop profile scans `<app-dir>/songs/`, where `<app-dir>` is the directory
+containing the running backend binary. When working from sources this resolves
+to `<repo-root>/songs/`; packaged builds include an empty `songs/` folder next to
+the executable. Typical installation targets:
+
+- **Windows** installer/portable ZIP: `<install-dir>\backend\taiko-web-backend\songs`
+- **macOS** `.app`: `Taiko Web Desktop.app/Contents/Resources/backend/taiko-web-backend/songs`
+- **Linux** AppImage/ZIP: `<install-dir>/backend/taiko-web-backend/songs`
+
+You can also use the “Open Songs Folder” menu entry inside the desktop app to
+jump directly to the correct directory. Each song belongs in its own directory
+that contains a `.tja` or `.tjc` chart file and optional audio/background
+assets:
 
 ```
-~/.taiko-web-data/
+taiko-web-backend/
 └── songs/
     ├── MySong1/
     │   ├── MySong1.tja

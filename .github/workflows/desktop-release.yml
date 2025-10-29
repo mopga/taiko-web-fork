@@ -70,53 +70,141 @@ jobs:
             throw "Missing required build icon at $iconPath"
           }
 
-      - name: Enable Corepack (pre-setup-node)
-        run: corepack enable
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Prepare pnpm (pre-setup-node)
-        run: corepack prepare pnpm@9.12.3 --activate
-
-      - name: Pre-check pnpm
-        run: pnpm -v
-
-      - name: Resolve pnpm store path
-        id: pnpm-store
+      - name: Build backend (PyInstaller onedir)
         shell: bash
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
+          python standalone/packaging/build_backend.py
 
-      - name: Ensure pnpm store exists
+      - name: Verify backend files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== dist tree =="
+          ls -laR standalone/dist || true
+          LINUX_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend"
+          WIN_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend.exe"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            if [[ ! -f "${LINUX_BIN}" ]]; then
+              echo "::error::Missing ${LINUX_BIN}" >&2
+              exit 1
+            fi
+            chmod +x "${LINUX_BIN}"
+          else
+            if [[ ! -f "${WIN_BIN}" ]]; then
+              echo "::error::Missing ${WIN_BIN}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Show backend app_dir content
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== app dir =="
+          ls -la "standalone/dist/backend/taiko-web-backend" || true
+
+      - name: Smoke backend
         shell: pwsh
         run: |
-          $store = "${{ steps.pnpm-store.outputs.path }}"
-          if (-not (Test-Path $store)) {
-            New-Item -ItemType Directory -Force -Path $store | Out-Null
+          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
+          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
+          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
+          $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+          $env:RUN_PROFILE = "desktop"
+          $env:PORT = "8000"
+          $env:DATA_DIR = $dataDir
+          Push-Location $backendRoot
+          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          for ($i=0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            if ($i -eq 29) { throw "Backend did not become healthy" }
           }
-          Write-Host "pnpm store dir: $store"
+          $health = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Select-Object -ExpandProperty Content
+          try {
+            $healthJson = $health | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            Write-Host "---- /healthz raw body ----"
+            Write-Host $health
+            throw "Failed to parse /healthz JSON: $($_.Exception.Message)"
+          }
+          if ($healthJson.profile -ne 'desktop') { throw "Unexpected profile: $($healthJson.profile)" }
+          if (-not ($healthJson.db_path -and ($healthJson.db_path -like (Join-Path $dataDir '*')))) {
+            throw "db_path does not reside in DATA_DIR: $($healthJson.db_path)"
+          }
+          Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/ | Out-Null
+          Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs | Out-Null
+          Stop-Process -Id $P.Id -Force
+          Pop-Location
 
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-
-
-      - name: Setup Node (frontend)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install frontend dependencies
-        working-directory: client
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        working-directory: client
-        run: pnpm build
-
-      - name: Assert frontend build exists
-        run: test -f client/build/index.html
-        shell: bash
+      - name: Smoke songs injection
+        shell: pwsh
+        run: |
+          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
+          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
+          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
+          $songsRoot = Join-Path $backendRoot "songs"
+          New-Item -ItemType Directory -Force -Path (Join-Path $songsRoot "test-track") | Out-Null
+          Copy-Item -Recurse "tools/ci-assets/test-track\*" (Join-Path $songsRoot "test-track")
+          $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data-inject"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+          $env:RUN_PROFILE = "desktop"
+          $env:PORT = "8000"
+          $env:DATA_DIR = $dataDir
+          Push-Location $backendRoot
+          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          for ($i=0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            if ($i -eq 29) { throw "Backend did not become healthy" }
+          }
+          $resp = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs
+          try {
+            $payload = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            Write-Host "---- /api/songs raw body ----"
+            Write-Host $resp.Content
+            throw "Failed to parse /api/songs JSON: $($_.Exception.Message)"
+          }
+          if ($null -eq $payload) { throw "Songs payload is null" }
+          if ($payload -is [pscustomobject] -and ($payload | Get-Member -Name items -ErrorAction SilentlyContinue)) {
+            $songs = @($payload.items)
+          } elseif ($payload -is [System.Collections.IEnumerable]) {
+            $songs = @($payload)
+          } else {
+            throw "Unexpected songs payload type: $($payload.GetType().FullName)"
+          }
+          $songs = $songs | Where-Object { $_ -ne $null }
+          if ($songs.Count -lt 1) { throw "Songs payload did not include the injected track" }
+          $first = $songs[0]
+          if (-not $first.is_playable) { throw "First song is not marked playable" }
+          $difficulties = $first.difficulties
+          if ($null -eq $difficulties) { throw "First song missing difficulties" }
+          $difficultyKeys = @()
+          if ($difficulties -is [pscustomobject]) {
+            $difficultyKeys = ($difficulties | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+          } elseif ($difficulties -is [System.Collections.IDictionary]) {
+            $difficultyKeys = $difficulties.Keys
+          }
+          if ($difficultyKeys.Count -eq 0) { throw "First song has no difficulties entries" }
+          foreach ($name in $difficultyKeys) {
+            $value = $difficulties.$name
+            if ($difficulties -is [System.Collections.IDictionary]) { $value = $difficulties[$name] }
+            if (-not ($value -is [pscustomobject] -or $value -is [System.Collections.IDictionary])) {
+              throw "Difficulty $name is not an object"
+            }
+          }
+          Stop-Process -Id $P.Id -Force
+          Pop-Location
 
       - name: Setup Node (electron)
         uses: actions/setup-node@v4
@@ -125,21 +213,9 @@ jobs:
           cache: "npm"
           cache-dependency-path: standalone/electron/package-lock.json
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller pyinstaller-hooks-contrib
-
       - name: Install Electron dependencies
         working-directory: standalone/electron
-        run: npm install
+        run: npm ci
 
       - name: Determine desktop metadata
         id: version
@@ -170,7 +246,12 @@ jobs:
             throw "Backend staging directory missing: $backendDir"
           }
 
-          $backendExe = Join-Path $backendDir 'taiko-web-backend.exe'
+          $backendRoot = Join-Path $backendDir 'taiko-web-backend'
+          if (-not (Test-Path $backendRoot)) {
+            throw "Backend application directory missing: $backendRoot"
+          }
+
+          $backendExe = Join-Path $backendRoot 'taiko-web-backend.exe'
           if (-not (Test-Path $backendExe)) {
             throw "Backend executable missing: $backendExe"
           }
@@ -179,6 +260,11 @@ jobs:
           if (-not $info.Length -or $info.Length -le 0) {
             throw "Backend executable is empty: $backendExe"
           }
+
+          $publicDir = Join-Path $backendRoot 'public'
+          if (-not (Test-Path $publicDir)) { throw "Bundled public directory missing: $publicDir" }
+          $songsDir = Join-Path $backendRoot 'songs'
+          if (-not (Test-Path $songsDir)) { throw "Bundled songs directory missing: $songsDir" }
 
       - name: Verify staging artifacts
         shell: pwsh
@@ -205,7 +291,9 @@ jobs:
 
           $pathsToCheck = @()
           $pathsToCheck += $expectedMain
-          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend.exe')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/taiko-web-backend.exe')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/public')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/songs')
           $pathsToCheck += (Join-Path $rootPath 'assets/launcher/app.ico')
           $resourcesDir = Join-Path $rootPath 'resources'
           $pathsToCheck += $resourcesDir
@@ -361,8 +449,63 @@ jobs:
           name: taiko-web-desktop-windows
           path: ${{ steps.installer.outputs.path }}
 
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build backend (PyInstaller onedir)
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
+          python standalone/packaging/build_backend.py
+
+      - name: Verify backend files
+        run: |
+          set -euo pipefail
+          echo "== dist tree =="
+          ls -laR standalone/dist || true
+          LINUX_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend"
+          WIN_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend.exe"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            test -f "${LINUX_BIN}" || { echo "::error::Missing ${LINUX_BIN}"; exit 1; }
+            chmod +x "${LINUX_BIN}"
+          else
+            test -f "${WIN_BIN}" || { echo "::error::Missing ${WIN_BIN}"; exit 1; }
+          fi
+
+      - name: Show backend app_dir content
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "== app dir =="
+          ls -la "standalone/dist/backend/taiko-web-backend" || true
+
+      - name: Clean packaged songs directory
+        run: |
+          rm -rf standalone/dist/backend/taiko-web-backend/songs/*
+
+      - name: Smoke backend (empty library)
+        run: |
+          TAIKO_SMOKE_COPY_TRACK=0 bash scripts/smoke_run_linux.sh
+
+      - name: Smoke backend with injected song
+        run: |
+          bash scripts/smoke_run_linux.sh
+
   release:
-    needs: build-windows
+    needs:
+      - build-windows
+      - build-linux
     runs-on: ubuntu-latest
     if: >
       github.event_name != 'pull_request' &&
