@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-from server.paths import get_app_dir, get_songs_dir_desktop
+from server.paths import data_dir, songs_dir
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -139,11 +139,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 
 def _resolve_data_dir(value: Optional[str]) -> Path:
-    app_dir = get_app_dir()
-    if value and Path(value).expanduser().resolve() != app_dir.resolve():
-        LOGGER.warning("desktop.data_dir override is ignored; using app directory %s", app_dir)
-    app_dir.mkdir(parents=True, exist_ok=True)
-    return app_dir
+    if value:
+        resolved = Path(value).expanduser().resolve()
+    else:
+        resolved = data_dir()
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def _prepare_environment(*, data_dir: Path) -> None:
@@ -153,7 +154,7 @@ def _prepare_environment(*, data_dir: Path) -> None:
 
 def _log_startup(*, server: str, host: str, port: int, data_dir: Path, songs_dir: Path, app) -> None:
     sessions_dir = app.config.get("SESSION_FILE_DIR")
-    sqlite_path = app.config.get("SQLITE_DB_PATH")
+    sqlite_path = app.config.get("SQLITE_PATH") or app.config.get("SQLITE_DB_PATH")
     LOGGER.info(
         "desktop.start profile=desktop server=%s host=%s port=%s data_dir=%s songs_dir=%s db_path=%s sessions_dir=%s",
         server,
@@ -246,13 +247,13 @@ def _run_waitress(app, *, host: str, port: int) -> None:
 def main(argv: Optional[Iterable[str]] = None) -> int:
     _configure_logging()
     args = _parse_args(argv)
-    data_dir = _resolve_data_dir(args.data_dir)
-    songs_dir = get_songs_dir_desktop()
+    data_dir_path = _resolve_data_dir(args.data_dir)
+    songs_root = songs_dir()
     try:
-        songs_dir.mkdir(parents=True, exist_ok=True)
+        songs_root.mkdir(parents=True, exist_ok=True)
     except Exception:
-        LOGGER.warning("desktop.songs_dir ensure_failed path=%s", songs_dir, exc_info=True)
-    _prepare_environment(data_dir=data_dir)
+        LOGGER.warning("desktop.songs_dir ensure_failed path=%s", songs_root, exc_info=True)
+    _prepare_environment(data_dir=data_dir_path)
 
     host, port = _resolve_host_port(args)
     os.environ.setdefault("PORT", str(port))
@@ -264,11 +265,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         server=server_choice,
         host=host,
         port=port,
-        data_dir=data_dir,
-        songs_dir=songs_dir,
+        data_dir=data_dir_path,
+        songs_dir=songs_root,
         app=flask_app,
     )
-    LOGGER.info("desktop.songs_dir path=%s", songs_dir)
+    LOGGER.info("desktop.songs_dir path=%s", songs_root)
 
     try:
         if server_choice == "waitress":

@@ -7,7 +7,7 @@ New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
-$exe = "dist\backend\taiko-web-backend\taiko-web-backend.exe"
+$exe = "standalone\dist\backend\taiko-web-backend\taiko-web-backend.exe"
 if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
@@ -47,11 +47,26 @@ try {
   $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
   # --- дождаться здоровья (status: ok) ---
-  Invoke-WithRetry {
+  $healthResponse = Invoke-WithRetry {
     $r = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 3
     if ($r.StatusCode -ne 200 -or ($r.Content -notmatch '"status"\s*:\s*"ok"')) { throw "healthz not ok" }
     $r
-  } | Out-Null
+  }
+  $healthJson = $null
+  try {
+    $healthJson = $healthResponse.Content | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    Write-Host "---- /healthz raw body ----"
+    Write-Host $healthResponse.Content
+    throw "healthz JSON parse failed: $($_.Exception.Message)"
+  }
+  Assert ($healthJson.profile -eq 'desktop') "Unexpected profile: $($healthJson.profile)"
+  $dbPath = $healthJson.db_path
+  Assert ($dbPath) "db_path missing from /healthz payload"
+  Assert (Test-Path -LiteralPath $dbPath) "db_path does not exist: $dbPath"
+  $dbResolved = (Resolve-Path -LiteralPath $dbPath).Path
+  $expectedRoot = (Resolve-Path -LiteralPath $env:DATA_DIR).Path
+  Assert ($dbResolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) "db_path not under DATA_DIR"
 
   # --- мягко подождать появления каталога в логе (если лог уже есть) ---
   if (Test-Path $stdoutLog -PathType Leaf) {

@@ -81,10 +81,15 @@ def build_backend(*, profile: str, outdir: Path) -> None:
     if not source_dir.is_dir():
         raise RuntimeError(f"PyInstaller output missing at {source_dir}")
 
-    if outdir.exists():
-        shutil.rmtree(outdir)
-    shutil.copytree(source_dir, outdir)
-    print(f"Backend staged at {outdir}")
+    target_dir = outdir / NAME
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    else:
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, target_dir)
+    songs_target = target_dir / "songs"
+    songs_target.mkdir(parents=True, exist_ok=True)
+    print(f"Backend staged at {target_dir}")
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -86,15 +86,31 @@ jobs:
       - name: Smoke backend
         shell: pwsh
         run: |
-          $exe = Get-ChildItem "standalone/dist/backend" -Filter *.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "Backend exe not found" }
+          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
+          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
+          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
+          $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
           $env:RUN_PROFILE = "desktop"
           $env:PORT = "8000"
-          Push-Location $exe.DirectoryName
-          Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          $env:DATA_DIR = $dataDir
+          Push-Location $backendRoot
+          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
           for ($i=0; $i -lt 30; $i++) {
             try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
             if ($i -eq 29) { throw "Backend did not become healthy" }
+          }
+          $health = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Select-Object -ExpandProperty Content
+          try {
+            $healthJson = $health | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            Write-Host "---- /healthz raw body ----"
+            Write-Host $health
+            throw "Failed to parse /healthz JSON: $($_.Exception.Message)"
+          }
+          if ($healthJson.profile -ne 'desktop') { throw "Unexpected profile: $($healthJson.profile)" }
+          if (-not ($healthJson.db_path -and ($healthJson.db_path -like (Join-Path $dataDir '*')))) {
+            throw "db_path does not reside in DATA_DIR: $($healthJson.db_path)"
           }
           Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/ | Out-Null
           Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs | Out-Null
@@ -104,16 +120,19 @@ jobs:
       - name: Smoke songs injection
         shell: pwsh
         run: |
-          $exe = Get-ChildItem "standalone/dist/backend" -Filter *.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "Backend exe not found" }
-          $appDir = $exe.DirectoryName
-          $songsRoot = Join-Path $appDir "songs"
+          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
+          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
+          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
+          $songsRoot = Join-Path $backendRoot "songs"
           New-Item -ItemType Directory -Force -Path (Join-Path $songsRoot "test-track") | Out-Null
           Copy-Item -Recurse "tools/ci-assets/test-track\*" (Join-Path $songsRoot "test-track")
+          $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data-inject"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
           $env:RUN_PROFILE = "desktop"
           $env:PORT = "8000"
-          Push-Location $appDir
-          Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          $env:DATA_DIR = $dataDir
+          Push-Location $backendRoot
+          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
           for ($i=0; $i -lt 30; $i++) {
             try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
             if ($i -eq 29) { throw "Backend did not become healthy" }

@@ -41,6 +41,7 @@ from flask import (
     make_response,
     send_from_directory,
     Response,
+    current_app,
 )
 from flask_caching import Cache
 from flask_compress import Compress
@@ -73,10 +74,11 @@ from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
 from server.paths import (
-    get_app_dir,
-    get_public_dir,
-    get_songs_dir_desktop,
-    is_desktop_profile,
+    app_dir,
+    data_dir,
+    public_dir,
+    songs_dir,
+    is_desktop,
 )
 from tools.init_db_schema import init_db_schema
 from storage.factory import StorageBundle, create_storage_bundle
@@ -121,8 +123,8 @@ def resource_path(*parts: str) -> str:
 
 
 TEMPLATES_DIR = os.getenv("TAIKO_TEMPLATES_DIR") or resource_path("web", "templates")
-if is_desktop_profile():
-    STATIC_DIR = str(get_public_dir())
+if is_desktop():
+    STATIC_DIR = str(public_dir())
 else:
     _static_candidate = os.getenv("TAIKO_STATIC_DIR") or resource_path("web", "static")
     if not Path(_static_candidate).exists():
@@ -131,9 +133,9 @@ else:
 
 
 def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
-    if is_desktop_profile():
-        public_dir = get_public_dir()
-        return public_dir, (public_dir,)
+    if is_desktop():
+        frontend_public_dir = public_dir()
+        return frontend_public_dir, (frontend_public_dir,)
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     resource_candidates = [
         Path(resource_path("taiko-web-backend", "_internal", "public")),
@@ -181,7 +183,7 @@ def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
 FRONTEND_DIR, FRONTEND_DIR_CANDIDATES = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
-PUBLIC_DIR_PATH = get_public_dir()
+PUBLIC_DIR_PATH = public_dir()
 
 
 def JSONResponse(
@@ -202,10 +204,8 @@ def JSONResponse(
 
 
 RUN_PROFILE = os.getenv("PROFILE") or os.getenv("RUN_PROFILE", "web")
-if is_desktop_profile():
+if is_desktop():
     RUN_PROFILE = "desktop"
-DESKTOP_DATA_DIR_ENV = "DATA_DIR"
-DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
 
 
 _startup_scan_started_at: Optional[float] = None
@@ -480,7 +480,7 @@ SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
 SONGS_BASEURL_VALUE = ''
 COERCE_UNKNOWN_COURSE = None
-SONGS_DIR_PATH = get_songs_dir_desktop() if RUN_PROFILE == 'desktop' else Path('.')
+SONGS_DIR_PATH = songs_dir() if RUN_PROFILE == 'desktop' else Path('.')
 song_scanner: Optional[SongScanner] = None
 _song_watcher_handle = None
 
@@ -821,16 +821,6 @@ compress = Compress()
 sess = Session()
 
 
-def _ensure_desktop_data_dir() -> Path:
-    data_dir_value = os.environ.get(DESKTOP_DATA_DIR_ENV)
-    if data_dir_value:
-        path = Path(data_dir_value).expanduser()
-    else:
-        path = DEFAULT_DESKTOP_DATA_DIR
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def create_app():
     global client, db, basedir, SCAN_ON_START, ENABLE_SONG_WATCHER, SCAN_IGNORE_GLOBS
     global ADMIN_SCAN_TOKEN, SONGS_BASEURL_VALUE, COERCE_UNKNOWN_COURSE, SONGS_DIR_PATH
@@ -889,11 +879,14 @@ def create_app():
     sessions_directory: Optional[Path] = None
 
     if RUN_PROFILE == 'desktop':
-        desktop_data_dir = get_app_dir()
+        desktop_app_dir = app_dir()
+        desktop_songs_dir = songs_dir()
+        desktop_data_dir = data_dir()
+        desktop_data_dir.mkdir(parents=True, exist_ok=True)
         sessions_directory = desktop_data_dir / 'sessions'
         sessions_directory.mkdir(parents=True, exist_ok=True)
         try:
-            get_songs_dir_desktop().mkdir(parents=True, exist_ok=True)
+            desktop_songs_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             app_instance.logger.warning('Failed to ensure songs directory at startup', exc_info=True)
         lifetime_seconds = int(
@@ -924,7 +917,7 @@ def create_app():
         cache_config = {'CACHE_TYPE': 'NullCache'}
         session_backend = 'filesystem'
         app_instance.config['DATA_DIR'] = str(desktop_data_dir)
-        app_instance.config['APP_DIR'] = str(desktop_data_dir)
+        app_instance.config['APP_DIR'] = str(desktop_app_dir)
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
@@ -1013,7 +1006,9 @@ def create_app():
     if RUN_PROFILE == 'desktop':
         sqlite_path = getattr(SONG_STORE, 'path', None)
         if sqlite_path:
-            app_instance.config['SQLITE_DB_PATH'] = str(sqlite_path)
+            resolved_sqlite = Path(sqlite_path).resolve()
+            app_instance.config['SQLITE_PATH'] = str(resolved_sqlite)
+            app_instance.config['SQLITE_DB_PATH'] = str(resolved_sqlite)
 
     app_instance.cache = Cache(app_instance, config=cache_config)
     sess.init_app(app_instance)
@@ -1069,7 +1064,7 @@ def create_app():
         db = _LazyResourceProxy(lambda: None)
 
     if RUN_PROFILE == 'desktop':
-        songs_dir_value = str(get_songs_dir_desktop())
+        songs_dir_value = str(songs_dir())
         config_songs_dir = None
         config_path = None
     else:
@@ -1187,48 +1182,24 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
-    if RUN_PROFILE == 'desktop':
-        session_backend = app.config.get(
-            'SESSION_BACKEND', app.config.get('SESSION_TYPE', 'filesystem')
-        )
-        payload = {
-            'status': 'ok',
-            'ok': True,
-            'profile': 'desktop',
-            'db': 'sqlite',
-            'sessions': session_backend,
-        }
-        sqlite_path = app.config.get('SQLITE_DB_PATH')
-        if sqlite_path:
-            payload['path'] = sqlite_path
-        return jsonify(payload)
-
-    status = {
+    profile = 'desktop' if is_desktop() else 'web'
+    payload = {
         'status': 'ok',
         'ok': True,
-        'profile': 'web',
-        'db': 'mongo',
-        'sessions': app.config.get('SESSION_BACKEND', 'redis'),
+        'profile': profile,
+        'db': 'sqlite' if profile == 'desktop' else 'mongo',
     }
-    try:
-        client.admin.command('ping')
-        status['mongo'] = 'ok'
-    except Exception:
-        status['status'] = 'error'
-        status['ok'] = False
-        status['mongo'] = 'error'
-        return jsonify(status), 503
-    try:
-        redis_client = app.config.get('SESSION_REDIS')
-        if redis_client:
-            redis_client.ping()
-        status['redis'] = 'ok'
-    except Exception:
-        status['status'] = 'error'
-        status['ok'] = False
-        status['redis'] = 'error'
-        return jsonify(status), 503
-    return jsonify(status)
+    session_backend = current_app.config.get('SESSION_BACKEND') or current_app.config.get('SESSION_TYPE')
+    if session_backend:
+        payload['sessions'] = session_backend
+    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
+    if sqlite_path:
+        resolved_path = str(Path(sqlite_path).resolve())
+        payload['db_path'] = resolved_path
+        payload['path'] = resolved_path
+    else:
+        payload['db_path'] = None
+    return jsonify(payload)
 
 
 @app.route('/admin/shutdown', methods=['POST'])
@@ -3068,9 +3039,9 @@ if RUN_PROFILE != 'desktop':
 
 else:
 
-    DESKTOP_PUBLIC_DIR = get_public_dir()
+    DESKTOP_PUBLIC_DIR = public_dir()
     DESKTOP_VIEWS_DIR = DESKTOP_PUBLIC_DIR / "src" / "views"
-    DESKTOP_SONGS_DIR = get_songs_dir_desktop()
+    DESKTOP_SONGS_DIR = songs_dir()
     DESKTOP_SONGS_DIR.mkdir(parents=True, exist_ok=True)
 
     @app.route("/")

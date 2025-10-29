@@ -170,11 +170,11 @@ server via `TAIKO_DESKTOP_SERVER`.
 Open: http://127.0.0.1:8000/healthz — it should respond with:
 
 ```
-{"ok": true, "profile": "desktop", "db": "sqlite", "sessions": "filesystem"}
+{"ok": true, "status": "ok", "profile": "desktop", "db": "sqlite", "db_path": "<DATA_DIR>/taiko.db", "sessions": "filesystem"}
 ```
 
 The desktop profile disables Mongo-backed features; the `/healthz` response
-surfaces `db="sqlite"` to reflect the local storage layer in use.
+surfaces the embedded SQLite backend and the absolute path to the database file.
 
 Then visit http://127.0.0.1:8000/ — the web UI ships with the backend and works
 out of the box without an additional Node/webpack build step.
@@ -184,15 +184,23 @@ out of the box without an additional Node/webpack build step.
 - SQLite DB: `${DATA_DIR}/taiko.db`
 - Sessions: `${DATA_DIR}/sessions`
 - Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
-- Songs: `<app-dir>/songs` (for local development this is `<repo-root>/songs`)
+- Songs: `<install-dir>/songs` (when running from sources this resolves to `<repo-root>/songs`)
 
 ### Adding songs
 
 The desktop profile scans `<app-dir>/songs/`, where `<app-dir>` is the directory
 containing the running backend binary. When working from sources this resolves
 to `<repo-root>/songs/`; packaged builds include an empty `songs/` folder next to
-the executable. Each song belongs in its own directory that contains a `.tja` or
-`.tjc` chart file and optional audio/background assets:
+the executable. Typical installation targets:
+
+- **Windows** installer/portable ZIP: `<install-dir>\backend\taiko-web-backend\songs`
+- **macOS** `.app`: `Taiko Web Desktop.app/Contents/Resources/backend/taiko-web-backend/songs`
+- **Linux** AppImage/ZIP: `<install-dir>/backend/taiko-web-backend/songs`
+
+You can also use the “Open Songs Folder” menu entry inside the desktop app to
+jump directly to the correct directory. Each song belongs in its own directory
+that contains a `.tja` or `.tjc` chart file and optional audio/background
+assets:
 
 ```
 taiko-web-backend/

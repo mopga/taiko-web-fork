@@ -70,6 +70,35 @@ fail() {
 
 wait_for_health || fail
 
+health_payload=$(curl -sf --max-time 5 "$BASE_URL/healthz") || fail
+python <<'PY' "${health_payload}" "${DATA_DIR}" || fail
+import json
+import os
+import sys
+
+payload_raw = sys.argv[1]
+data_dir = os.path.abspath(sys.argv[2])
+try:
+    payload = json.loads(payload_raw)
+except Exception as exc:
+    raise SystemExit(f'healthz JSON parse error: {exc}')
+
+if not isinstance(payload, dict):
+    raise SystemExit('healthz payload is not an object')
+
+profile = payload.get('profile')
+if profile != 'desktop':
+    raise SystemExit(f'Unexpected profile from /healthz: {profile!r}')
+
+db_path = payload.get('db_path')
+if not db_path:
+    raise SystemExit('healthz payload missing db_path')
+
+db_real = os.path.abspath(db_path)
+if not db_real.startswith(data_dir):
+    raise SystemExit(f'db_path {db_real!r} not under DATA_DIR {data_dir!r}')
+PY
+
 for _ in $(seq 1 30); do
   if grep -q "profile=desktop catalog_source=filesystem" "$LOG_FILE" 2>/dev/null; then
     catalog_logged=1
