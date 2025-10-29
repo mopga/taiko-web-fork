@@ -3,36 +3,32 @@ import os
 from pathlib import Path
 
 from PyInstaller.building.datastruct import Tree
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-# PyInstaller executes the spec with the working directory set to the spec's
-# location. ``__file__`` is not defined in this context, so rely on the process
-# cwd instead.
 project_root = Path(os.getcwd()).resolve()
 public_dir = project_root / "public"
 templates_dir = project_root / "templates"
 
 datas = []
-collect_targets = []
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
+
+if not public_dir.is_dir():
+    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
+
 tmp_ret = collect_all('bcrypt')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cffi')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 hiddenimports += collect_submodules('storage')
 hiddenimports += collect_submodules('tools')
 hiddenimports += collect_submodules('lock')
 
-datas += collect_data_files('config', include_py_files=False)
-
-if public_dir.is_dir():
-    collect_targets.append(Tree(str(public_dir), prefix='public'))
-else:
-    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
-
+datas += Tree(str(public_dir), prefix='public').toc
 if templates_dir.is_dir():
-    collect_targets.append(Tree(str(templates_dir), prefix='templates'))
+    datas += Tree(str(templates_dir), prefix='templates').toc
 
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
@@ -75,9 +71,9 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    *collect_targets,
     strip=False,
     upx=True,
     upx_exclude=[],
     name='taiko-web-backend',
+    distpath=str(project_root / 'standalone' / 'dist' / 'backend'),
 )
