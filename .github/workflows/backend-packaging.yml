@@ -74,10 +74,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
+          backend_root="standalone/dist/backend/taiko-web-backend"
+          if [[ ! -d "${backend_root}" ]]; then
+            echo "::error::Backend bundle not found at ${backend_root}" >&2
+            exit 1
+          fi
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            pwsh -Command "Compress-Archive -Path 'dist/backend/taiko-web-backend/*' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
+            pwsh -Command "Compress-Archive -Path 'standalone/dist/backend/taiko-web-backend/*' -DestinationPath 'out/taiko-web-backend-windows.zip' -Force"
           else
-            tar -C dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
+            tar -C standalone/dist/backend -czf out/taiko-web-backend-linux-x64.tar.gz taiko-web-backend
           fi
 
       # Install Inno Setup and build installer without any 3rd-party Actions
@@ -95,7 +100,7 @@ jobs:
         shell: pwsh
         env:
           MyVersion: ${{ github.ref_name }}
-          MyDistDir: ${{ github.workspace }}\dist\backend\taiko-web-backend
+          MyDistDir: ${{ github.workspace }}\standalone\dist\backend\taiko-web-backend
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
