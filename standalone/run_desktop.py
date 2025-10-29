@@ -63,25 +63,14 @@ def _configure_logging() -> None:
     root_logger.addHandler(file_handler)
 
     try:
-        if stdout and hasattr(stdout, "buffer"):
-            sys.stdout = io.TextIOWrapper(stdout.buffer, encoding="utf-8", errors="replace")  # type: ignore[assignment]
-    except Exception:
-        pass
-
-    try:
-        if stderr and hasattr(stderr, "buffer"):
-            sys.stderr = io.TextIOWrapper(stderr.buffer, encoding="utf-8", errors="replace")  # type: ignore[assignment]
-    except Exception:
-        pass
-
-    try:
-        console_level = _resolve_logging_level(
-            os.getenv("TAIKO_CONSOLE_LEVEL", "WARNING"), default=logging.WARNING
-        )
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(console_level)
-        console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
-        root_logger.addHandler(console_handler)
+        if stdout and not os.getenv("PYTEST_CURRENT_TEST"):
+            console_level = _resolve_logging_level(
+                os.getenv("TAIKO_CONSOLE_LEVEL", "WARNING"), default=logging.WARNING
+            )
+            console_handler = logging.StreamHandler(stdout)
+            console_handler.setLevel(console_level)
+            console_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+            root_logger.addHandler(console_handler)
     except Exception:
         pass
 

@@ -45,11 +45,6 @@ try {
     }
     & $Action
   }
-  function To-Array($v) {
-    if ($null -eq $v) { return @() }
-    if ($v -is [System.Collections.IEnumerable]) { return @($v) }
-    return @($v)
-  }
 
   $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
@@ -90,13 +85,23 @@ try {
     Write-Host $songsResp.Content
     throw "Songs JSON parse failed: $($_.Exception.Message)"
   }
-  $songs = To-Array $songsJson
-  Assert ($songs -is [System.Collections.IEnumerable]) "/api/songs not enumerable"
+  # Нормализация к массиву (устойчиво к 0/1/N элементов)
+  if ($null -eq $songsJson) {
+    $songs = @()
+  }
+  elseif ($songsJson -is [System.Array]) {
+    $songs = $songsJson
+  }
+  else {
+    $songs = @($songsJson)
+  }
+
   if ($songs.Count -gt 0) {
     Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
   }
 
-  Write-Host "Desktop smoke OK: root+api passed. Songs: $($songs.Count)"
+  Write-Host "Smoke OK: /api/songs count=$($songs.Count)"
+  Write-Host "Desktop smoke OK: root+api passed."
   exit 0
 }
 catch {
