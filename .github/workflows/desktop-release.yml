@@ -80,8 +80,15 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Prepare pnpm
-        run: corepack prepare pnpm@9.12.3 --activate
+      - name: Doctor pnpm on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exists = (Get-Command pnpm -ErrorAction SilentlyContinue) -ne $null
+          if (-not $exists) {
+            corepack enable
+          }
+          pnpm -v
 
       - name: Show pnpm version
         run: pnpm -v
