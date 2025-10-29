@@ -69,9 +69,11 @@ def test_web_stack_health_and_api(web_stack: requests.Session) -> None:
     health = session.get(f"{BASE_URL}/healthz", timeout=5)
     health.raise_for_status()
     health_payload = health.json()
-    assert health_payload.get("status") == "ok"
-    assert health_payload.get("mongo") == "ok"
-    assert health_payload.get("redis") == "ok"
+    assert health_payload == {
+        "status": "ok",
+        "mongo": "ok",
+        "profile": "web",
+    }
 
     csrftoken = session.get(f"{BASE_URL}/api/csrftoken", timeout=5)
     csrftoken.raise_for_status()

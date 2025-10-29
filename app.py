@@ -802,7 +802,7 @@ def take_config(name, required=False):
     return None
 
 compress = Compress()
-sess = Session()
+session_manager = Session()
 
 
 def create_app():
@@ -865,13 +865,24 @@ def create_app():
         desktop_app_dir = app_dir()
         desktop_songs_dir = songs_dir()
         desktop_data_dir = data_dir()
+
+        desktop_app_dir.mkdir(parents=True, exist_ok=True)
         desktop_data_dir.mkdir(parents=True, exist_ok=True)
+
         sessions_directory = desktop_data_dir / 'sessions'
         sessions_directory.mkdir(parents=True, exist_ok=True)
+
+        db_file = desktop_data_dir / 'taiko.db'
+        app_instance.config['APP_DIR'] = str(desktop_app_dir)
+        app_instance.config['DATA_DIR'] = str(desktop_data_dir)
+        app_instance.config['SQLITE_PATH'] = str(db_file)
+        app_instance.config['SQLITE_DB_PATH'] = str(db_file)
+
         try:
             desktop_songs_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             app_instance.logger.warning('Failed to ensure songs directory at startup', exc_info=True)
+
         lifetime_seconds = int(
             os.getenv(
                 'SESSION_TTL_SECONDS',
@@ -891,8 +902,6 @@ def create_app():
         )
         cache_config = {'CACHE_TYPE': 'NullCache'}
         session_backend = 'cachelib'
-        app_instance.config['DATA_DIR'] = str(desktop_data_dir)
-        app_instance.config['APP_DIR'] = str(desktop_app_dir)
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
@@ -986,7 +995,7 @@ def create_app():
             app_instance.config['SQLITE_DB_PATH'] = str(resolved_sqlite)
 
     app_instance.cache = Cache(app_instance, config=cache_config)
-    sess.init_app(app_instance)
+    session_manager.init_app(app_instance)
     #csrf = CSRFProtect(app)
 
     db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
@@ -1120,28 +1129,22 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def route_healthcheck():
-    try:
-        profile = 'desktop' if is_desktop() else 'web'
-        payload = {
+    if not is_desktop():
+        return jsonify({
             'status': 'ok',
-            'ok': True,
-            'profile': profile,
-            'db': 'sqlite' if profile == 'desktop' else 'mongo',
-        }
-        session_backend = current_app.config.get('SESSION_BACKEND') or current_app.config.get('SESSION_TYPE')
-        if session_backend:
-            payload['sessions'] = session_backend
-        sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
-        if sqlite_path:
-            resolved_path = str(Path(sqlite_path).resolve())
-            payload['db_path'] = resolved_path
-            payload['path'] = resolved_path
-        else:
-            payload['db_path'] = None
-        return jsonify(payload), 200
-    except Exception as exc:  # pragma: no cover - defensive guard for smoke tests
-        current_app.logger.exception('healthz failed')
-        return jsonify({'ok': False, 'error': str(exc)}), 200
+            'mongo': 'ok',
+            'profile': 'web',
+        }), 200
+
+    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
+    payload = {
+        'status': 'ok',
+        'profile': 'desktop',
+    }
+    if sqlite_path:
+        payload['db_path'] = str(Path(sqlite_path).resolve())
+
+    return jsonify(payload), 200
 
 
 @app.route('/admin/shutdown', methods=['POST'])

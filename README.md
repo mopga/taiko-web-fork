@@ -170,7 +170,7 @@ server via `TAIKO_DESKTOP_SERVER`.
 Open: http://127.0.0.1:8000/healthz — it should respond with:
 
 ```
-{"ok": true, "status": "ok", "profile": "desktop", "db": "sqlite", "db_path": "<DATA_DIR>/taiko.db", "sessions": "filesystem"}
+{"status": "ok", "profile": "desktop", "db_path": "<DATA_DIR>/taiko.db"}
 ```
 
 The desktop profile disables Mongo-backed features; the `/healthz` response

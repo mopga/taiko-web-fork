@@ -3,42 +3,36 @@ import os
 from pathlib import Path
 
 from PyInstaller.building.datastruct import Tree
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-# PyInstaller executes the spec with the working directory set to the spec's
-# location. ``__file__`` is not defined in this context, so rely on the process
-# cwd instead.
 project_root = Path(os.getcwd()).resolve()
 public_dir = project_root / "public"
 templates_dir = project_root / "templates"
 
-datas = []
-collect_targets = []
+# ВАЖНО: Analysis(datas=...) принимает только пары (src, dst) или глобы.
+# Никаких Tree в Analysis — только в COLLECT.
+datas: list = []  # если нужны точечные файлы — добавляй здесь как ('path/to/file','dest_dir')
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
+
+if not public_dir.is_dir():
+    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
+
 tmp_ret = collect_all('bcrypt')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cffi')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 hiddenimports += collect_submodules('storage')
 hiddenimports += collect_submodules('tools')
 hiddenimports += collect_submodules('lock')
-
-datas += collect_data_files('config', include_py_files=False)
-
-if public_dir.is_dir():
-    collect_targets.append(Tree(str(public_dir), prefix='public'))
-else:
-    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
-
-if templates_dir.is_dir():
-    collect_targets.append(Tree(str(templates_dir), prefix='templates'))
 
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
     pathex=[str(project_root)],
     binaries=binaries,
-    datas=datas,
+    datas=datas,                  # ← здесь только пары/глобы, без Tree
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -48,6 +42,11 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
+
+extra = []
+extra.append(Tree(str(public_dir), prefix='public'))
+if templates_dir.is_dir():
+    extra.append(Tree(str(templates_dir), prefix='templates'))
 
 exe = EXE(
     pyz,
@@ -75,7 +74,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    *collect_targets,
+    *extra,                        # ← Tree добавляем ТУТ
     strip=False,
     upx=True,
     upx_exclude=[],
