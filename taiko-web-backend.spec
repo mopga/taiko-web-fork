@@ -75,4 +75,5 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name='taiko-web-backend',
+    distpath=str(project_root / 'standalone' / 'dist' / 'backend'),
 )
