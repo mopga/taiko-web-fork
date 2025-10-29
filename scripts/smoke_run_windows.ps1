@@ -99,6 +99,18 @@ try {
   Write-Host "Desktop smoke OK: root+api passed. Songs: $($songs.Count)"
   exit 0
 }
+catch {
+  Write-Error $_
+  if (Test-Path $stdoutLog) {
+    Write-Host "===== smoke_stdout.log (tail) ====="
+    Get-Content $stdoutLog -Tail 200 | Write-Host
+  }
+  if (Test-Path $stderrLog) {
+    Write-Host "===== smoke_stderr.log (tail) ====="
+    Get-Content $stderrLog -Tail 200 | Write-Host
+  }
+  exit 1
+}
 finally {
     if ($process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
