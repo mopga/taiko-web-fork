@@ -1015,7 +1015,7 @@ def create_app():
         _redis_dispatcher = RedisDispatcher(_create_redis_client)
         mongo_database_factory = _mongo_dispatcher.get_database
         redis_factory = _redis_dispatcher.get_client
-        app_instance.config['REDIS_CLIENT'] = None
+        app_instance.config['REDIS_CLIENT'] = session_redis
         app_instance.config['REDIS_CLIENT_FACTORY'] = _create_redis_client
 
     global _storage_bundle, SONG_STORE, MANIFEST_STORE, LEADER_LOCK
@@ -1177,9 +1177,22 @@ def healthz():
         mongo_status = 'ok'
         redis_status = 'ok'
 
-        def _resolve_client(config_key: str, factory_key: str, dispatcher_getter: Optional[Callable[[], Any]]):
+        def _resolve_client(
+            config_key: str,
+            factory_key: str,
+            dispatcher_getter: Optional[Callable[[], Any]],
+            *,
+            fallback_config_keys: Sequence[str] = (),
+        ):
             client = current_app.config.get(config_key)
             created_here = False
+
+            if client is None:
+                for fallback_key in fallback_config_keys:
+                    fallback = current_app.config.get(fallback_key)
+                    if fallback is not None:
+                        client = fallback
+                        break
 
             if client is None:
                 factory = current_app.config.get(factory_key)
@@ -1226,6 +1239,7 @@ def healthz():
             'REDIS_CLIENT',
             'REDIS_CLIENT_FACTORY',
             _redis_dispatcher.get_client if _redis_dispatcher is not None else None,
+            fallback_config_keys=('SESSION_REDIS',),
         )
 
         try:
