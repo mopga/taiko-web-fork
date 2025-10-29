@@ -42,6 +42,7 @@ def _pyinstaller_args() -> list[str]:
         "--name",
         NAME,
         "--onedir",
+        "--clean",
         "--noconfirm",
         "--distpath",
         str(DIST_DIR),
