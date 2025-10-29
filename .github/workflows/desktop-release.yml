@@ -477,16 +477,10 @@ jobs:
           LINUX_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend"
           WIN_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend.exe"
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
-            if [[ ! -f "${LINUX_BIN}" ]]; then
-              echo "Missing ${LINUX_BIN}" >&2
-              exit 1
-            fi
+            test -f "${LINUX_BIN}" || { echo "::error::Missing ${LINUX_BIN}"; exit 1; }
             chmod +x "${LINUX_BIN}"
           else
-            if [[ ! -f "${WIN_BIN}" ]]; then
-              echo "Missing ${WIN_BIN}" >&2
-              exit 1
-            fi
+            test -f "${WIN_BIN}" || { echo "::error::Missing ${WIN_BIN}"; exit 1; }
           fi
 
       - name: Show backend app_dir content

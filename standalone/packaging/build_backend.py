@@ -106,7 +106,22 @@ def build_backend() -> None:
 
     bundle_root = DIST_DIR / NAME
     if not bundle_root.exists():
-        raise RuntimeError(f"PyInstaller did not create bundle at {bundle_root}")
+        candidates = [p for p in DIST_DIR.iterdir() if p.is_dir()]
+        if len(candidates) == 1:
+            fallback = candidates[0]
+            print(
+                "[build_backend] Expected bundle directory missing; renaming",
+                fallback,
+                "to",
+                bundle_root,
+            )
+            fallback.rename(bundle_root)
+        else:
+            candidate_listing = "\n".join(str(p) for p in candidates) or "<none>"
+            raise RuntimeError(
+                "PyInstaller did not create bundle at"
+                f" {bundle_root}. Found directories:\n{candidate_listing}"
+            )
 
     _ensure_songs_dir(bundle_root)
     _validate_binaries(bundle_root)
