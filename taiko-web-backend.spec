@@ -52,7 +52,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    []
+    [],
     exclude_binaries=True, 
     name="taiko-web-backend",
     debug=False,
