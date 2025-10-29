@@ -1,14 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from pathlib import Path
 
 from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
-project_root = Path(__file__).resolve().parent
+# PyInstaller executes the spec with the working directory set to the spec's
+# location. ``__file__`` is not defined in this context, so rely on the process
+# cwd instead.
+project_root = Path(os.getcwd()).resolve()
 public_dir = project_root / "public"
 templates_dir = project_root / "templates"
 
 datas = []
+collect_targets = []
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 tmp_ret = collect_all('bcrypt')
@@ -22,17 +27,16 @@ hiddenimports += collect_submodules('lock')
 datas += collect_data_files('config', include_py_files=False)
 
 if public_dir.is_dir():
-    datas += Tree(str(public_dir), prefix='public').toc
+    collect_targets.append(Tree(str(public_dir), prefix='public'))
 else:
     raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
 
 if templates_dir.is_dir():
-    datas += Tree(str(templates_dir), prefix='templates').toc
-
+    collect_targets.append(Tree(str(templates_dir), prefix='templates'))
 
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
-    pathex=[],
+    pathex=[str(project_root)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -71,9 +75,9 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
+    *collect_targets,
     strip=False,
     upx=True,
     upx_exclude=[],
     name='taiko-web-backend',
-    distpath=str(project_root / 'standalone' / 'dist' / 'backend'),
 )

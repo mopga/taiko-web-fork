@@ -7,33 +7,34 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = ROOT.parent / "taiko-web-backend.spec"
-DIST = ROOT / "dist" / "backend"
-BUILD = ROOT / "dist" / "build-backend"
 APP_NAME = "taiko-web-backend"
 
 
 def build_backend() -> None:
-    DIST.mkdir(parents=True, exist_ok=True)
-    BUILD.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parents[1].parent
+    spec = repo_root / "taiko-web-backend.spec"
+    dist = repo_root / "standalone" / "dist" / "backend"
+    build = repo_root / "standalone" / "dist" / "build-backend"
+
+    dist.mkdir(parents=True, exist_ok=True)
+    build.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         sys.executable,
         "-m",
         "PyInstaller",
-        str(SPEC),
+        str(spec),
         "--noconfirm",
         "--clean",
         "--distpath",
-        str(DIST),
+        str(dist),
         "--workpath",
-        str(BUILD),
+        str(build),
     ]
     print("[build_backend]", " ".join(cmd))
-    subprocess.check_call(cmd)
+    subprocess.check_call(cmd, cwd=str(repo_root))
 
-    app_dir = DIST / APP_NAME
+    app_dir = dist / APP_NAME
     if not app_dir.exists():
         raise FileNotFoundError(f"PyInstaller did not create bundle at {app_dir}")
 
