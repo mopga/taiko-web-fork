@@ -1,101 +1,120 @@
 """Build the Taiko Web backend binary for desktop distribution."""
+
 from __future__ import annotations
 
-import argparse
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
+import PyInstaller.__main__
+
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "standalone" / "run_desktop.py"
-DEFAULT_OUTDIR = ROOT / "standalone" / "dist" / "backend"
+DIST_DIR = ROOT / "standalone" / "dist" / "backend"
+BUILD_DIR = ROOT / "standalone" / "dist" / "build-backend"
 NAME = "taiko-web-backend"
 
-DATA_DIRS = [
-    ("web/templates", "web/templates"),
-    ("web/static", "web/static"),
-    ("public", "public"),
-    ("songs", "songs"),
-]
 
-
-def add_data_arg(src_rel: str, dst_rel: str) -> str:
+def _add_data_arg(src: Path, target: str) -> str:
     separator = ";" if platform.system() == "Windows" else ":"
-    return f"--add-data={src_rel}{separator}{dst_rel}"
+    return f"{src}{separator}{target}"
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build the desktop backend distribution")
-    parser.add_argument("--profile", default="desktop", help="Runtime profile to embed (default: desktop)")
-    parser.add_argument(
-        "--outdir",
-        type=Path,
-        default=DEFAULT_OUTDIR,
-        help="Output directory for the staged backend",
-    )
-    return parser.parse_args(argv)
-
-
-def ensure_support_directories() -> None:
-    songs_dir = ROOT / "songs"
-    songs_dir.mkdir(parents=True, exist_ok=True)
+def _collect_additional_data() -> list[str]:
+    data_args: list[str] = []
     public_dir = ROOT / "public"
     if not public_dir.exists():
         raise RuntimeError(f"Frontend assets are missing at {public_dir}")
+    data_args.append(_add_data_arg(public_dir, "public"))
+
+    templates_dir = ROOT / "templates"
+    if templates_dir.exists():
+        data_args.append(_add_data_arg(templates_dir, "templates"))
+
+    return data_args
 
 
-def build_backend(*, profile: str, outdir: Path) -> None:
-    ensure_support_directories()
-    os.chdir(ROOT)
-
-    args = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
+def _pyinstaller_args() -> list[str]:
+    args: list[str] = [
+        str(ENTRY),
         "--name",
         NAME,
         "--onedir",
-        "--hidden-import=bcrypt",
-        "--hidden-import=cffi",
-        "--hidden-import=_cffi_backend",
-        "--collect-all=bcrypt",
-        "--collect-all=cffi",
-        str(ENTRY),
+        "--noconfirm",
+        "--distpath",
+        str(DIST_DIR),
+        "--workpath",
+        str(BUILD_DIR),
+        "--specpath",
+        str(BUILD_DIR),
+        "--hidden-import",
+        "bcrypt",
+        "--hidden-import",
+        "cffi",
+        "--hidden-import",
+        "_cffi_backend",
+        "--collect-all",
+        "bcrypt",
+        "--collect-all",
+        "cffi",
     ]
-
-    for src_rel, dst_rel in DATA_DIRS:
-        src_path = ROOT / src_rel
-        if src_path.exists():
-            args.append(add_data_arg(src_rel, dst_rel))
 
     if platform.system() == "Windows":
         args.append("--noconsole")
 
-    print("Running:", " ".join(args))
-    subprocess.check_call(args)
+    for add_data in _collect_additional_data():
+        args.extend(["--add-data", add_data])
 
-    source_dir = ROOT / "dist" / NAME
-    if not source_dir.is_dir():
-        raise RuntimeError(f"PyInstaller output missing at {source_dir}")
-
-    target_dir = outdir / NAME
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    else:
-        target_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_dir, target_dir)
-    songs_target = target_dir / "songs"
-    songs_target.mkdir(parents=True, exist_ok=True)
-    print(f"Backend staged at {target_dir}")
+    return args
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-    build_backend(profile=args.profile, outdir=args.outdir)
+def _ensure_clean_dirs() -> None:
+    if DIST_DIR.exists():
+        shutil.rmtree(DIST_DIR)
+    DIST_DIR.mkdir(parents=True, exist_ok=True)
+    if BUILD_DIR.exists():
+        shutil.rmtree(BUILD_DIR)
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-if __name__ == "__main__":  # pragma: no cover - manual execution
+def _ensure_songs_dir(bundle_root: Path) -> None:
+    songs = bundle_root / "songs"
+    songs.mkdir(parents=True, exist_ok=True)
+
+
+def _validate_binaries(bundle_root: Path) -> None:
+    binary = bundle_root / ("taiko-web-backend.exe" if os.name == "nt" else "taiko-web-backend")
+    if not binary.exists():
+        tree = "\n".join(str(p) for p in bundle_root.rglob("*"))
+        raise FileNotFoundError(
+            f"Expected backend binary not found at {binary}. Current bundle contents:\n{tree}"
+        )
+
+
+def build_backend() -> None:
+    _ensure_clean_dirs()
+
+    pyinstaller_args = _pyinstaller_args()
+    print("[build_backend] Invoking PyInstaller with:")
+    for part in pyinstaller_args:
+        print("  ", part)
+
+    PyInstaller.__main__.run(pyinstaller_args)
+
+    bundle_root = DIST_DIR / NAME
+    if not bundle_root.exists():
+        raise RuntimeError(f"PyInstaller did not create bundle at {bundle_root}")
+
+    _ensure_songs_dir(bundle_root)
+    _validate_binaries(bundle_root)
+    print(f"[build_backend] Done. Binaries at: {bundle_root}")
+
+
+def main() -> None:  # pragma: no cover - exercised in CI
+    build_backend()
+
+
+if __name__ == "__main__":
     main()

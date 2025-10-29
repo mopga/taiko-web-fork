@@ -75,13 +75,43 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build backend
-        shell: pwsh
+      - name: Build backend (PyInstaller onedir)
+        shell: bash
         run: |
-          py -3 -m pip install --upgrade pip wheel
-          py -3 -m pip install -r requirements.txt
-          py -3 -m pip install pyinstaller pyinstaller-hooks-contrib
-          python standalone/packaging/build_backend.py --profile desktop --outdir standalone/dist/backend
+          set -euxo pipefail
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
+          python standalone/packaging/build_backend.py
+
+      - name: Verify backend files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== dist tree =="
+          ls -laR standalone/dist || true
+          LINUX_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend"
+          WIN_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend.exe"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            if [[ ! -f "${LINUX_BIN}" ]]; then
+              echo "Missing ${LINUX_BIN}" >&2
+              exit 1
+            fi
+            chmod +x "${LINUX_BIN}"
+          else
+            if [[ ! -f "${WIN_BIN}" ]]; then
+              echo "Missing ${WIN_BIN}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Show backend app_dir content
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== app dir =="
+          ls -la "standalone/dist/backend/taiko-web-backend" || true
 
       - name: Smoke backend
         shell: pwsh
@@ -431,12 +461,40 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Build backend
+      - name: Build backend (PyInstaller onedir)
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip wheel
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller pyinstaller-hooks-contrib
-          python standalone/packaging/build_backend.py --profile desktop --outdir standalone/dist/backend
+          python standalone/packaging/build_backend.py
+
+      - name: Verify backend files
+        run: |
+          set -euo pipefail
+          echo "== dist tree =="
+          ls -laR standalone/dist || true
+          LINUX_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend"
+          WIN_BIN="standalone/dist/backend/taiko-web-backend/taiko-web-backend.exe"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            if [[ ! -f "${LINUX_BIN}" ]]; then
+              echo "Missing ${LINUX_BIN}" >&2
+              exit 1
+            fi
+            chmod +x "${LINUX_BIN}"
+          else
+            if [[ ! -f "${WIN_BIN}" ]]; then
+              echo "Missing ${WIN_BIN}" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Show backend app_dir content
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "== app dir =="
+          ls -la "standalone/dist/backend/taiko-web-backend" || true
 
       - name: Clean packaged songs directory
         run: |
