@@ -11,7 +11,11 @@ templates_dir = project_root / "templates"
 
 # ВАЖНО: Analysis(datas=...) принимает только пары (src, dst) или глобы.
 # Никаких Tree в Analysis — только в COLLECT.
-datas: list = []  # если нужны точечные файлы — добавляй здесь как ('path/to/file','dest_dir')
+datas = [
+    (str(public_dir), "public"),
+]
+if templates_dir.is_dir():
+    datas.append((str(templates_dir), "templates"))
 binaries = []
 hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 
@@ -31,8 +35,8 @@ hiddenimports += collect_submodules('lock')
 a = Analysis(
     [str(project_root / 'standalone' / 'run_desktop.py')],
     pathex=[str(project_root)],
-    binaries=binaries,
-    datas=datas,                  # ← здесь только пары/глобы, без Tree
+    binaries=[]
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -42,11 +46,6 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
-
-extra = []
-extra.append(Tree(str(public_dir), prefix='public'))
-if templates_dir.is_dir():
-    extra.append(Tree(str(templates_dir), prefix='templates'))
 
 exe = EXE(
     pyz,
@@ -74,7 +73,6 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    *extra,                        # ← Tree добавляем ТУТ
     strip=False,
     upx=True,
     upx_exclude=[],
