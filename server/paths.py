@@ -17,7 +17,7 @@ def app_dir() -> Path:
     """Return the effective application directory for the backend."""
 
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        return Path(sys.executable).parent
     return Path(__file__).resolve().parents[1]
 
 
