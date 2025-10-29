@@ -886,6 +886,11 @@ def create_app():
             return MongoClient(mongo_uri)
         return MongoClient(host=mongo_hosts)
 
+    app_instance.config['MONGO_CLIENT'] = None
+    app_instance.config['MONGO_CLIENT_FACTORY'] = _create_mongo_client
+    app_instance.config['REDIS_CLIENT'] = None
+    app_instance.config['REDIS_CLIENT_FACTORY'] = None
+
     basedir_value = os.environ.get('BASEDIR') or take_config('BASEDIR') or '/'
 
     app_instance.secret_key = take_config('SECRET_KEY') or 'change-me'
@@ -1010,6 +1015,8 @@ def create_app():
         _redis_dispatcher = RedisDispatcher(_create_redis_client)
         mongo_database_factory = _mongo_dispatcher.get_database
         redis_factory = _redis_dispatcher.get_client
+        app_instance.config['REDIS_CLIENT'] = None
+        app_instance.config['REDIS_CLIENT_FACTORY'] = _create_redis_client
 
     global _storage_bundle, SONG_STORE, MANIFEST_STORE, LEADER_LOCK
     _storage_bundle = create_storage_bundle(
@@ -1166,11 +1173,87 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
+        status_code = 200
+        mongo_status = 'ok'
+        redis_status = 'ok'
+
+        def _resolve_client(config_key: str, factory_key: str, dispatcher_getter: Optional[Callable[[], Any]]):
+            client = current_app.config.get(config_key)
+            created_here = False
+
+            if client is None:
+                factory = current_app.config.get(factory_key)
+                if callable(factory):
+                    try:
+                        client = factory()
+                    except Exception:
+                        current_app.logger.exception('failed to create %s via factory', config_key.lower())
+                        client = None
+                    else:
+                        created_here = True
+
+            if client is None and dispatcher_getter is not None:
+                try:
+                    client = dispatcher_getter()
+                except Exception:
+                    current_app.logger.exception('failed to acquire %s via dispatcher', config_key.lower())
+                    client = None
+
+            return client, created_here
+
+        mongo_client, mongo_created = _resolve_client(
+            'MONGO_CLIENT',
+            'MONGO_CLIENT_FACTORY',
+            _mongo_dispatcher.get_client if _mongo_dispatcher is not None else None,
+        )
+
+        try:
+            if mongo_client is None:
+                mongo_status = 'fail'
+            else:
+                mongo_client.admin.command('ping')
+        except Exception:
+            current_app.logger.exception('mongo ping failed')
+            mongo_status = 'fail'
+        finally:
+            if mongo_created and mongo_client is not None:
+                try:
+                    mongo_client.close()
+                except Exception:
+                    current_app.logger.debug('failed to close healthz MongoClient', exc_info=True)
+
+        redis_client, redis_created = _resolve_client(
+            'REDIS_CLIENT',
+            'REDIS_CLIENT_FACTORY',
+            _redis_dispatcher.get_client if _redis_dispatcher is not None else None,
+        )
+
+        try:
+            if redis_client is None:
+                redis_status = 'fail'
+            else:
+                redis_client.ping()
+        except Exception:
+            current_app.logger.exception('redis ping failed')
+            redis_status = 'fail'
+        finally:
+            if redis_created and redis_client is not None:
+                try:
+                    redis_client.close()
+                except Exception:
+                    current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
+
+        overall_status = 'ok'
+        if mongo_status != 'ok' or redis_status != 'ok':
+            overall_status = 'fail'
+            status_code = 503
+
         return jsonify({
-            'status': 'ok',
-            'mongo': 'ok',
+            'status': overall_status,
+            'mongo': mongo_status,
+            'redis': redis_status,
             'profile': 'web',
-        }), 200
+        }), status_code
 
     sqlite_path = current_app.config.get('SQLITE_PATH')
     return jsonify({
