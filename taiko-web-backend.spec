@@ -52,9 +52,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,     # пусть EXE возьмёт то же, что Analysis собрал
+    []
+    exclude_binaries=True, 
     name="taiko-web-backend",
     debug=False,
     bootloader_ignore_signals=False,
@@ -63,12 +62,19 @@ exe = EXE(
     console=True,
 )
 
+from PyInstaller.building.datastruct import Tree
+extra = [Tree(str(public_dir), prefix="public")]
+if templates_dir.is_dir():
+    extra.append(Tree(str(templates_dir), prefix="templates"))
+
 # COLLECT — ТОЛЬКО стандартные a.*; НИКАКИХ extra путей, НИКАКОГО distpath в spec
 coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
     a.datas,
+    a.zipfiles,
+    *extra,
     strip=False,
     upx=True,
     upx_exclude=[],
