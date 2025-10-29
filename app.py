@@ -1262,12 +1262,18 @@ def healthz():
             overall_status = 'fail'
             status_code = 503
 
-        return jsonify({
+        payload = {
             'status': overall_status,
             'mongo': mongo_status,
             'redis': redis_status,
             'profile': 'web',
-        }), status_code
+        }
+
+        return current_app.response_class(
+            json.dumps(payload, separators=(',', ':')),
+            status=status_code,
+            mimetype='application/json',
+        )
 
     sqlite_path = current_app.config.get('SQLITE_PATH')
     return jsonify({
