@@ -19,10 +19,21 @@ hiddenimports += collect_submodules("tools")
 hiddenimports += collect_submodules("lock")
 
 datas = []  # если надо, добавляй точечные пары (src, dest), НО не Tree и не dist/пути
-if public_dir.is_dir():
-    datas.append((str(public_dir), "public"))
-if templates_dir.is_dir():
-    datas.append((str(templates_dir), "templates"))
+
+
+def _collect_datas(root: Path, dest_root: str) -> None:
+    if not root.is_dir():
+        return
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative_parent = path.relative_to(root).parent
+        destination = Path(dest_root) / relative_parent
+        datas.append((str(path), str(destination)))
+
+
+_collect_datas(public_dir, "public")
+_collect_datas(templates_dir, "templates")
 
 a = Analysis(
     [str(project_root / "standalone" / "run_desktop.py")],

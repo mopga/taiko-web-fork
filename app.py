@@ -116,6 +116,34 @@ else:
     STATIC_DIR = _static_candidate
 
 
+def _frontend_payload_status(root: Path) -> tuple[bool, list[str]]:
+    """Return a tuple describing whether the frontend bundle is usable."""
+
+    issues: list[str] = []
+    try:
+        root_exists = root.exists()
+    except Exception:
+        root_exists = False
+    if not root_exists:
+        issues.append(f"missing directory: {root}")
+        return False, issues
+
+    if (root / "index.html").is_file():
+        return True, issues
+
+    views_dir = root / "src" / "views"
+    if not views_dir.exists():
+        issues.append(f"missing directory: {views_dir}")
+        return False, issues
+
+    html_exists = any(child.suffix.lower() == ".html" for child in views_dir.glob("*.html"))
+    if not html_exists:
+        issues.append(f"missing *.html files in {views_dir}")
+        return False, issues
+
+    return True, issues
+
+
 def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
     if is_desktop():
         frontend_public_dir = public_dir()
@@ -149,17 +177,20 @@ def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
     if not candidates:
         raise RuntimeError("No frontend directory candidates available")
 
+    failure_reasons: list[str] = []
     for candidate in candidates:
         try:
-            index_path = candidate / "index.html"
+            status, issues = _frontend_payload_status(candidate)
         except TypeError:
             continue
-        if candidate.exists() and index_path.exists():
+        if status:
             return candidate, tuple(candidates)
+        description = ", ".join(issues) if issues else "incomplete payload"
+        failure_reasons.append(f"{candidate}: {description}")
 
     LOGGER.error(
-        "frontend_dir=missing; candidates=%s",
-        [str(candidate) for candidate in candidates],
+        "frontend_dir=missing; details=%s",
+        failure_reasons or [str(candidate) for candidate in candidates],
     )
     return candidates[0], tuple(candidates)
 
@@ -828,13 +859,16 @@ def create_app():
         frontend_dir_resolved = FRONTEND_DIR.resolve()
     except Exception:
         frontend_dir_resolved = FRONTEND_DIR
-    if frontend_dir_resolved.exists():
+    frontend_ready, frontend_issues = _frontend_payload_status(frontend_dir_resolved)
+    if frontend_ready:
         app_instance.logger.info("frontend_dir=%s", frontend_dir_resolved)
     else:
         candidate_strings = [str(path) for path in FRONTEND_DIR_CANDIDATES]
+        details = frontend_issues or ["frontend payload incomplete"]
         app_instance.logger.warning(
-            "frontend_dir=missing candidates=%s",
+            "frontend_dir=missing candidates=%s issues=%s",
             candidate_strings,
+            details,
         )
         _FRONTEND_WARNING_EMITTED = True
     app_instance.config['RUN_PROFILE'] = RUN_PROFILE
@@ -1144,6 +1178,22 @@ def healthz():
         'profile': 'desktop',
         'db_path': str(Path(sqlite_path).resolve()) if sqlite_path else None,
     }), 200
+
+
+@app.route('/favicon.ico', methods=['GET', 'HEAD'])
+def favicon_asset():
+    favicon_path = public_dir() / 'assets' / 'img' / 'favicon.png'
+    if favicon_path.is_file():
+        return send_from_directory(
+            str(favicon_path.parent),
+            favicon_path.name,
+            mimetype='image/png',
+        )
+
+    response = Response(status=200)
+    response.data = b''
+    response.headers['Content-Type'] = 'image/x-icon'
+    return response
 
 
 @app.route('/admin/shutdown', methods=['POST'])
