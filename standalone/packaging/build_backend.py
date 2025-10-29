@@ -1,41 +1,63 @@
+"""Build the Taiko Web backend binary for desktop distribution."""
+from __future__ import annotations
+
+import argparse
 import os
-import sys
-import subprocess
-import shutil
 import platform
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "standalone" / "run_desktop.py"
-DIST = ROOT / "standalone" / "dist" / "backend"
+DEFAULT_OUTDIR = ROOT / "standalone" / "dist" / "backend"
 NAME = "taiko-web-backend"
-FRONTEND_BUILD = ROOT / "client" / "build"
 
 DATA_DIRS = [
     ("web/templates", "web/templates"),
     ("web/static", "web/static"),
-    ("client/build", "taiko_web_backend/_internal/public"),
+    ("public", "public"),
+    ("songs", "songs"),
 ]
 
 
-def add_data_arg(src_rel, dst_rel):
-    sep = ";" if platform.system() == "Windows" else ":"
-    return f"--add-data={src_rel}{sep}{dst_rel}"
+def add_data_arg(src_rel: str, dst_rel: str) -> str:
+    separator = ";" if platform.system() == "Windows" else ":"
+    return f"--add-data={src_rel}{separator}{dst_rel}"
 
 
-def main():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build the desktop backend distribution")
+    parser.add_argument("--profile", default="desktop", help="Runtime profile to embed (default: desktop)")
+    parser.add_argument(
+        "--outdir",
+        type=Path,
+        default=DEFAULT_OUTDIR,
+        help="Output directory for the staged backend",
+    )
+    return parser.parse_args(argv)
+
+
+def ensure_support_directories() -> None:
+    songs_dir = ROOT / "songs"
+    songs_dir.mkdir(parents=True, exist_ok=True)
+    public_dir = ROOT / "public"
+    if not public_dir.exists():
+        raise RuntimeError(f"Frontend assets are missing at {public_dir}")
+
+
+def build_backend(*, profile: str, outdir: Path) -> None:
+    ensure_support_directories()
     os.chdir(ROOT)
-    if not FRONTEND_BUILD.is_dir() or not (FRONTEND_BUILD / "index.html").is_file():
-        raise RuntimeError(
-            f"Frontend build not found at {FRONTEND_BUILD}. Did you run the build step?"
-        )
+
     args = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--name",
         NAME,
-        "--onefile",
+        "--onedir",
         "--hidden-import=bcrypt",
         "--hidden-import=cffi",
         "--hidden-import=_cffi_backend",
@@ -43,26 +65,32 @@ def main():
         "--collect-all=cffi",
         str(ENTRY),
     ]
+
+    for src_rel, dst_rel in DATA_DIRS:
+        src_path = ROOT / src_rel
+        if src_path.exists():
+            args.append(add_data_arg(src_rel, dst_rel))
+
     if platform.system() == "Windows":
         args.append("--noconsole")
-
-    for s, d in DATA_DIRS:
-        if (ROOT / s).exists():
-            args.append(add_data_arg(s, d))
 
     print("Running:", " ".join(args))
     subprocess.check_call(args)
 
-    if DIST.exists():
-        shutil.rmtree(DIST)
-    DIST.mkdir(parents=True, exist_ok=True)
-    if platform.system() == "Windows":
-        shutil.copyfile(ROOT / "dist" / f"{NAME}.exe", DIST / f"{NAME}.exe")
-    else:
-        dst = DIST / NAME
-        shutil.copyfile(ROOT / "dist" / NAME, dst)
-        dst.chmod(0o755)
+    source_dir = ROOT / "dist" / NAME
+    if not source_dir.is_dir():
+        raise RuntimeError(f"PyInstaller output missing at {source_dir}")
+
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    shutil.copytree(source_dir, outdir)
+    print(f"Backend staged at {outdir}")
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    build_backend(profile=args.profile, outdir=args.outdir)
+
+
+if __name__ == "__main__":  # pragma: no cover - manual execution
     main()

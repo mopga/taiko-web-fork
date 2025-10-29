@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
+from server.paths import get_app_dir, get_songs_dir
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -93,26 +93,21 @@ LOGGER = logging.getLogger("taiko.desktop")
 
 
 def _resolve_host_port(args: argparse.Namespace) -> tuple[str, int]:
-    host = args.host or os.getenv("TAIKO_DESKTOP_HOST") or DEFAULT_HOST
+    host = args.host or os.getenv("HOST") or os.getenv("TAIKO_DESKTOP_HOST") or DEFAULT_HOST
 
-    port_candidates: Iterable[object] = (
-        args.port,
-        os.getenv("TAIKO_DESKTOP_PORT"),
-        os.getenv("PORT"),
-        os.getenv("UVICORN_PORT"),
-    )
-    for candidate in port_candidates:
-        if candidate in (None, ""):
-            continue
+    if args.port is not None:
+        return host, int(args.port)
+
+    env_port = os.getenv("PORT") or os.getenv("TAIKO_DESKTOP_PORT")
+    if env_port:
         try:
-            port_value = int(candidate)
+            port_value = int(env_port)
         except (TypeError, ValueError):
-            LOGGER.debug("desktop.port invalid candidate=%r", candidate)
-            continue
-        if port_value <= 0 or port_value > 65535:
-            LOGGER.debug("desktop.port out_of_range=%r", candidate)
-            continue
-        return host, port_value
+            LOGGER.debug("desktop.port invalid candidate=%r", env_port)
+        else:
+            if 0 < port_value < 65536:
+                return host, port_value
+            LOGGER.debug("desktop.port out_of_range=%r", env_port)
 
     return host, DEFAULT_PORT
 
@@ -140,61 +135,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default=None,
         help="Select the HTTP server implementation",
     )
-    parser.add_argument(
-        "--songs-dir",
-        dest="songs_dir",
-        default=None,
-        help=(
-            "Override the songs directory (defaults to $TAIKO_SONGS_DIR, $SONGS_DIR, "
-            "the desktop config, or ~/Music/TaikoSongs)"
-        ),
-    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
 def _resolve_data_dir(value: Optional[str]) -> Path:
-    data_dir_value = value or os.environ.get("DATA_DIR")
-    if data_dir_value:
-        path = Path(data_dir_value).expanduser()
-    else:
-        path = Path.home() / ".taiko-web-data"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _resolve_songs_dir(value: Optional[str]) -> Path:
-    source = "default"
-    config_path: Optional[Path] = None
-
-    if value:
-        candidate = Path(value).expanduser()
-        source = "cli"
-    else:
-        env_candidate = os.environ.get("TAIKO_SONGS_DIR") or os.environ.get("SONGS_DIR")
-        if env_candidate:
-            candidate = Path(env_candidate).expanduser()
-            source = "env"
-        else:
-            config_candidate, config_path = resolve_songs_dir_from_config(logger=LOGGER)
-            if config_candidate:
-                candidate = config_candidate
-                source = "config"
-            else:
-                candidate = Path.home() / "Music" / "TaikoSongs"
-    try:
-        candidate.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        LOGGER.warning("desktop.songs_dir ensure_failed path=%s", candidate, exc_info=True)
-    resolved = candidate.expanduser().resolve()
-
-    if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
-        try:
-            os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
-        except Exception:
-            os.environ[DESKTOP_CONFIG_ENV] = str(config_path)
-
-    LOGGER.info("desktop.songs_dir resolved path=%s source=%s", resolved, source)
-    return resolved
+    app_dir = get_app_dir()
+    if value and Path(value).expanduser().resolve() != app_dir.resolve():
+        LOGGER.warning("desktop.data_dir override is ignored; using app directory %s", app_dir)
+    app_dir.mkdir(parents=True, exist_ok=True)
+    return app_dir
 
 
 def _prepare_environment(*, data_dir: Path) -> None:
@@ -202,15 +151,16 @@ def _prepare_environment(*, data_dir: Path) -> None:
     os.environ.setdefault("DATA_DIR", str(data_dir))
 
 
-def _log_startup(*, server: str, host: str, port: int, data_dir: Path, app) -> None:
+def _log_startup(*, server: str, host: str, port: int, data_dir: Path, songs_dir: Path, app) -> None:
     sessions_dir = app.config.get("SESSION_FILE_DIR")
     sqlite_path = app.config.get("SQLITE_DB_PATH")
     LOGGER.info(
-        "desktop.start profile=desktop server=%s host=%s port=%s data_dir=%s db_path=%s sessions_dir=%s",
+        "desktop.start profile=desktop server=%s host=%s port=%s data_dir=%s songs_dir=%s db_path=%s sessions_dir=%s",
         server,
         host,
         port,
         data_dir,
+        songs_dir,
         sqlite_path,
         sessions_dir,
     )
@@ -297,17 +247,27 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     _configure_logging()
     args = _parse_args(argv)
     data_dir = _resolve_data_dir(args.data_dir)
-    songs_dir = _resolve_songs_dir(args.songs_dir)
+    songs_dir = get_songs_dir()
+    try:
+        songs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        LOGGER.warning("desktop.songs_dir ensure_failed path=%s", songs_dir, exc_info=True)
     _prepare_environment(data_dir=data_dir)
-    os.environ["TAIKO_SONGS_DIR"] = str(songs_dir)
-    os.environ["SONGS_DIR"] = str(songs_dir)
 
     host, port = _resolve_host_port(args)
+    os.environ.setdefault("PORT", str(port))
     server_choice = (args.server or os.environ.get("TAIKO_DESKTOP_SERVER") or "uvicorn").lower()
 
     from app import app as flask_app
 
-    _log_startup(server=server_choice, host=host, port=port, data_dir=data_dir, app=flask_app)
+    _log_startup(
+        server=server_choice,
+        host=host,
+        port=port,
+        data_dir=data_dir,
+        songs_dir=songs_dir,
+        app=flask_app,
+    )
     LOGGER.info("desktop.songs_dir path=%s", songs_dir)
 
     try:

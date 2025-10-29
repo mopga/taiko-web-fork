@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional, Union
 
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from storage.mongo_store import MongoManifestStore, MongoSongStore
+from server.paths import get_app_dir
 
 try:  # optional import for desktop profile
     from storage.sqlite_store import SQLiteStorage
@@ -59,8 +60,9 @@ def create_storage_bundle(
         if data_dir_value is None:
             data_dir_value = os.environ.get('DATA_DIR')
         if data_dir_value is None:
-            data_dir_value = Path.home() / '.taiko-web-data'
+            data_dir_value = get_app_dir()
         data_dir = Path(data_dir_value)
+        data_dir.mkdir(parents=True, exist_ok=True)
         db_path = data_dir / 'taiko.db'
         sqlite_storage = SQLiteStorage(db_path)
         song_store = sqlite_storage.song_store

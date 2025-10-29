@@ -2,14 +2,16 @@
 set -euo pipefail
 
 DATA_DIR="$(pwd)/_data"
-SONGS_DIR="$(pwd)/_songs"
 LOG_DIR="$(pwd)/_logs"
 LOG_FILE="$LOG_DIR/smoke_backend.log"
 BASE_URL="http://127.0.0.1:8000"
 
+BACKEND_STAGING="$(pwd)/dist/backend/taiko-web-backend"
+SONGS_DIR="$BACKEND_STAGING/songs"
+
 mkdir -p "$DATA_DIR" "$SONGS_DIR" "$LOG_DIR"
 
-RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" ./dist/backend/taiko-web-backend/taiko-web-backend --host 127.0.0.1 --port 8000 --songs-dir "$SONGS_DIR" >"$LOG_FILE" 2>&1 &
+RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" PORT=8000 "$BACKEND_STAGING/taiko-web-backend" --host 127.0.0.1 --port 8000 >"$LOG_FILE" 2>&1 &
 PID=$!
 songs_payload_file=""
 cleanup() {

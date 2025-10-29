@@ -13,9 +13,9 @@ files:
   - build/icons/**
   - "!dist/**"
 
-extraFiles:
+extraResources:
   - from: ../dist/backend
-    to: backend
+    to: app/backend
     filter:
       - "**/*"
   - from: ../../assets/launcher

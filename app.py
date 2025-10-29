@@ -72,6 +72,7 @@ from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
+from server.paths import get_app_dir, get_public_dir, get_songs_dir, is_desktop_profile
 from tools.init_db_schema import init_db_schema
 from storage.factory import StorageBundle, create_storage_bundle
 from storage.interfaces import (
@@ -115,13 +116,19 @@ def resource_path(*parts: str) -> str:
 
 
 TEMPLATES_DIR = os.getenv("TAIKO_TEMPLATES_DIR") or resource_path("web", "templates")
-_static_candidate = os.getenv("TAIKO_STATIC_DIR") or resource_path("web", "static")
-if not Path(_static_candidate).exists():
-    _static_candidate = resource_path("public")
-STATIC_DIR = _static_candidate
+if is_desktop_profile():
+    STATIC_DIR = str(get_public_dir())
+else:
+    _static_candidate = os.getenv("TAIKO_STATIC_DIR") or resource_path("web", "static")
+    if not Path(_static_candidate).exists():
+        _static_candidate = resource_path("public")
+    STATIC_DIR = _static_candidate
 
 
 def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
+    if is_desktop_profile():
+        public_dir = get_public_dir()
+        return public_dir, (public_dir,)
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     resource_candidates = [
         Path(resource_path("taiko-web-backend", "_internal", "public")),
@@ -169,6 +176,8 @@ def _resolve_frontend_dir() -> tuple[Path, tuple[Path, ...]]:
 FRONTEND_DIR, FRONTEND_DIR_CANDIDATES = _resolve_frontend_dir()
 _FRONTEND_WARNING_EMITTED = False
 
+PUBLIC_DIR_PATH = get_public_dir()
+
 
 def JSONResponse(
     *,
@@ -188,6 +197,8 @@ def JSONResponse(
 
 
 RUN_PROFILE = os.getenv("PROFILE") or os.getenv("RUN_PROFILE", "web")
+if is_desktop_profile():
+    RUN_PROFILE = "desktop"
 DESKTOP_DATA_DIR_ENV = "DATA_DIR"
 DEFAULT_DESKTOP_DATA_DIR = Path.home() / ".taiko-web-data"
 
@@ -464,7 +475,7 @@ SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
 SONGS_BASEURL_VALUE = ''
 COERCE_UNKNOWN_COURSE = None
-SONGS_DIR_PATH = Path('.')
+SONGS_DIR_PATH = get_songs_dir() if RUN_PROFILE == 'desktop' else Path('.')
 song_scanner: Optional[SongScanner] = None
 _song_watcher_handle = None
 
@@ -873,9 +884,13 @@ def create_app():
     sessions_directory: Optional[Path] = None
 
     if RUN_PROFILE == 'desktop':
-        desktop_data_dir = _ensure_desktop_data_dir()
+        desktop_data_dir = get_app_dir()
         sessions_directory = desktop_data_dir / 'sessions'
         sessions_directory.mkdir(parents=True, exist_ok=True)
+        try:
+            get_songs_dir().mkdir(parents=True, exist_ok=True)
+        except Exception:
+            app_instance.logger.warning('Failed to ensure songs directory at startup', exc_info=True)
         lifetime_seconds = int(
             os.getenv(
                 'SESSION_TTL_SECONDS',
@@ -904,6 +919,7 @@ def create_app():
         cache_config = {'CACHE_TYPE': 'NullCache'}
         session_backend = 'filesystem'
         app_instance.config['DATA_DIR'] = str(desktop_data_dir)
+        app_instance.config['APP_DIR'] = str(desktop_data_dir)
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
@@ -1047,19 +1063,24 @@ def create_app():
         client = _LazyResourceProxy(lambda: None)
         db = _LazyResourceProxy(lambda: None)
 
-    config_songs_dir, config_path = resolve_songs_dir_from_config(logger=app_instance.logger)
-    if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
-        os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
+    if RUN_PROFILE == 'desktop':
+        songs_dir_value = str(get_songs_dir())
+        config_songs_dir = None
+        config_path = None
+    else:
+        config_songs_dir, config_path = resolve_songs_dir_from_config(logger=app_instance.logger)
+        if config_path and not os.environ.get(DESKTOP_CONFIG_ENV):
+            os.environ[DESKTOP_CONFIG_ENV] = str(Path(config_path).resolve())
 
-    songs_dir_candidates = [
-        os.environ.get('TAIKO_SONGS_DIR'),
-        os.environ.get('SONGS_DIR'),
-        str(config_songs_dir) if config_songs_dir else None,
-        take_config('SONGS_DIR'),
-    ]
-    songs_dir_value = next((value for value in songs_dir_candidates if value), None)
-    if songs_dir_value is None:
-        songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
+        songs_dir_candidates = [
+            os.environ.get('TAIKO_SONGS_DIR'),
+            os.environ.get('SONGS_DIR'),
+            str(config_songs_dir) if config_songs_dir else None,
+            take_config('SONGS_DIR'),
+        ]
+        songs_dir_value = next((value for value in songs_dir_candidates if value), None)
+        if songs_dir_value is None:
+            songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
     SONGS_DIR_PATH = Path(songs_dir_value).expanduser().resolve()
     app_instance.logger.info(
         'profile=%s catalog_source=%s songs_dir=%s',
@@ -3021,11 +3042,11 @@ def cache_wrap(res_from, secs):
 
 @app.route(basedir + "src/<path:ref>")
 def send_src(ref):
-    return cache_wrap(flask.send_from_directory("public/src", ref), 3600)
+    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'src'), ref), 3600)
 
 @app.route(basedir + "assets/<path:ref>")
 def send_assets(ref):
-    return cache_wrap(flask.send_from_directory("public/assets", ref), 3600)
+    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'assets'), ref), 3600)
 
 @app.route(basedir + "songs/<path:ref>")
 def send_songs(ref):
@@ -3036,12 +3057,32 @@ def send_songs(ref):
 
 @app.route(basedir + "manifest.json")
 def send_manifest():
-    return cache_wrap(flask.send_from_directory("public", "manifest.json"), 3600)
+    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH), "manifest.json"), 3600)
 
 
 @app.route('/<path:spa_path>')
 def route_frontend_spa(spa_path: str):
     return _serve_frontend_asset(spa_path)
+
+
+if RUN_PROFILE == 'desktop':
+
+    @app.errorhandler(404)
+    def _desktop_spa_fallback(error):
+        if request.method not in {'GET', 'HEAD'}:
+            return error
+        path_value = request.path or ''
+        if path_value.startswith('/api/'):
+            return error
+        if path_value.startswith('/songs/') or path_value.startswith('/assets/') or path_value.startswith('/static/'):
+            return error
+        candidate = PUBLIC_DIR_PATH.joinpath(path_value.lstrip('/'))
+        if path_value and candidate.exists():
+            return error
+        index_path = PUBLIC_DIR_PATH / 'index.html'
+        if index_path.exists():
+            return send_from_directory(str(PUBLIC_DIR_PATH), 'index.html')
+        return error
 
 
 def _start_song_directory_watcher():

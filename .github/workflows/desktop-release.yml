@@ -70,53 +70,58 @@ jobs:
             throw "Missing required build icon at $iconPath"
           }
 
-      - name: Enable Corepack (pre-setup-node)
-        run: corepack enable
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Prepare pnpm (pre-setup-node)
-        run: corepack prepare pnpm@9.12.3 --activate
-
-      - name: Pre-check pnpm
-        run: pnpm -v
-
-      - name: Resolve pnpm store path
-        id: pnpm-store
-        shell: bash
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-
-      - name: Ensure pnpm store exists
+      - name: Build backend
         shell: pwsh
         run: |
-          $store = "${{ steps.pnpm-store.outputs.path }}"
-          if (-not (Test-Path $store)) {
-            New-Item -ItemType Directory -Force -Path $store | Out-Null
+          py -3 -m pip install --upgrade pip wheel
+          py -3 -m pip install -r requirements.txt
+          py -3 -m pip install pyinstaller pyinstaller-hooks-contrib
+          python standalone/packaging/build_backend.py --profile desktop --outdir standalone/dist/backend
+
+      - name: Smoke backend
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "standalone/dist/backend" -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "Backend exe not found" }
+          $env:RUN_PROFILE = "desktop"
+          $env:PORT = "8000"
+          Push-Location $exe.DirectoryName
+          Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          for ($i=0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            if ($i -eq 29) { throw "Backend did not become healthy" }
           }
-          Write-Host "pnpm store dir: $store"
+          Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/ | Out-Null
+          Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs | Out-Null
+          Stop-Process -Id $P.Id -Force
+          Pop-Location
 
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-
-
-      - name: Setup Node (frontend)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install frontend dependencies
-        working-directory: client
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        working-directory: client
-        run: pnpm build
-
-      - name: Assert frontend build exists
-        run: test -f client/build/index.html
-        shell: bash
+      - name: Smoke songs injection
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "standalone/dist/backend" -Filter *.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw "Backend exe not found" }
+          $appDir = $exe.DirectoryName
+          $songsRoot = Join-Path $appDir "songs"
+          New-Item -ItemType Directory -Force -Path (Join-Path $songsRoot "test-track") | Out-Null
+          Copy-Item -Recurse "tools/ci-assets/test-track\*" (Join-Path $songsRoot "test-track")
+          $env:RUN_PROFILE = "desktop"
+          $env:PORT = "8000"
+          Push-Location $appDir
+          Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+          for ($i=0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            if ($i -eq 29) { throw "Backend did not become healthy" }
+          }
+          $resp = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs
+          if (-not ($resp.Content -match 'test')) { throw "Test song not found in /api/songs" }
+          Stop-Process -Id $P.Id -Force
+          Pop-Location
 
       - name: Setup Node (electron)
         uses: actions/setup-node@v4
@@ -125,21 +130,9 @@ jobs:
           cache: "npm"
           cache-dependency-path: standalone/electron/package-lock.json
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller pyinstaller-hooks-contrib
-
       - name: Install Electron dependencies
         working-directory: standalone/electron
-        run: npm install
+        run: npm ci
 
       - name: Determine desktop metadata
         id: version
@@ -170,7 +163,12 @@ jobs:
             throw "Backend staging directory missing: $backendDir"
           }
 
-          $backendExe = Join-Path $backendDir 'taiko-web-backend.exe'
+          $backendRoot = Join-Path $backendDir 'taiko-web-backend'
+          if (-not (Test-Path $backendRoot)) {
+            throw "Backend application directory missing: $backendRoot"
+          }
+
+          $backendExe = Join-Path $backendRoot 'taiko-web-backend.exe'
           if (-not (Test-Path $backendExe)) {
             throw "Backend executable missing: $backendExe"
           }
@@ -179,6 +177,11 @@ jobs:
           if (-not $info.Length -or $info.Length -le 0) {
             throw "Backend executable is empty: $backendExe"
           }
+
+          $publicDir = Join-Path $backendRoot 'public'
+          if (-not (Test-Path $publicDir)) { throw "Bundled public directory missing: $publicDir" }
+          $songsDir = Join-Path $backendRoot 'songs'
+          if (-not (Test-Path $songsDir)) { throw "Bundled songs directory missing: $songsDir" }
 
       - name: Verify staging artifacts
         shell: pwsh
@@ -205,7 +208,9 @@ jobs:
 
           $pathsToCheck = @()
           $pathsToCheck += $expectedMain
-          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend.exe')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/taiko-web-backend.exe')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/public')
+          $pathsToCheck += (Join-Path $rootPath 'backend/taiko-web-backend/songs')
           $pathsToCheck += (Join-Path $rootPath 'assets/launcher/app.ico')
           $resourcesDir = Join-Path $rootPath 'resources'
           $pathsToCheck += $resourcesDir

@@ -7,16 +7,13 @@ New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
-$songsDir = Join-Path (Get-Location) "_songs"
-if (Test-Path $songsDir) {
-    Remove-Item $songsDir -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
-
 $exe = "dist\backend\taiko-web-backend\taiko-web-backend.exe"
 if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
+
+$songsDir = Join-Path (Split-Path $exe) "songs"
+New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
 
 $logDir = Join-Path (Get-Location) "_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -24,7 +21,8 @@ $stdoutLog = Join-Path $logDir "smoke_stdout.log"
 $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT, "--songs-dir", $songsDir)
+$env:PORT = $env:APP_PORT
+$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT)
 $startParams = @{
     FilePath = $exe
     ArgumentList = $args
