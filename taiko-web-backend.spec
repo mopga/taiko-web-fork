@@ -1,39 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
+
 import os
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
-from PyInstaller.building.datastruct import Tree
-from PyInstaller.utils.hooks import collect_all, collect_submodules
-
-project_root = Path(os.getcwd()).resolve()
-public_dir = project_root / "public"
+# Корень репозитория
+project_root  = Path(os.getcwd()).resolve()
+public_dir    = project_root / "public"
 templates_dir = project_root / "templates"
 
-# ВАЖНО: Analysis(datas=...) принимает только пары (src, dst) или глобы.
-# Никаких Tree в Analysis — только в COLLECT.
-datas = [
-    (str(public_dir), "public"),
+# Если у тебя есть точные hiddenimports — добавь сюда
+hiddenimports = [
+    "bcrypt",
+    "cffi",
+    "_cffi_backend",
+    "desktop_config",
 ]
+# На всякий случай подхватываем подпакеты, если нужны
+hiddenimports += collect_submodules("storage")
+hiddenimports += collect_submodules("tools")
+hiddenimports += collect_submodules("lock")
+
+# ВАЖНО: Analysis(datas=...) — только пары (src, dst), никакого Tree, никаких абсолютных путей в dest
+datas = [(str(public_dir), "public")]
 if templates_dir.is_dir():
     datas.append((str(templates_dir), "templates"))
-binaries = []
-hiddenimports = ['bcrypt', 'cffi', '_cffi_backend', 'desktop_config']
 
-if not public_dir.is_dir():
-    raise FileNotFoundError(f"Frontend assets are missing at {public_dir}")
-
-tmp_ret = collect_all('bcrypt')
-binaries += tmp_ret[1]
-hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('cffi')
-binaries += tmp_ret[1]
-hiddenimports += tmp_ret[2]
-hiddenimports += collect_submodules('storage')
-hiddenimports += collect_submodules('tools')
-hiddenimports += collect_submodules('lock')
+# Жёсткая валидация формата datas — сорвёмся раньше, чем дойдём до COLLECT
+for item in datas:
+    assert isinstance(item, (list, tuple)) and len(item) == 2, f"bad datas item: {item}"
+    assert not os.path.isabs(item[1]), f"dest must be relative, got: {item}"
 
 a = Analysis(
-    [str(project_root / 'standalone' / 'run_desktop.py')],
+    [str(project_root / "standalone" / "run_desktop.py")],
     pathex=[str(project_root)],
     binaries=[],
     datas=datas,
@@ -42,32 +41,29 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=None,
     noarchive=False,
-    optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.datas,
-    [],
-    name='taiko-web-backend',
+    a.zipfiles,
+    a.datas,     # пусть EXE возьмёт то же, что Analysis собрал
+    name="taiko-web-backend",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
 )
 
+# COLLECT — ТОЛЬКО стандартные a.*; НИКАКИХ extra путей, НИКАКОГО distpath в spec
 coll = COLLECT(
     exe,
     a.binaries,
@@ -76,5 +72,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='taiko-web-backend',
+    name="taiko-web-backend",
 )
