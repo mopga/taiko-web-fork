@@ -3045,60 +3045,73 @@ def cache_wrap(res_from, secs):
 
     return res
 
-@app.route(basedir + "src/<path:ref>")
-def send_src(ref):
-    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'src'), ref), 3600)
+if RUN_PROFILE != 'desktop':
 
-@app.route(basedir + "assets/<path:ref>")
-def send_assets(ref):
-    return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'assets'), ref), 3600)
+    @app.route(basedir + "src/<path:ref>")
+    def send_src(ref):
+        return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'src'), ref), 3600)
 
-@app.route(basedir + "songs/<path:ref>")
-def send_songs(ref):
-    if not SONGS_DIR_PATH.exists():
-        app.logger.warning('Songs directory %s missing while serving %s', SONGS_DIR_PATH, ref)
+    @app.route(basedir + "assets/<path:ref>")
+    def send_assets(ref):
+        return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH / 'assets'), ref), 3600)
+
+    @app.route(basedir + "songs/<path:ref>")
+    def send_songs(ref):
+        if not SONGS_DIR_PATH.exists():
+            app.logger.warning('Songs directory %s missing while serving %s', SONGS_DIR_PATH, ref)
+            abort(404)
+        return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+
+    @app.route('/<path:spa_path>')
+    def route_frontend_spa(spa_path: str):
+        return _serve_frontend_asset(spa_path)
+
+else:
+
+    DESKTOP_PUBLIC_DIR = get_public_dir()
+    DESKTOP_VIEWS_DIR = DESKTOP_PUBLIC_DIR / "src" / "views"
+    DESKTOP_SONGS_DIR = get_songs_dir_desktop()
+    DESKTOP_SONGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @app.route("/")
+    def desktop_root_loader():
+        return send_from_directory(str(DESKTOP_VIEWS_DIR), "loader.html")
+
+    @app.route("/<name>.html")
+    def desktop_html_page(name: str):
+        views_path = DESKTOP_VIEWS_DIR / f"{name}.html"
+        if views_path.is_file():
+            return send_from_directory(str(DESKTOP_VIEWS_DIR), f"{name}.html")
+        root_path = DESKTOP_PUBLIC_DIR / f"{name}.html"
+        if root_path.is_file():
+            return send_from_directory(str(DESKTOP_PUBLIC_DIR), f"{name}.html")
         abort(404)
-    return cache_wrap(flask.send_from_directory(str(SONGS_DIR_PATH), ref), 604800)
+
+    @app.route("/assets/<path:filename>")
+    def desktop_public_assets(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_PUBLIC_DIR / "assets"), filename),
+            3600,
+        )
+
+    @app.route("/src/<path:filename>")
+    def desktop_public_src(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_PUBLIC_DIR / "src"), filename),
+            3600,
+        )
+
+    @app.route("/songs/<path:filename>")
+    def desktop_song_files(filename: str):
+        return cache_wrap(
+            send_from_directory(str(DESKTOP_SONGS_DIR), filename),
+            604800,
+        )
+
 
 @app.route(basedir + "manifest.json")
 def send_manifest():
     return cache_wrap(flask.send_from_directory(str(PUBLIC_DIR_PATH), "manifest.json"), 3600)
-
-
-@app.route('/<path:spa_path>')
-def route_frontend_spa(spa_path: str):
-    return _serve_frontend_asset(spa_path)
-
-
-if RUN_PROFILE == 'desktop':
-
-    @app.route('/songs/<path:filename>')
-    def route_desktop_song_asset(filename: str):
-        songs_dir = get_songs_dir_desktop()
-        if not songs_dir.exists():
-            app.logger.warning('Songs directory %s missing while serving %s', songs_dir, filename)
-            abort(404)
-        return cache_wrap(
-            flask.send_from_directory(str(songs_dir), filename),
-            604800,
-        )
-
-    @app.errorhandler(404)
-    def _desktop_spa_fallback(error):
-        if request.method not in {'GET', 'HEAD'}:
-            return error
-        path_value = request.path or ''
-        if path_value.startswith('/api/'):
-            return error
-        if path_value.startswith('/songs/') or path_value.startswith('/assets/') or path_value.startswith('/static/'):
-            return error
-        candidate = PUBLIC_DIR_PATH.joinpath(path_value.lstrip('/'))
-        if path_value and candidate.exists():
-            return error
-        index_path = PUBLIC_DIR_PATH / 'index.html'
-        if index_path.exists():
-            return send_from_directory(str(PUBLIC_DIR_PATH), 'index.html')
-        return error
 
 
 def _start_song_directory_watcher():

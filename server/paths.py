@@ -6,9 +6,6 @@ import sys
 from pathlib import Path
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
 def is_desktop_profile() -> bool:
     """Return ``True`` when the desktop runtime profile is active."""
 
@@ -20,7 +17,7 @@ def get_app_dir() -> Path:
 
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return _PROJECT_ROOT
+    return Path(__file__).resolve().parents[1]
 
 
 def get_public_dir() -> Path:
@@ -38,9 +35,9 @@ def get_songs_dir_desktop() -> Path:
 
 
 def get_songs_dir() -> Path:
-    """Backward-compatible alias for the desktop songs directory."""
+    """Return the songs directory without side effects."""
 
-    return get_songs_dir_desktop()
+    return get_app_dir() / "songs"
 
 
 __all__ = [
