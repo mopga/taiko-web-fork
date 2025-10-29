@@ -17,8 +17,13 @@ def app_dir() -> Path:
     """Return the effective application directory for the backend."""
 
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parents[1]
+        return Path(sys.executable).resolve().parent
+
+    module_path = Path(__file__).resolve()
+    candidate = module_path.parents[2]
+    if (candidate / "public").exists():
+        return candidate
+    return module_path.parents[1]
 
 
 def public_dir() -> Path:

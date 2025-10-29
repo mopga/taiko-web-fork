@@ -860,6 +860,7 @@ def create_app():
     session_redis = None
     cache_config: Mapping[str, object]
     desktop_data_dir: Optional[Path] = None
+    session_initialized = False
 
     if RUN_PROFILE == 'desktop':
         desktop_app_dir = app_dir()
@@ -895,13 +896,13 @@ def create_app():
             default_timeout=lifetime_seconds,
             mode=0o700,
         )
-        app_instance.config.update(
-            SESSION_TYPE='cachelib',
-            SESSION_CACHELIB=session_cache,
-            PERMANENT_SESSION_LIFETIME=lifetime_seconds,
-        )
+        app_instance.config['SESSION_TYPE'] = 'cachelib'
+        app_instance.config['SESSION_CACHELIB'] = session_cache
+        app_instance.config['PERMANENT_SESSION_LIFETIME'] = lifetime_seconds
         cache_config = {'CACHE_TYPE': 'NullCache'}
         session_backend = 'cachelib'
+        Session(app_instance)
+        session_initialized = True
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
@@ -995,7 +996,8 @@ def create_app():
             app_instance.config['SQLITE_DB_PATH'] = str(resolved_sqlite)
 
     app_instance.cache = Cache(app_instance, config=cache_config)
-    session_manager.init_app(app_instance)
+    if not session_initialized:
+        session_manager.init_app(app_instance)
     #csrf = CSRFProtect(app)
 
     db_name = os.environ.get("TAIKO_WEB_MONGO_DB") or mongo_config.get('database') or 'taiko'
@@ -1128,7 +1130,7 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 
 @app.route('/healthz')
-def route_healthcheck():
+def healthz():
     if not is_desktop():
         return jsonify({
             'status': 'ok',
@@ -1136,15 +1138,12 @@ def route_healthcheck():
             'profile': 'web',
         }), 200
 
-    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
-    payload = {
+    sqlite_path = current_app.config.get('SQLITE_PATH')
+    return jsonify({
         'status': 'ok',
         'profile': 'desktop',
-    }
-    if sqlite_path:
-        payload['db_path'] = str(Path(sqlite_path).resolve())
-
-    return jsonify(payload), 200
+        'db_path': str(Path(sqlite_path).resolve()) if sqlite_path else None,
+    }), 200
 
 
 @app.route('/admin/shutdown', methods=['POST'])

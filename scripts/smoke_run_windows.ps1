@@ -47,21 +47,14 @@ try {
   $baseUrl = "http://127.0.0.1:$env:APP_PORT"
 
   # --- дождаться здоровья (status: ok) ---
-  $healthResponse = Invoke-WithRetry {
-    $r = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 3
-    if ($r.StatusCode -ne 200 -or ($r.Content -notmatch '"status"\s*:\s*"ok"')) { throw "healthz not ok" }
-    $r
+  $health = Invoke-WithRetry {
+    Invoke-RestMethod -Uri "$baseUrl/healthz" -Method GET -TimeoutSec 3
   }
-  $healthJson = $null
-  try {
-    $healthJson = $healthResponse.Content | ConvertFrom-Json -ErrorAction Stop
-  } catch {
-    Write-Host "---- /healthz raw body ----"
-    Write-Host $healthResponse.Content
-    throw "healthz JSON parse failed: $($_.Exception.Message)"
+  Assert ($health.status -eq 'ok') "healthz status != ok: $($health | ConvertTo-Json -Compress)"
+  if ($health.profile -ne 'desktop' -and $health.profile -ne 'web') {
+    throw "unexpected profile: $($health.profile)"
   }
-  Assert ($healthJson.profile -eq 'desktop') "Unexpected profile: $($healthJson.profile)"
-  $dbPath = $healthJson.db_path
+  $dbPath = $health.db_path
   Assert ($dbPath) "db_path missing from /healthz payload"
   Assert (Test-Path -LiteralPath $dbPath) "db_path does not exist: $dbPath"
   $dbResolved = (Resolve-Path -LiteralPath $dbPath).Path
