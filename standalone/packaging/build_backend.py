@@ -29,8 +29,6 @@ def build_backend() -> None:
         str(DIST),
         "--workpath",
         str(BUILD),
-        "--specpath",
-        str(BUILD),
     ]
     print("[build_backend]", " ".join(cmd))
     subprocess.check_call(cmd)
