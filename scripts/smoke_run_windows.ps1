@@ -96,6 +96,24 @@ try {
 
   if ($songs.Count -gt 0) {
     Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
+    $first = $songs[0]
+    Assert ($first.is_playable) "First song is not playable"
+    $difficulties = $first.difficulties
+    Assert ($null -ne $difficulties) "First song missing difficulties"
+    $diffProps = @()
+    if ($difficulties -is [pscustomobject]) {
+      $diffProps = ($difficulties | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+    } elseif ($difficulties -is [System.Collections.IDictionary]) {
+      $diffProps = $difficulties.Keys
+    }
+    Assert ($diffProps.Count -gt 0) "First song has no difficulties"
+    foreach ($name in $diffProps) {
+      $value = $difficulties.$name
+      if ($difficulties -is [System.Collections.IDictionary]) {
+        $value = $difficulties[$name]
+      }
+      Assert ($value -is [pscustomobject] -or $value -is [System.Collections.IDictionary]) "Difficulty $name is not an object"
+    }
   }
 
   Write-Host "Smoke OK: /api/songs count=$($songs.Count)"

@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR="$(pwd)/_data"
-LOG_DIR="$(pwd)/_logs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORK_DIR="$(pwd)"
+DATA_DIR="$WORK_DIR/_data"
+LOG_DIR="$WORK_DIR/_logs"
 LOG_FILE="$LOG_DIR/smoke_backend.log"
 BASE_URL="http://127.0.0.1:8000"
 
-BACKEND_STAGING="$(pwd)/dist/backend/taiko-web-backend"
+BACKEND_STAGING="$REPO_ROOT/standalone/dist/backend/taiko-web-backend"
 SONGS_DIR="$BACKEND_STAGING/songs"
+TEST_TRACK_SRC="$REPO_ROOT/tools/ci-assets/test-track"
 
 mkdir -p "$DATA_DIR" "$SONGS_DIR" "$LOG_DIR"
+
+if [[ "${TAIKO_SMOKE_COPY_TRACK:-1}" != "0" && -d "$TEST_TRACK_SRC" ]]; then
+  TARGET_DIR="$SONGS_DIR/TestTrack"
+  rm -rf "$TARGET_DIR"
+  mkdir -p "$TARGET_DIR"
+  cp -a "$TEST_TRACK_SRC/." "$TARGET_DIR/"
+fi
 
 RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" PORT=8000 "$BACKEND_STAGING/taiko-web-backend" --host 127.0.0.1 --port 8000 >"$LOG_FILE" 2>&1 &
 PID=$!
@@ -104,16 +115,30 @@ try:
 except Exception as exc:  # pragma: no cover - smoke guard
     raise SystemExit(f'Invalid JSON: {exc}')
 
-if isinstance(data, list):
-    pass
-elif isinstance(data, dict):
+if isinstance(data, dict):
     items = data.get('items')
     if items is None:
         items = []
     if not isinstance(items, list):
         raise SystemExit('Songs payload items is not a list')
+    payload = items
+elif isinstance(data, list):
+    payload = data
 else:
     raise SystemExit('Songs payload must be a list or dict with items list')
+
+if payload:
+    first = payload[0]
+    if not isinstance(first, dict):
+        raise SystemExit('First song entry is not an object')
+    if not first.get('is_playable'):
+        raise SystemExit('First song is not playable')
+    difficulties = first.get('difficulties')
+    if not isinstance(difficulties, dict) or not difficulties:
+        raise SystemExit('First song has invalid difficulties payload')
+    for key, value in difficulties.items():
+        if not isinstance(value, dict):
+            raise SystemExit(f'Difficulty {key} is not an object')
 PY
 
 openapi_status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/openapi.json")

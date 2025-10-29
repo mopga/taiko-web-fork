@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-from server.paths import get_app_dir, get_songs_dir
+from server.paths import get_app_dir, get_songs_dir_desktop
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -247,7 +247,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     _configure_logging()
     args = _parse_args(argv)
     data_dir = _resolve_data_dir(args.data_dir)
-    songs_dir = get_songs_dir()
+    songs_dir = get_songs_dir_desktop()
     try:
         songs_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

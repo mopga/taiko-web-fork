@@ -119,7 +119,41 @@ jobs:
             if ($i -eq 29) { throw "Backend did not become healthy" }
           }
           $resp = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs
-          if (-not ($resp.Content -match 'test')) { throw "Test song not found in /api/songs" }
+          try {
+            $payload = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+          } catch {
+            Write-Host "---- /api/songs raw body ----"
+            Write-Host $resp.Content
+            throw "Failed to parse /api/songs JSON: $($_.Exception.Message)"
+          }
+          if ($null -eq $payload) { throw "Songs payload is null" }
+          if ($payload -is [pscustomobject] -and ($payload | Get-Member -Name items -ErrorAction SilentlyContinue)) {
+            $songs = @($payload.items)
+          } elseif ($payload -is [System.Collections.IEnumerable]) {
+            $songs = @($payload)
+          } else {
+            throw "Unexpected songs payload type: $($payload.GetType().FullName)"
+          }
+          $songs = $songs | Where-Object { $_ -ne $null }
+          if ($songs.Count -lt 1) { throw "Songs payload did not include the injected track" }
+          $first = $songs[0]
+          if (-not $first.is_playable) { throw "First song is not marked playable" }
+          $difficulties = $first.difficulties
+          if ($null -eq $difficulties) { throw "First song missing difficulties" }
+          $difficultyKeys = @()
+          if ($difficulties -is [pscustomobject]) {
+            $difficultyKeys = ($difficulties | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+          } elseif ($difficulties -is [System.Collections.IDictionary]) {
+            $difficultyKeys = $difficulties.Keys
+          }
+          if ($difficultyKeys.Count -eq 0) { throw "First song has no difficulties entries" }
+          foreach ($name in $difficultyKeys) {
+            $value = $difficulties.$name
+            if ($difficulties -is [System.Collections.IDictionary]) { $value = $difficulties[$name] }
+            if (-not ($value -is [pscustomobject] -or $value -is [System.Collections.IDictionary])) {
+              throw "Difficulty $name is not an object"
+            }
+          }
           Stop-Process -Id $P.Id -Force
           Pop-Location
 
@@ -366,8 +400,41 @@ jobs:
           name: taiko-web-desktop-windows
           path: ${{ steps.installer.outputs.path }}
 
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build backend
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pyinstaller-hooks-contrib
+          python standalone/packaging/build_backend.py --profile desktop --outdir standalone/dist/backend
+
+      - name: Clean packaged songs directory
+        run: |
+          rm -rf standalone/dist/backend/taiko-web-backend/songs/*
+
+      - name: Smoke backend (empty library)
+        run: |
+          TAIKO_SMOKE_COPY_TRACK=0 bash scripts/smoke_run_linux.sh
+
+      - name: Smoke backend with injected song
+        run: |
+          bash scripts/smoke_run_linux.sh
+
   release:
-    needs: build-windows
+    needs:
+      - build-windows
+      - build-linux
     runs-on: ubuntu-latest
     if: >
       github.event_name != 'pull_request' &&

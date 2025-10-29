@@ -72,7 +72,12 @@ from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
 from desktop_config import DESKTOP_CONFIG_ENV, resolve_songs_dir_from_config
-from server.paths import get_app_dir, get_public_dir, get_songs_dir, is_desktop_profile
+from server.paths import (
+    get_app_dir,
+    get_public_dir,
+    get_songs_dir_desktop,
+    is_desktop_profile,
+)
 from tools.init_db_schema import init_db_schema
 from storage.factory import StorageBundle, create_storage_bundle
 from storage.interfaces import (
@@ -475,7 +480,7 @@ SCAN_IGNORE_GLOBS: list[str] = []
 ADMIN_SCAN_TOKEN = ''
 SONGS_BASEURL_VALUE = ''
 COERCE_UNKNOWN_COURSE = None
-SONGS_DIR_PATH = get_songs_dir() if RUN_PROFILE == 'desktop' else Path('.')
+SONGS_DIR_PATH = get_songs_dir_desktop() if RUN_PROFILE == 'desktop' else Path('.')
 song_scanner: Optional[SongScanner] = None
 _song_watcher_handle = None
 
@@ -888,7 +893,7 @@ def create_app():
         sessions_directory = desktop_data_dir / 'sessions'
         sessions_directory.mkdir(parents=True, exist_ok=True)
         try:
-            get_songs_dir().mkdir(parents=True, exist_ok=True)
+            get_songs_dir_desktop().mkdir(parents=True, exist_ok=True)
         except Exception:
             app_instance.logger.warning('Failed to ensure songs directory at startup', exc_info=True)
         lifetime_seconds = int(
@@ -1064,7 +1069,7 @@ def create_app():
         db = _LazyResourceProxy(lambda: None)
 
     if RUN_PROFILE == 'desktop':
-        songs_dir_value = str(get_songs_dir())
+        songs_dir_value = str(get_songs_dir_desktop())
         config_songs_dir = None
         config_path = None
     else:
@@ -3066,6 +3071,17 @@ def route_frontend_spa(spa_path: str):
 
 
 if RUN_PROFILE == 'desktop':
+
+    @app.route('/songs/<path:filename>')
+    def route_desktop_song_asset(filename: str):
+        songs_dir = get_songs_dir_desktop()
+        if not songs_dir.exists():
+            app.logger.warning('Songs directory %s missing while serving %s', songs_dir, filename)
+            abort(404)
+        return cache_wrap(
+            flask.send_from_directory(str(songs_dir), filename),
+            604800,
+        )
 
     @app.errorhandler(404)
     def _desktop_spa_fallback(error):

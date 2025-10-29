@@ -6,28 +6,21 @@ import sys
 from pathlib import Path
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def is_desktop_profile() -> bool:
     """Return ``True`` when the desktop runtime profile is active."""
 
     return os.getenv("RUN_PROFILE", "").strip().lower() == "desktop"
 
 
-def _project_root() -> Path:
-    """Resolve the repository root for the current module."""
-
-    return Path(__file__).resolve().parents[1]
-
-
 def get_app_dir() -> Path:
     """Return the effective application directory for the backend."""
 
-    if is_desktop_profile():
-        executable = Path(sys.executable).resolve()
-        if getattr(sys, "frozen", False):
-            return executable.parent
-        # When running from sources (e.g. tests) fall back to the project root.
-        return _project_root()
-    return _project_root()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return _PROJECT_ROOT
 
 
 def get_public_dir() -> Path:
@@ -36,15 +29,24 @@ def get_public_dir() -> Path:
     return get_app_dir() / "public"
 
 
-def get_songs_dir() -> Path:
-    """Return the root directory containing bundled songs."""
+def get_songs_dir_desktop() -> Path:
+    """Return the desktop songs directory, ensuring it exists."""
 
-    return get_app_dir() / "songs"
+    songs_dir = get_app_dir() / "songs"
+    songs_dir.mkdir(parents=True, exist_ok=True)
+    return songs_dir
+
+
+def get_songs_dir() -> Path:
+    """Backward-compatible alias for the desktop songs directory."""
+
+    return get_songs_dir_desktop()
 
 
 __all__ = [
     "get_app_dir",
     "get_public_dir",
     "get_songs_dir",
+    "get_songs_dir_desktop",
     "is_desktop_profile",
 ]

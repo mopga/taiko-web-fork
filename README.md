@@ -28,11 +28,13 @@ docker compose up -d
 
 ## Desktop run for DEV
 
-The desktop profile stores persistent data under `DATA_DIR` (defaults to
+The desktop profile stores persistent state under `DATA_DIR` (defaults to
 `~/.taiko-web-data` when the variable is not set). Sessions live in
 `$DATA_DIR/sessions`, the SQLite database in `$DATA_DIR/taiko.db`, and logs
-default to `$DATA_DIR/logs` when file logging is enabled. This directory also
-contains the `songs/` subfolder used by the scanner.
+default to `$DATA_DIR/logs` when file logging is enabled. Song charts are **not**
+read from `DATA_DIR` anymore: the scanner always watches the `songs/` folder
+next to the running backend binary (when developing from sources that resolves
+to `<repo-root>/songs`).
 
 ### Quick start standalone DEV version
 
@@ -100,8 +102,15 @@ or from the workflow run summary. Each release ships the following files:
 
 All desktop builds honour the `DATA_DIR` environment variable (defaults to
 `~/.taiko-web-data` on Linux/macOS and `%USERPROFILE%\.taiko-web-data` on
-Windows). Songs must live under `$DATA_DIR/songs`, regardless of how the backend
-was installed.
+Windows). Songs are bundled and discovered exclusively from the `songs/`
+directory next to the backend binary:
+
+- Windows installer: `%APPDATA%\taiko-web-backend\songs\`
+- Windows portable zip: `<extracted-folder>\songs\`
+- macOS/Linux tarballs: `<extracted-folder>/songs/`
+
+Drop each `.tja`/`.tjc` chart into its own subdirectory inside that `songs/`
+folder and restart the backend to rescan the library.
 
 > **Note**
 > The Windows binaries are unsigned, so SmartScreen may display a warning. Use
@@ -172,18 +181,18 @@ out of the box without an additional Node/webpack build step.
 - SQLite DB: `${DATA_DIR}/taiko.db`
 - Sessions: `${DATA_DIR}/sessions`
 - Logs/cache: `${DATA_DIR}/logs` (if you enable file logging)
-- Songs: `${DATA_DIR}/songs`
+- Songs: `<app-dir>/songs` (for local development this is `<repo-root>/songs`)
 
 ### Adding songs
 
-By default, the desktop profile scans for songs in `${DATA_DIR}/songs/` (for
-example, `~/.taiko-web-data/songs/` on Linux and macOS or
-`%USERPROFILE%\.taiko-web-data\songs\` on Windows). Each song belongs in its
-own directory that contains a `.tja` or `.tjc` chart file and optional audio or
-background assets:
+The desktop profile scans `<app-dir>/songs/`, where `<app-dir>` is the directory
+containing the running backend binary. When working from sources this resolves
+to `<repo-root>/songs/`; packaged builds include an empty `songs/` folder next to
+the executable. Each song belongs in its own directory that contains a `.tja` or
+`.tjc` chart file and optional audio/background assets:
 
 ```
-~/.taiko-web-data/
+taiko-web-backend/
 └── songs/
     ├── MySong1/
     │   ├── MySong1.tja
