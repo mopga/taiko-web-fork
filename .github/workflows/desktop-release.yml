@@ -79,21 +79,32 @@ jobs:
       - name: Pre-check pnpm
         run: pnpm -v
 
-      - name: Pre-create pnpm store dir (required for actions/cache@v4)
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure pnpm store exists
         shell: pwsh
         run: |
-          $store = pnpm store path --silent
+          $store = "${{ steps.pnpm-store.outputs.path }}"
           if (-not (Test-Path $store)) {
             New-Item -ItemType Directory -Force -Path $store | Out-Null
           }
           Write-Host "pnpm store dir: $store"
 
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
       - name: Setup Node (frontend)
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "pnpm"
-          cache-dependency-path: client/pnpm-lock.yaml
 
       - name: Install frontend dependencies
         working-directory: client
