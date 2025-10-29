@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from cachelib.file import FileSystemCache
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -35,15 +37,17 @@ def test_desktop_healthz(tmp_path, monkeypatch):
     assert payload["ok"] is True
     assert payload["profile"] == "desktop"
     assert payload["db"] == "sqlite"
-    assert payload["sessions"] == "filesystem"
+    assert payload["sessions"] == "cachelib"
     assert payload.get("path") == str(tmp_path / "taiko.db")
 
 
 def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):
     app_module = _import_desktop_app(monkeypatch, tmp_path)
-    sessions_dir = Path(app_module.app.config["SESSION_FILE_DIR"])
+    cache_backend = app_module.app.config["SESSION_CACHELIB"]
+    assert isinstance(cache_backend, FileSystemCache)
+    sessions_dir = Path(cache_backend._path)
     assert sessions_dir.exists()
-    assert app_module.app.config.get("SESSION_TYPE") == "filesystem"
+    assert app_module.app.config.get("SESSION_TYPE") == "cachelib"
 
     def _touch_session():
         from flask import session as flask_session
@@ -53,18 +57,25 @@ def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):
 
     app_module.app.add_url_rule("/_test_session", "_test_session", _touch_session)
 
+    def _read_session():
+        from flask import session as flask_session
+
+        return flask_session.get("ping", "missing")
+
+    app_module.app.add_url_rule("/_read_session", "_read_session", _read_session)
+
     client = app_module.app.test_client()
     response = client.get("/_test_session")
     assert response.status_code == 200
 
     cookie_header = response.headers.get("Set-Cookie", "")
     assert "session=" in cookie_header
-    session_id = cookie_header.split("session=", 1)[1].split(";", 1)[0]
-    store_id = app_module.app.session_interface._get_store_id(session_id)
+
+    follow_response = client.get("/_read_session")
+    assert follow_response.status_code == 200
+    assert follow_response.get_data(as_text=True) == "pong"
+
     cache = app_module.app.session_interface.cache
-    cached = cache.get(store_id)
-    assert isinstance(cached, dict)
-    assert cached.get("ping") == "pong"
     data_files = list(cache._list_dir())
     assert data_files
 
@@ -72,7 +83,7 @@ def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):
 def test_no_redis_in_desktop(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     app_module = _import_desktop_app(monkeypatch, tmp_path)
-    assert app_module.app.config.get("SESSION_TYPE") == "filesystem"
+    assert app_module.app.config.get("SESSION_TYPE") == "cachelib"
     assert app_module.app.config.get("SESSION_REDIS") is None
     assert "redis" not in caplog.text.lower()
 
