@@ -33,12 +33,11 @@ def test_desktop_healthz(tmp_path, monkeypatch):
     response = client.get("/healthz")
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["status"] == "ok"
-    assert payload["ok"] is True
-    assert payload["profile"] == "desktop"
-    assert payload["mongo"] is None
-    expected_db_path = str((tmp_path / "taiko.db").resolve())
-    assert payload.get("db_path") == expected_db_path
+    assert payload == {
+        "status": "ok",
+        "profile": "desktop",
+        "db_path": str((tmp_path / "taiko.db").resolve()),
+    }
 
 
 def test_sessions_filesystem_directory_created(tmp_path, monkeypatch):
