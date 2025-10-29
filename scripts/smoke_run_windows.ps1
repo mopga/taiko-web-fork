@@ -137,6 +137,57 @@ try {
 }
 catch {
   Write-Error $_
+  try {
+    $errRecord = $_
+    $exception = $errRecord.Exception
+    $statusCode = $null
+    $requestUri = $null
+    $responseBody = $null
+
+    if ($exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+      $httpResponse = $exception.Response
+      if ($httpResponse) {
+        try { $statusCode = [int]$httpResponse.StatusCode } catch {}
+        try { $requestUri = $httpResponse.RequestMessage.RequestUri } catch {}
+        try { $responseBody = $httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() } catch {}
+      }
+    }
+    elseif ($exception -is [System.Net.WebException]) {
+      $httpResponse = $exception.Response
+      if ($httpResponse -is [System.Net.HttpWebResponse]) {
+        try { $statusCode = [int]$httpResponse.StatusCode } catch {}
+        try { $requestUri = $httpResponse.ResponseUri } catch {}
+        try {
+          $stream = $httpResponse.GetResponseStream()
+          if ($stream) {
+            try {
+              $reader = New-Object System.IO.StreamReader($stream)
+              $responseBody = $reader.ReadToEnd()
+            }
+            finally {
+              if ($reader) { $reader.Dispose() }
+              $stream.Dispose()
+            }
+          }
+        } catch {}
+      }
+    }
+    elseif ($errRecord.ErrorDetails -and $errRecord.ErrorDetails.Message) {
+      $responseBody = $errRecord.ErrorDetails.Message
+    }
+
+    if ($statusCode -or $requestUri -or $responseBody) {
+      Write-Host "===== HTTP error details ====="
+      if ($statusCode -ne $null) { Write-Host "StatusCode: $statusCode" }
+      if ($requestUri) { Write-Host "RequestUri: $requestUri" }
+      if ($responseBody) {
+        Write-Host "---- Response body ----"
+        Write-Host $responseBody
+      }
+    }
+  } catch {
+    Write-Host "Failed to extract HTTP error details: $($_.Exception.Message)"
+  }
   if (Test-Path $stdoutLog) {
     Write-Host "===== smoke_stdout.log (tail) ====="
     Get-Content $stdoutLog -Tail 200 | Write-Host
