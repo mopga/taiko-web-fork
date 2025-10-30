@@ -900,7 +900,10 @@ def create_app():
         None,
     )
 
-    mongo_hosts = mongo_host or ['127.0.0.1:27017']
+    if not mongo_uri and not mongo_host:
+        mongo_hosts = ['mongo:27017']
+    else:
+        mongo_hosts = mongo_host or ['127.0.0.1:27017']
 
     def _create_mongo_client() -> MongoClient:
         if mongo_uri:

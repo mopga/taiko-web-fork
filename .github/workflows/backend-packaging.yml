@@ -2,8 +2,11 @@ name: backend-packaging
 
 on:
   push:
-    branches:
-      - '**'
+    branches: [ main ]
+    tags: [ 'v*' ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
   build:

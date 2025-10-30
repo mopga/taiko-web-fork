@@ -46,7 +46,8 @@ cleanup() {
 trap 'cleanup "$?"' EXIT
 
 echo "Starting docker compose stack..."
-docker compose -f "$COMPOSE_FILE" up -d --build || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
+docker compose -f "$COMPOSE_FILE" build --pull --no-cache || { echo "[smoke] failed to build docker compose stack" >&2; exit 1; }
+docker compose -f "$COMPOSE_FILE" up -d || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
 
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 health_url="${BASE_URL%/}/healthz"
