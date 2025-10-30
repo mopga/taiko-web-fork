@@ -1174,13 +1174,25 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 def healthz():
     want_full = request.args.get('full') in ('1', 'true', 'yes')
 
+    payload: dict[str, object] = {'status': 'ok'}
+
+    run_profile = current_app.config.get('RUN_PROFILE')
+    if run_profile == 'desktop':
+        payload['profile'] = 'desktop'
+        db_path = (
+            current_app.config.get('SQLITE_PATH')
+            or current_app.config.get('SQLITE_DB_PATH')
+        )
+        if db_path:
+            payload['db_path'] = db_path
+
     if not want_full:
-        return jsonify({'status': 'ok'}), 200
+        return jsonify(payload), 200
 
     deps: dict[str, str] = {}
     code = 200
 
-    if not is_desktop():
+    if run_profile != 'desktop':
         try:
             client = current_app.config.get('MONGO_CLIENT') or _create_mongo_client()
             client.admin.command('ping')
@@ -1190,8 +1202,9 @@ def healthz():
             deps['mongo'] = 'fail'
             code = 503
 
-    payload = {'status': 'ok' if code == 200 else 'fail'}
     payload['deps'] = deps
+    if code != 200:
+        payload['status'] = 'fail'
 
     return jsonify(payload), code
 
