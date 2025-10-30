@@ -1218,10 +1218,10 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
-        status: dict[str, object] = {
-            'status': 'ok',
-            'profile': 'web',
-        }
+        # Ровно три ключа в контракте: status, mongo, profile.
+        status_ok = {'status': 'ok', 'mongo': 'ok', 'profile': 'web'}
+        status_fail_mongo = {'status': 'fail', 'mongo': 'fail', 'profile': 'web'}
+        status_fail_redis = {'status': 'fail', 'mongo': 'ok', 'profile': 'web'}
 
         client = current_app.config.get('MONGO_CLIENT')
         if client is None:
@@ -1239,10 +1239,7 @@ def healthz():
             client.admin.command('ping')
         except Exception:
             current_app.logger.exception('mongo ping failed')
-            status.update({'status': 'error', 'mongo': 'error'})
-            return jsonify(status), 503
-
-        status['mongo'] = 'ok'
+            return jsonify(status_fail_mongo), 503
 
         redis_client = current_app.config.get('SESSION_REDIS')
         if redis_client is not None:
@@ -1250,11 +1247,9 @@ def healthz():
                 redis_client.ping()
             except Exception:
                 current_app.logger.exception('redis ping failed')
-                status.update({'status': 'error', 'redis': 'error'})
-                return jsonify(status), 503
-            status['redis'] = 'ok'
+                return jsonify(status_fail_redis), 503
 
-        return jsonify(status), 200
+        return jsonify(status_ok), 200
 
     payload = {'status': 'ok', 'profile': 'desktop'}
     sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
