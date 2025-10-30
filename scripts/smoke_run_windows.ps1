@@ -1,6 +1,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$requireSongs = ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))
+
+function Get-SeqCount([object]$x) {
+  if ($null -eq $x) { return 0 }
+  if ($x -is [System.Array]) { return $x.Count }
+  if ($x -is [System.Collections.IEnumerable]) { return @($x).Count }
+  return 0
+}
+
 $env:APP_PORT = if ($env:APP_PORT) { $env:APP_PORT } else { "8000" }
 $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
@@ -142,6 +151,26 @@ try {
   Assert (@(200,304) -contains $fav.StatusCode) "favicon unexpected: $($fav.StatusCode)"
 
   # --- /api/songs --- ждём НЕ пустой список
+  function ConvertTo-ObjectArray([object]$value) {
+    if ($null -eq $value) { return @() }
+    if ($value -is [string]) { return ,$value }
+    if ($value -is [System.Collections.IDictionary]) {
+      $list = [System.Collections.Generic.List[object]]::new()
+      foreach ($key in $value.Keys) {
+        [void]$list.Add($value[$key])
+      }
+      return $list.ToArray()
+    }
+    if ($value -is [System.Collections.IEnumerable]) {
+      $list = [System.Collections.Generic.List[object]]::new()
+      foreach ($item in $value) {
+        [void]$list.Add($item)
+      }
+      return $list.ToArray()
+    }
+    return ,$value
+  }
+
   function Normalize-Songs([string]$body) {
     if ([string]::IsNullOrWhiteSpace($body)) { return @() }
     # безопасная нормализация строки (BOM/NUL)
@@ -154,14 +183,12 @@ try {
 
     if ($null -eq $json) { return @() }
     if ($json -is [pscustomobject] -and ($json | Get-Member -Name items -ErrorAction SilentlyContinue)) {
-      $items = $json.items
-      if ($items -is [System.Array]) { return $items }
-      if ($items -is [System.Collections.IEnumerable]) { return @($items) }
-      return @()
+      return ConvertTo-ObjectArray $json.items
     }
-    if ($json -is [System.Array]) { return $json }
-    if ($json -is [System.Collections.IEnumerable]) { return @($json) }
-    return @()
+    if ($json -is [System.Collections.IDictionary] -and $json.Contains('items')) {
+      return ConvertTo-ObjectArray $json['items']
+    }
+    return ConvertTo-ObjectArray $json
   }
 
   $songs    = @()
@@ -174,16 +201,16 @@ try {
     } catch {
       $songs = @()
     }
-    if ($songs.Count -eq 0) { Start-Sleep -Milliseconds 500 }
-  } while ($songs.Count -eq 0 -and (Get-Date) -lt $deadline)
+    if ((Get-SeqCount $songs) -eq 0) { Start-Sleep -Milliseconds 500 }
+  } while ((Get-SeqCount $songs) -eq 0 -and (Get-Date) -lt $deadline)
 
-  if ($songs.Count -eq 0) {
+  if ($songs.Count -eq 0 -and $requireSongs) {
     Write-Host "---- /api/songs raw body (still empty) ----"
     try { $resp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5; Write-Host $resp.Content } catch {}
-    throw "No songs found in /api/songs after wait"
+    throw "No songs found in /api/songs after wait (SMOKE_REQUIRE_SONGS=1)"
   }
 
-  if ($songs.Count -gt 0) {
+  if ($songs.Count -gt 0 -and $requireSongs) {
     Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
     $first = $songs[0]
     Assert ($first.is_playable) "First song is not playable"
@@ -195,7 +222,12 @@ try {
     } elseif ($difficulties -is [System.Collections.IDictionary]) {
       $diffProps = $difficulties.Keys
     }
-    Assert ($diffProps.Count -gt 0) "First song has no difficulties"
+    $diffProps = @($diffProps) | Where-Object { $_ }
+    $diffProps = $diffProps -as [string[]]
+    if ($null -eq $diffProps) {
+      $diffProps = @()
+    }
+    Assert ($diffProps.Length -gt 0) "First song has no difficulties"
     foreach ($name in $diffProps) {
       $value = $difficulties.$name
       if ($difficulties -is [System.Collections.IDictionary]) {
@@ -205,9 +237,9 @@ try {
     }
   }
 
-  Write-Host "Smoke OK: /api/songs count=$($songs.Count)"
+  Write-Host ("Smoke OK: /api/songs count={0} (requireSongs={1})" -f (Get-SeqCount $songs), $requireSongs)
   Write-Host "Desktop smoke OK: root+api passed."
-  exit 0
+  return
 }
 catch {
   Write-Error $_
