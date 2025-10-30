@@ -1173,107 +1173,48 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
+        want_full = request.args.get('full') in ('1', 'true', 'yes')
+
+        # --- Mongo ---
         mongo_status = 'ok'
-        redis_status = 'ok'
-
-        def _resolve_client(
-            config_key: str,
-            factory_key: str,
-            dispatcher_getter: Optional[Callable[[], Any]],
-            *,
-            fallback_config_keys: Sequence[str] = (),
-        ):
-            client = current_app.config.get(config_key)
-            created_here = False
-
-            if client is None:
-                for fallback_key in fallback_config_keys:
-                    fallback = current_app.config.get(fallback_key)
-                    if fallback is not None:
-                        client = fallback
-                        break
-
-            if client is None:
-                factory = current_app.config.get(factory_key)
-                if callable(factory):
-                    try:
-                        client = factory()
-                    except Exception:
-                        current_app.logger.exception('failed to create %s via factory', config_key.lower())
-                        client = None
-                    else:
-                        created_here = True
-
-            if client is None and dispatcher_getter is not None:
-                try:
-                    client = dispatcher_getter()
-                except Exception:
-                    current_app.logger.exception('failed to acquire %s via dispatcher', config_key.lower())
-                    client = None
-
-            return client, created_here
-
-        mongo_client, mongo_created = _resolve_client(
-            'MONGO_CLIENT',
-            'MONGO_CLIENT_FACTORY',
-            _mongo_dispatcher.get_client if _mongo_dispatcher is not None else None,
-        )
-
         try:
-            if mongo_client is None:
-                mongo_status = 'fail'
-            else:
-                mongo_client.admin.command('ping')
+            client = current_app.config.get('MONGO_CLIENT') or _create_mongo_client()
+            client.admin.command('ping')
         except Exception:
             current_app.logger.exception('mongo ping failed')
             mongo_status = 'fail'
-        finally:
-            if mongo_created and mongo_client is not None:
-                try:
-                    mongo_client.close()
-                except Exception:
-                    current_app.logger.debug('failed to close healthz MongoClient', exc_info=True)
 
-        redis_client, redis_created = _resolve_client(
-            'REDIS_CLIENT',
-            'REDIS_CLIENT_FACTORY',
-            _redis_dispatcher.get_client if _redis_dispatcher is not None else None,
-            fallback_config_keys=('SESSION_REDIS',),
-        )
+        if not want_full:
+            # МИНИМАЛЬНЫЙ КОНТРАКТ: РОВНО 3 ключа
+            return jsonify({
+                'status': 'ok' if mongo_status == 'ok' else 'fail',
+                'mongo': mongo_status,
+                'profile': 'web',
+            }), (200 if mongo_status == 'ok' else 503)
 
+        # --- Redis (расширенный режим для smoke) ---
+        redis_status = 'ok'
         try:
-            if redis_client is None:
-                redis_status = 'fail'
-            else:
-                redis_client.ping()
+            r = current_app.config.get('REDIS_CLIENT') or _create_redis_client()
+            r.ping()
         except Exception:
             current_app.logger.exception('redis ping failed')
             redis_status = 'fail'
-        finally:
-            if redis_created and redis_client is not None:
-                try:
-                    redis_client.close()
-                except Exception:
-                    current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
 
-        overall_status = 'ok' if (mongo_status == 'ok' and redis_status == 'ok') else 'fail'
-        status_code = 200 if overall_status == 'ok' else 503
-
-        payload = {
-            'status': overall_status,
+        overall_ok = (mongo_status == 'ok' and redis_status == 'ok')
+        return jsonify({
+            'status': 'ok' if overall_ok else 'fail',
             'mongo': mongo_status,
             'redis': redis_status,
             'profile': 'web',
-        }
+        }), (200 if overall_ok else 503)
 
-        return jsonify(payload), status_code
-
-    sqlite_path = current_app.config.get('SQLITE_PATH')
-    return jsonify({
-        'status': 'ok',
-        'profile': 'desktop',
-        'db_path': str(Path(sqlite_path).resolve()) if sqlite_path else None,
-    }), 200
+    # desktop — как было
+    payload = {'status': 'ok', 'profile': 'desktop'}
+    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
+    if sqlite_path:
+        payload['db_path'] = str(Path(sqlite_path).resolve())
+    return jsonify(payload), 200
 
 
 @app.route('/favicon.ico', methods=['GET', 'HEAD'])

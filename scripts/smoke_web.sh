@@ -48,7 +48,8 @@ trap 'cleanup "$?"' EXIT
 echo "Starting docker compose stack..."
 docker compose -f "$COMPOSE_FILE" up -d --build || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
 
-health_url="http://localhost:8000/healthz"
+BASE_URL="${BASE_URL:-http://localhost:8000}"
+health_url="${BASE_URL%/}/healthz?full=1"
 echo "Waiting for $health_url"
 ready=0
 for attempt in $(seq 1 30); do
@@ -86,7 +87,7 @@ fi
 # Validate /healthz JSON: минимальный обязательный набор полей.
 # Без heredoc — на jq. Это надёжнее и прозрачнее в CI.
 #
-if ! jq -e '.status=="ok" and .mongo=="ok" and .redis=="ok"' "$TMP_HEALTH" >/dev/null; then
+if ! jq -e '.status=="ok" and .mongo=="ok" and .redis=="ok" and .profile=="web"' "$TMP_HEALTH" >/dev/null; then
   echo "[smoke] healthz validation failed" >&2
   echo "---- response body ----" >&2
   cat "$TMP_HEALTH" >&2 || true
@@ -94,12 +95,12 @@ if ! jq -e '.status=="ok" and .mongo=="ok" and .redis=="ok"' "$TMP_HEALTH" >/dev
 fi
 
 echo "Checking CSRF token endpoint..."
-csrf_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
+csrf_payload="$(curl --fail --silent --show-error "${BASE_URL%/}/api/csrftoken" 2>"$TMP_HEALTH_ERR")" || {
   echo "[smoke] failed to fetch CSRF token" >&2
   if [[ -s "$TMP_HEALTH_ERR" ]]; then
     cat "$TMP_HEALTH_ERR" >&2
   fi
-  fallback_body="$(curl --silent --show-error "http://localhost:8000/api/csrftoken" || true)"
+  fallback_body="$(curl --silent --show-error "${BASE_URL%/}/api/csrftoken" || true)"
   if [[ -n "$fallback_body" ]]; then
     echo "[smoke] response body:" >&2
     echo "$fallback_body" >&2
@@ -114,12 +115,12 @@ if ! printf '%s' "$csrf_payload" | jq -e '.status=="ok" and (.token | type=="str
 fi
 
 echo "Checking songs catalog endpoint..."
-songs_payload="$(curl --fail --silent --show-error "http://localhost:8000/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
+songs_payload="$(curl --fail --silent --show-error "${BASE_URL%/}/api/songs?limit=5" 2>"$TMP_HEALTH_ERR")" || {
   echo "[smoke] failed to fetch songs catalog" >&2
   if [[ -s "$TMP_HEALTH_ERR" ]]; then
     cat "$TMP_HEALTH_ERR" >&2
   fi
-  fallback_body="$(curl --silent --show-error "http://localhost:8000/api/songs?limit=5" || true)"
+  fallback_body="$(curl --silent --show-error "${BASE_URL%/}/api/songs?limit=5" || true)"
   if [[ -n "$fallback_body" ]]; then
     echo "[smoke] response body:" >&2
     echo "$fallback_body" >&2
