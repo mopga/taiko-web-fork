@@ -7,12 +7,18 @@ New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
-$exe = "standalone\dist\backend\taiko-web-backend\taiko-web-backend.exe"
+$backendRoot = Join-Path (Get-Location) "standalone/dist/backend/taiko-web-backend"
+$exe = Join-Path $backendRoot "taiko-web-backend.exe"
 if (-not (Test-Path $exe)) {
     throw "Binary not found: $exe"
 }
 
-$songsDir = Join-Path (Split-Path $exe) "songs"
+Write-Host "WorkingDir: $PWD"
+Write-Host "Exe (before resolve): $exe"
+$absExe = (Resolve-Path -LiteralPath $exe).Path
+Write-Host "Exe (abs): $absExe"
+
+$songsDir = Join-Path (Split-Path $absExe) "songs"
 New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
 
 $logDir = Join-Path (Get-Location) "_logs"
@@ -24,14 +30,24 @@ Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 $env:PORT = $env:APP_PORT
 $args = @("--host", "127.0.0.1", "--port", $env:APP_PORT)
 $startParams = @{
-    FilePath = $exe
+    FilePath = $absExe
     ArgumentList = $args
+    WorkingDirectory = $backendRoot
     PassThru = $true
     RedirectStandardOutput = $stdoutLog
     RedirectStandardError = $stderrLog
     WindowStyle = 'Hidden'
 }
-$process = Start-Process @startParams
+$process = $null
+try {
+    $process = Start-Process @startParams -ErrorAction Stop
+}
+catch {
+    if ($_.Exception -is [System.ComponentModel.Win32Exception]) {
+        Write-Host ("Win32Exception.NativeErrorCode = {0}" -f $_.Exception.NativeErrorCode)
+    }
+    throw
+}
 
 
 try {
@@ -51,9 +67,7 @@ try {
     Invoke-RestMethod -Uri "$baseUrl/healthz" -Method GET -TimeoutSec 3
   }
   Assert ($health.status -eq 'ok') "healthz status != ok: $($health | ConvertTo-Json -Compress)"
-  if ($health.profile -ne 'desktop' -and $health.profile -ne 'web') {
-    throw "unexpected profile: $($health.profile)"
-  }
+  Assert ($health.profile -eq 'desktop') "unexpected profile: $($health.profile)"
   $dbPath = $health.db_path
   Assert ($dbPath) "db_path missing from /healthz payload"
   Assert (Test-Path -LiteralPath $dbPath) "db_path does not exist: $dbPath"
