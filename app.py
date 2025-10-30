@@ -15,7 +15,7 @@ import threading
 import signal
 import time
 import unicodedata
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Optional, Sequence, cast
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
 from pathlib import Path
@@ -27,7 +27,7 @@ import flask
 
 # ----
 
-from functools import wraps
+from functools import lru_cache, wraps
 from flask import (
     Flask,
     g,
@@ -49,8 +49,10 @@ from flask_session import Session
 from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
-from pymongo import MongoClient, ReturnDocument
 from redis import Redis
+
+if TYPE_CHECKING:
+    from pymongo import MongoClient
 
 from songs_scanner import SongScanner, empty_scan_summary
 from tower_chart_selection import select_best_chart
@@ -74,6 +76,15 @@ from storage.interfaces import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _mongo_return_document_after() -> int:
+    try:
+        from pymongo import ReturnDocument as _ReturnDocument
+    except Exception as exc:
+        raise RuntimeError("pymongo is not available; Mongo features require pymongo") from exc
+    return cast(int, getattr(_ReturnDocument, "AFTER", 1))
 
 
 def resource_path(*parts: str) -> str:
@@ -323,7 +334,7 @@ def _desktop_mongo_unavailable_response(*, api: bool) -> Optional[Response]:
 
 
 class MongoDispatcher:
-    def __init__(self, client_factory: Callable[[], MongoClient], db_name: str):
+    def __init__(self, client_factory: Callable[[], "MongoClient"], db_name: str):
         self._client_factory = client_factory
         self._db_name = db_name
         self._store = _ResourceStore("mongo_client")
@@ -337,7 +348,7 @@ class MongoDispatcher:
             except Exception:
                 LOGGER.debug("failed to close stale MongoClient", exc_info=True)
 
-    def get_client(self) -> MongoClient:
+    def get_client(self) -> "MongoClient":
         holder = self._store.get()
         pid = os.getpid()
         if holder is None or holder[0] != pid:
@@ -905,7 +916,9 @@ def create_app():
     else:
         mongo_hosts = mongo_host or ['127.0.0.1:27017']
 
-    def _create_mongo_client() -> MongoClient:
+    def _create_mongo_client() -> "MongoClient":
+        from pymongo import MongoClient
+
         if mongo_uri:
             return MongoClient(mongo_uri)
         return MongoClient(host=mongo_hosts)
@@ -1594,7 +1607,7 @@ def _get_next_song_id():
                     {'_id': 'songs'},
                     {'$inc': {'seq': 1}},
                     upsert=True,
-                    return_document=ReturnDocument.AFTER,
+                    return_document=_mongo_return_document_after(),
                 )
             except Exception as exc:
                 last_failure = exc
