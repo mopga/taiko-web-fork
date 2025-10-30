@@ -126,16 +126,39 @@ jobs:
       - name: Smoke backend
         shell: pwsh
         run: |
-          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
-          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
-          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
+          $backendRoot = Join-Path $PWD "standalone/dist/backend/taiko-web-backend"
+          $absRoot = (Resolve-Path -LiteralPath $backendRoot).Path
+          $absExe  = (Join-Path $absRoot "taiko-web-backend.exe")
+
+          if (-not (Test-Path -LiteralPath $absExe)) { throw "Binary not found: $absExe" }
+
           $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data"
           New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
           $env:RUN_PROFILE = "desktop"
-          $env:PORT = "8000"
+          $port = "8000"
+          $env:PORT = $port
           $env:DATA_DIR = $dataDir
-          Push-Location $backendRoot
-          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+
+          $startParams = @{
+            FilePath = $absExe
+            WorkingDirectory = $absRoot
+            ArgumentList = @("--host","127.0.0.1","--port",$port)
+            PassThru = $true
+            WindowStyle = 'Hidden'
+          }
+
+          Write-Host "PWD: $PWD"
+          Write-Host "backendRoot: $backendRoot"
+          Write-Host "exe abs: $absExe"
+
+          try {
+            $P = Start-Process @startParams -ErrorAction Stop
+          } catch {
+            if ($_.Exception -is [System.ComponentModel.Win32Exception]) {
+              Write-Host ("Win32Exception.NativeErrorCode = {0}" -f $_.Exception.NativeErrorCode)
+            }
+            throw
+          }
           for ($i=0; $i -lt 30; $i++) {
             try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
             if ($i -eq 29) { throw "Backend did not become healthy" }
@@ -155,24 +178,46 @@ jobs:
           Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/ | Out-Null
           Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/songs | Out-Null
           Stop-Process -Id $P.Id -Force
-          Pop-Location
 
       - name: Smoke songs injection
         shell: pwsh
         run: |
-          $backendRoot = Join-Path "standalone/dist/backend" "taiko-web-backend"
-          $exe = Join-Path $backendRoot "taiko-web-backend.exe"
-          if (-not (Test-Path $exe)) { throw "Backend exe not found at $exe" }
-          $songsRoot = Join-Path $backendRoot "songs"
+          $backendRoot = Join-Path $PWD "standalone/dist/backend/taiko-web-backend"
+          $absRoot = (Resolve-Path -LiteralPath $backendRoot).Path
+          $absExe  = (Join-Path $absRoot "taiko-web-backend.exe")
+
+          if (-not (Test-Path -LiteralPath $absExe)) { throw "Binary not found: $absExe" }
+
+          $songsRoot = Join-Path $absRoot "songs"
           New-Item -ItemType Directory -Force -Path (Join-Path $songsRoot "test-track") | Out-Null
           Copy-Item -Recurse "tools/ci-assets/test-track\*" (Join-Path $songsRoot "test-track")
           $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data-inject"
           New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
           $env:RUN_PROFILE = "desktop"
-          $env:PORT = "8000"
+          $port = "8000"
+          $env:PORT = $port
           $env:DATA_DIR = $dataDir
-          Push-Location $backendRoot
-          Start-Process -FilePath $exe -PassThru -WindowStyle Hidden | Tee-Object -Variable P | Out-Null
+
+          $startParams = @{
+            FilePath = $absExe
+            WorkingDirectory = $absRoot
+            ArgumentList = @("--host","127.0.0.1","--port",$port)
+            PassThru = $true
+            WindowStyle = 'Hidden'
+          }
+
+          Write-Host "PWD: $PWD"
+          Write-Host "backendRoot: $backendRoot"
+          Write-Host "exe abs: $absExe"
+
+          try {
+            $P = Start-Process @startParams -ErrorAction Stop
+          } catch {
+            if ($_.Exception -is [System.ComponentModel.Win32Exception]) {
+              Write-Host ("Win32Exception.NativeErrorCode = {0}" -f $_.Exception.NativeErrorCode)
+            }
+            throw
+          }
           for ($i=0; $i -lt 30; $i++) {
             try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz | Out-Null; break } catch { Start-Sleep -Seconds 1 }
             if ($i -eq 29) { throw "Backend did not become healthy" }
@@ -214,7 +259,6 @@ jobs:
             }
           }
           Stop-Process -Id $P.Id -Force
-          Pop-Location
 
       - name: Setup Node (electron)
         uses: actions/setup-node@v4
