@@ -204,13 +204,13 @@ try {
     if ((Get-SeqCount $songs) -eq 0) { Start-Sleep -Milliseconds 500 }
   } while ((Get-SeqCount $songs) -eq 0 -and (Get-Date) -lt $deadline)
 
-  if ($songs.Count -eq 0 -and $requireSongs) {
+  if ((Get-SeqCount $songs) -eq 0 -and $requireSongs) {
     Write-Host "---- /api/songs raw body (still empty) ----"
     try { $resp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5; Write-Host $resp.Content } catch {}
     throw "No songs found in /api/songs after wait (SMOKE_REQUIRE_SONGS=1)"
   }
 
-  if ($songs.Count -gt 0 -and $requireSongs) {
+  if ((Get-SeqCount $songs) -gt 0 -and $requireSongs) {
     Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
     $first = $songs[0]
     Assert ($first.is_playable) "First song is not playable"
@@ -242,7 +242,7 @@ try {
   return
 }
 catch {
-  Write-Error $_
+  Write-Host ("Smoke failure: {0}" -f (($_.Exception?.Message) ?? [string]$_))
   try {
     $errRecord = $_
     $exception = $errRecord.Exception
