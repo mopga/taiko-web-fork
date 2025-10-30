@@ -1173,7 +1173,7 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
-        want_full = (request.args.get('full') == '1')
+        want_full = request.args.get('full') in ('1', 'true', 'yes')
 
         # --- Mongo ---
         mongo_status = 'ok'
@@ -1185,7 +1185,7 @@ def healthz():
             mongo_status = 'fail'
 
         if not want_full:
-            # МИНИМАЛЬНЫЙ КОНТРАКТ (ровно 3 ключа) — под unit-тест
+            # МИНИМАЛЬНЫЙ КОНТРАКТ: РОВНО 3 ключа
             return jsonify({
                 'status': 'ok' if mongo_status == 'ok' else 'fail',
                 'mongo': mongo_status,
