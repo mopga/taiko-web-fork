@@ -1173,7 +1173,6 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
-        status_code = 200
         mongo_status = 'ok'
         redis_status = 'ok'
 
@@ -1257,10 +1256,8 @@ def healthz():
                 except Exception:
                     current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
 
-        overall_status = 'ok'
-        if mongo_status != 'ok' or redis_status != 'ok':
-            overall_status = 'fail'
-            status_code = 503
+        overall_status = 'ok' if (mongo_status == 'ok' and redis_status == 'ok') else 'fail'
+        status_code = 200 if overall_status == 'ok' else 503
 
         payload = {
             'status': overall_status,
@@ -1269,11 +1266,7 @@ def healthz():
             'profile': 'web',
         }
 
-        return current_app.response_class(
-            json.dumps(payload, separators=(',', ':')),
-            status=status_code,
-            mimetype='application/json',
-        )
+        return jsonify(payload), status_code
 
     sqlite_path = current_app.config.get('SQLITE_PATH')
     return jsonify({
