@@ -141,60 +141,46 @@ try {
   $fav = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/favicon.ico" -Method Head -TimeoutSec 5 }
   Assert (@(200,304) -contains $fav.StatusCode) "favicon unexpected: $($fav.StatusCode)"
 
-  # --- /api/songs ---
-  $songsResp = $null
-  $songsJson = $null
-  $deadline = (Get-Date).AddSeconds(45)
+  # --- /api/songs --- ждём НЕ пустой список
+  function Normalize-Songs([string]$body) {
+    if ([string]::IsNullOrWhiteSpace($body)) { return @() }
+    # безопасная нормализация строки (BOM/NUL)
+    $b = $body -replace "`uFEFF","" -replace "`0",""
+    try {
+      $json = $b | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      return @()           # не парсится — считаем пустым
+    }
+
+    if ($null -eq $json) { return @() }
+    if ($json -is [pscustomobject] -and ($json | Get-Member -Name items -ErrorAction SilentlyContinue)) {
+      $items = $json.items
+      if ($items -is [System.Array]) { return $items }
+      if ($items -is [System.Collections.IEnumerable]) { return @($items) }
+      return @()
+    }
+    if ($json -is [System.Array]) { return $json }
+    if ($json -is [System.Collections.IEnumerable]) { return @($json) }
+    return @()
+  }
+
+  $songs    = @()
+  $deadline = (Get-Date).AddSeconds(60)
   do {
     try {
-      $songsResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5
+      $resp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5
+      if ($resp.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
+      $songs = Normalize-Songs $resp.Content
     } catch {
-      $songsResp = $null
-    }
-    if ($null -eq $songsResp) {
-      Start-Sleep -Milliseconds 500
-      continue
-    }
-    Assert ($songsResp.StatusCode -eq 200) "/api/songs not 200: $($songsResp.StatusCode)"
-    try {
-      $songsJson = $songsResp.Content | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-      $songsJson = $null
-    }
-    if ($null -eq $songsJson) {
-      Start-Sleep -Milliseconds 500
-    }
-  } while ($null -eq $songsJson -and (Get-Date) -lt $deadline)
-
-  if ($null -eq $songsJson) {
-    if ($songsResp) {
-      Write-Host "---- /api/songs raw body (still null) ----"
-      Write-Host $songsResp.Content
-    }
-    throw "Songs payload is null after wait"
-  }
-  # Нормализация к массиву (устойчиво к 0/1/N элементов)
-  if ($null -eq $songsJson) {
-    $songs = @()
-  }
-  elseif ($songsJson -is [pscustomobject] -and ($songsJson | Get-Member -Name items -ErrorAction SilentlyContinue)) {
-    # /api/songs вернул объект с items
-    $items = $songsJson.items
-    if ($items -is [System.Array]) {
-      $songs = $items
-    } elseif ($items -is [System.Collections.IEnumerable]) {
-      $songs = @($items)
-    } else {
       $songs = @()
     }
-  }
-  elseif ($songsJson -is [System.Array]) {
-    $songs = $songsJson
-  }
-  elseif ($songsJson -is [System.Collections.IEnumerable]) {
-    $songs = @($songsJson)
-  } else {
-    $songs = @()
+    if ($songs.Count -eq 0) { Start-Sleep -Milliseconds 500 }
+  } while ($songs.Count -eq 0 -and (Get-Date) -lt $deadline)
+
+  if ($songs.Count -eq 0) {
+    Write-Host "---- /api/songs raw body (still empty) ----"
+    try { $resp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5; Write-Host $resp.Content } catch {}
+    throw "No songs found in /api/songs after wait"
   }
 
   if ($songs.Count -gt 0) {
