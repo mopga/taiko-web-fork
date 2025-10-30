@@ -145,7 +145,7 @@ try {
   function Normalize-Songs([string]$body) {
     if ([string]::IsNullOrWhiteSpace($body)) { return @() }
     # безопасная нормализация строки (BOM/NUL)
-    $b = $body -replace "`uFEFF","" -replace "`0",""
+    $b = $body -replace '^\uFEFF','' -replace '\x00',''
     try {
       $json = $b | ConvertFrom-Json -ErrorAction Stop
     } catch {
