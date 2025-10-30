@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$env:APP_PORT = "8000"
+$env:APP_PORT = if ($env:APP_PORT) { $env:APP_PORT } else { "8000" }
 $env:DATA_DIR = Join-Path (Get-Location) "_data"
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 $env:RUN_PROFILE = "desktop"
@@ -21,14 +21,40 @@ Write-Host "Exe (abs): $absExe"
 $songsDir = Join-Path (Split-Path $absExe) "songs"
 New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
 
+$testTrackDir = Join-Path $songsDir "TestTrack"
+if (Test-Path $testTrackDir) {
+    Remove-Item -Path $testTrackDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Force -Path $testTrackDir | Out-Null
+
+$chartPath = Join-Path $testTrackDir "chart.tja"
+$audioPath = Join-Path $testTrackDir "audio.ogg"
+
+$chartBody = @'
+TITLE:Smoke Test Track
+SUBTITLE:Desktop smoke
+WAVE:audio.ogg
+BPM:120
+OFFSET:0
+COURSE:Easy
+LEVEL:1
+BALLOON:
+#START
+00000000
+#END
+'@
+Set-Content -Path $chartPath -Value $chartBody -Encoding UTF8
+[System.IO.File]::WriteAllBytes($audioPath, [byte[]]::new(0))
+
 $logDir = Join-Path (Get-Location) "_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stdoutLog = Join-Path $logDir "smoke_stdout.log"
 $stderrLog = Join-Path $logDir "smoke_stderr.log"
 Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-$env:PORT = $env:APP_PORT
-$args = @("--host", "127.0.0.1", "--port", $env:APP_PORT)
+$port = $env:APP_PORT
+$env:PORT = $port
+$args = @("--host", "127.0.0.1", "--port", $port)
 $startParams = @{
     FilePath = $absExe
     ArgumentList = $args
@@ -60,7 +86,7 @@ try {
     & $Action
   }
 
-  $baseUrl = "http://127.0.0.1:$env:APP_PORT"
+  $baseUrl = "http://127.0.0.1:$port"
 
   # --- дождаться здоровья (status: ok) ---
   $health = Invoke-WithRetry {
