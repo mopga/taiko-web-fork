@@ -44,7 +44,7 @@ BALLOON:
 #END
 '@
 Set-Content -Path $chartPath -Value $chartBody -Encoding UTF8
-Set-Content -Path $audioPath -AsByteStream -Value ([byte[]]::new(0))
+[System.IO.File]::WriteAllBytes($audioPath, [byte[]]::new(0))
 
 $logDir = Join-Path (Get-Location) "_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
