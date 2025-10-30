@@ -1172,49 +1172,28 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 @app.route('/healthz')
 def healthz():
-    if not is_desktop():
-        want_full = request.args.get('full') in ('1', 'true', 'yes')
+    want_full = request.args.get('full') in ('1', 'true', 'yes')
 
-        # --- Mongo ---
-        mongo_status = 'ok'
+    if not want_full:
+        return jsonify({'status': 'ok'}), 200
+
+    deps: dict[str, str] = {}
+    code = 200
+
+    if not is_desktop():
         try:
             client = current_app.config.get('MONGO_CLIENT') or _create_mongo_client()
             client.admin.command('ping')
+            deps['mongo'] = 'ok'
         except Exception:
             current_app.logger.exception('mongo ping failed')
-            mongo_status = 'fail'
+            deps['mongo'] = 'fail'
+            code = 503
 
-        if not want_full:
-            # МИНИМАЛЬНЫЙ КОНТРАКТ: РОВНО 3 ключа
-            return jsonify({
-                'status': 'ok' if mongo_status == 'ok' else 'fail',
-                'mongo': mongo_status,
-                'profile': 'web',
-            }), (200 if mongo_status == 'ok' else 503)
+    payload = {'status': 'ok' if code == 200 else 'fail'}
+    payload['deps'] = deps
 
-        # --- Redis (расширенный режим для smoke) ---
-        redis_status = 'ok'
-        try:
-            r = current_app.config.get('REDIS_CLIENT') or _create_redis_client()
-            r.ping()
-        except Exception:
-            current_app.logger.exception('redis ping failed')
-            redis_status = 'fail'
-
-        overall_ok = (mongo_status == 'ok' and redis_status == 'ok')
-        return jsonify({
-            'status': 'ok' if overall_ok else 'fail',
-            'mongo': mongo_status,
-            'redis': redis_status,
-            'profile': 'web',
-        }), (200 if overall_ok else 503)
-
-    # desktop — как было
-    payload = {'status': 'ok', 'profile': 'desktop'}
-    sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
-    if sqlite_path:
-        payload['db_path'] = str(Path(sqlite_path).resolve())
-    return jsonify(payload), 200
+    return jsonify(payload), code
 
 
 @app.route('/favicon.ico', methods=['GET', 'HEAD'])
