@@ -1211,56 +1211,54 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 
 @app.route('/healthz')
-def route_healthcheck():
+def healthz():
     if not is_desktop():
         want_full = request.args.get('full') in ('1', 'true', 'yes')
-        status: dict[str, str] = {'status': 'ok', 'profile': 'web'}
 
+        mongo_status = 'ok'
         try:
             mongo_client = current_app.config.get('MONGO_CLIENT')
             if mongo_client is None:
-                factory = current_app.config.get('MONGO_CLIENT_FACTORY')
-                if callable(factory):
-                    mongo_client = factory()
+                mongo_factory = current_app.config.get('MONGO_CLIENT_FACTORY')
+                if callable(mongo_factory):
+                    mongo_client = mongo_factory()
                 else:
                     mongo_client = _create_mongo_client()
                 current_app.config['MONGO_CLIENT'] = mongo_client
             mongo_client.admin.command('ping')
-            status['mongo'] = 'ok'
         except Exception:
             current_app.logger.exception('mongo ping failed')
-            status['status'] = 'error'
-            status['mongo'] = 'error'
-            return jsonify(status), 503
+            mongo_status = 'fail'
 
-        redis_client = (
-            current_app.config.get('SESSION_REDIS')
-            or current_app.config.get('REDIS_CLIENT')
-        )
-        if redis_client is None:
-            redis_factory = current_app.config.get('REDIS_CLIENT_FACTORY')
-            if callable(redis_factory):
-                try:
+        if not want_full:
+            return jsonify({
+                'status': 'ok' if mongo_status == 'ok' else 'fail',
+                'mongo': mongo_status,
+                'profile': 'web',
+            }), (200 if mongo_status == 'ok' else 503)
+
+        redis_status = 'ok'
+        try:
+            redis_client = current_app.config.get('REDIS_CLIENT')
+            if redis_client is None:
+                redis_factory = current_app.config.get('REDIS_CLIENT_FACTORY')
+                if callable(redis_factory):
                     redis_client = redis_factory()
                     current_app.config['REDIS_CLIENT'] = redis_client
-                except Exception:
-                    current_app.logger.exception('redis factory failed')
-                    redis_client = None
-
-        try:
-            if redis_client is not None:
-                redis_client.ping()
-            status_redis = 'ok'
+            if redis_client is None:
+                raise RuntimeError('redis client unavailable')
+            redis_client.ping()
         except Exception:
             current_app.logger.exception('redis ping failed')
-            status['status'] = 'error'
-            status['redis'] = 'error'
-            return jsonify(status), 503
-        else:
-            if want_full:
-                status['redis'] = status_redis
+            redis_status = 'fail'
 
-        return jsonify(status), 200
+        overall_ok = mongo_status == 'ok' and redis_status == 'ok'
+        return jsonify({
+            'status': 'ok' if overall_ok else 'fail',
+            'mongo': mongo_status,
+            'redis': redis_status,
+            'profile': 'web',
+        }), (200 if overall_ok else 503)
 
     payload = {'status': 'ok', 'profile': 'desktop'}
     sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
