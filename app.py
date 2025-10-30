@@ -1215,47 +1215,41 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
-        want_full = request.args.get('full', '').lower() in {'1', 'true', 'yes', 'on'}
-
         status: dict[str, object] = {
             'status': 'ok',
             'profile': 'web',
         }
 
-        if want_full:
-            status.update({
-                'ok': True,
-                'db': 'mongo',
-                'sessions': current_app.config.get('SESSION_BACKEND', 'redis'),
-            })
+        client = current_app.config.get('MONGO_CLIENT')
+        if client is None:
+            factory = current_app.config.get('MONGO_CLIENT_FACTORY')
+            if callable(factory):
+                try:
+                    client = factory()
+                    current_app.config['MONGO_CLIENT'] = client
+                except Exception:
+                    client = None
 
         try:
+            if client is None:
+                raise RuntimeError('mongo client unavailable')
             client.admin.command('ping')
         except Exception:
             current_app.logger.exception('mongo ping failed')
-            if want_full:
-                status.update({'status': 'fail', 'ok': False, 'mongo': 'fail'})
-            else:
-                status.update({'status': 'error', 'mongo': 'error'})
+            status.update({'status': 'error', 'mongo': 'error'})
             return jsonify(status), 503
 
         status['mongo'] = 'ok'
 
         redis_client = current_app.config.get('SESSION_REDIS')
-        if want_full:
-            status['redis'] = 'ok'
-
-        if redis_client or want_full:
+        if redis_client is not None:
             try:
-                if redis_client:
-                    redis_client.ping()
+                redis_client.ping()
             except Exception:
                 current_app.logger.exception('redis ping failed')
-                if want_full:
-                    status.update({'status': 'fail', 'ok': False, 'redis': 'fail'})
-                else:
-                    status.update({'status': 'error', 'redis': 'error'})
+                status.update({'status': 'error', 'redis': 'error'})
                 return jsonify(status), 503
+            status['redis'] = 'ok'
 
         return jsonify(status), 200
 
