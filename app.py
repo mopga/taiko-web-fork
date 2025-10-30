@@ -907,6 +907,8 @@ def create_app():
             return MongoClient(mongo_uri)
         return MongoClient(host=mongo_hosts)
 
+    app_instance.config['MONGO_URI'] = mongo_uri
+    app_instance.config['MONGO_HOSTS'] = mongo_hosts
     app_instance.config['MONGO_CLIENT'] = None
     app_instance.config['MONGO_CLIENT_FACTORY'] = _create_mongo_client
     app_instance.config['REDIS_CLIENT'] = None
@@ -1210,6 +1212,35 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
     _startup_scan_logged = True
 
 
+def _create_mongo_client_from_config(app_instance: Flask) -> MongoClient:
+    mongo_uri = app_instance.config.get('MONGO_URI')
+    if isinstance(mongo_uri, str) and mongo_uri.strip():
+        return MongoClient(mongo_uri)
+
+    mongo_hosts = app_instance.config.get('MONGO_HOSTS')
+    if isinstance(mongo_hosts, str):
+        hosts: object = mongo_hosts
+    elif isinstance(mongo_hosts, Sequence) and not isinstance(mongo_hosts, (bytes, bytearray)):
+        hosts = list(mongo_hosts)
+    elif mongo_hosts:
+        hosts = mongo_hosts
+    else:
+        hosts = ['127.0.0.1:27017']
+    return MongoClient(host=hosts)
+
+
+def _resolve_mongo_client() -> MongoClient:
+    mongo_client = current_app.config.get('MONGO_CLIENT')
+    if mongo_client is None:
+        mongo_factory = current_app.config.get('MONGO_CLIENT_FACTORY')
+        if callable(mongo_factory):
+            mongo_client = mongo_factory()
+        else:
+            mongo_client = _create_mongo_client_from_config(current_app)
+        current_app.config['MONGO_CLIENT'] = mongo_client
+    return mongo_client
+
+
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
@@ -1217,14 +1248,7 @@ def healthz():
 
         mongo_status = 'ok'
         try:
-            mongo_client = current_app.config.get('MONGO_CLIENT')
-            if mongo_client is None:
-                mongo_factory = current_app.config.get('MONGO_CLIENT_FACTORY')
-                if callable(mongo_factory):
-                    mongo_client = mongo_factory()
-                else:
-                    mongo_client = _create_mongo_client()
-                current_app.config['MONGO_CLIENT'] = mongo_client
+            mongo_client = _resolve_mongo_client()
             mongo_client.admin.command('ping')
         except Exception:
             current_app.logger.exception('mongo ping failed')
