@@ -1173,9 +1173,6 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 @app.route('/healthz')
 def healthz():
     if not is_desktop():
-        mongo_status = 'ok'
-        redis_status = 'ok'
-
         def _resolve_client(
             config_key: str,
             factory_key: str,
@@ -1213,11 +1210,17 @@ def healthz():
 
             return client, created_here
 
+        payload: dict[str, Any] = {
+            'profile': 'web',
+        }
+        overall_ok = True
+
         mongo_client, mongo_created = _resolve_client(
             'MONGO_CLIENT',
             'MONGO_CLIENT_FACTORY',
             _mongo_dispatcher.get_client if _mongo_dispatcher is not None else None,
         )
+        mongo_status = 'ok'
 
         try:
             if mongo_client is None:
@@ -1234,37 +1237,42 @@ def healthz():
                 except Exception:
                     current_app.logger.debug('failed to close healthz MongoClient', exc_info=True)
 
-        redis_client, redis_created = _resolve_client(
-            'REDIS_CLIENT',
-            'REDIS_CLIENT_FACTORY',
-            _redis_dispatcher.get_client if _redis_dispatcher is not None else None,
-            fallback_config_keys=('SESSION_REDIS',),
-        )
+        payload['mongo'] = mongo_status
+        if mongo_status != 'ok':
+            overall_ok = False
 
-        try:
-            if redis_client is None:
+        full_health = request.args.get('full') == '1'
+
+        if full_health:
+            redis_client, redis_created = _resolve_client(
+                'REDIS_CLIENT',
+                'REDIS_CLIENT_FACTORY',
+                _redis_dispatcher.get_client if _redis_dispatcher is not None else None,
+                fallback_config_keys=('SESSION_REDIS',),
+            )
+            redis_status = 'ok'
+
+            try:
+                if redis_client is None:
+                    redis_status = 'fail'
+                else:
+                    redis_client.ping()
+            except Exception:
+                current_app.logger.exception('redis ping failed')
                 redis_status = 'fail'
-            else:
-                redis_client.ping()
-        except Exception:
-            current_app.logger.exception('redis ping failed')
-            redis_status = 'fail'
-        finally:
-            if redis_created and redis_client is not None:
-                try:
-                    redis_client.close()
-                except Exception:
-                    current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
+            finally:
+                if redis_created and redis_client is not None:
+                    try:
+                        redis_client.close()
+                    except Exception:
+                        current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
 
-        overall_status = 'ok' if (mongo_status == 'ok' and redis_status == 'ok') else 'fail'
-        status_code = 200 if overall_status == 'ok' else 503
+            payload['redis'] = redis_status
+            if redis_status != 'ok':
+                overall_ok = False
 
-        payload = {
-            'status': overall_status,
-            'mongo': mongo_status,
-            'redis': redis_status,
-            'profile': 'web',
-        }
+        payload['status'] = 'ok' if overall_ok else 'fail'
+        status_code = 200 if overall_ok else 503
 
         return jsonify(payload), status_code
 
