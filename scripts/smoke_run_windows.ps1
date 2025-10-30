@@ -242,8 +242,13 @@ try {
   return
 }
 catch {
-  Write-Host ("Smoke failure: {0}" -f (($_.Exception?.Message) ?? [string]$_))
-  try {
+$errMsg = $null
+  if ($null -ne $_ -and $null -ne $_.Exception -and -not [string]::IsNullOrEmpty($_.Exception.Message)) {
+      $errMsg = $_.Exception.Message
+  } else {
+      $errMsg = [string]$_
+  }
+  Write-Host ("Smoke failure: {0}" -f $errMsg)  try {
     $errRecord = $_
     $exception = $errRecord.Exception
     $statusCode = $null
@@ -284,7 +289,7 @@ catch {
 
     if ($statusCode -or $requestUri -or $responseBody) {
       Write-Host "===== HTTP error details ====="
-      if ($statusCode -ne $null) { Write-Host "StatusCode: $statusCode" }
+      if ($null -ne $statusCode) { Write-Host "StatusCode: $statusCode" }
       if ($requestUri) { Write-Host "RequestUri: $requestUri" }
       if ($responseBody) {
         Write-Host "---- Response body ----"
