@@ -213,7 +213,7 @@ jobs:
           Set-Content -Path (Join-Path $trackDir "test.tja") -Value $tjaLines -Encoding utf8
           # Пустая «болванка» аудио — для сканера достаточно наличия файла
           $audio = Join-Path $trackDir "audio.ogg"
-          Set-Content -Path $audio -Value ([byte[]]::new(0)) -Encoding Byte
+          [System.IO.File]::WriteAllBytes($audio, [byte[]]::new(0))
           $dataDir = Join-Path $env:RUNNER_TEMP "taiko-data-inject"
           New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
           $env:RUN_PROFILE = "desktop"
