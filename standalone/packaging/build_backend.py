@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,14 @@ def build_backend() -> None:
 
     songs_dir = app_dir / "songs"
     songs_dir.mkdir(parents=True, exist_ok=True)
+
+    internal_dir = app_dir / "_internal"
+    for directory_name in ("public", "templates"):
+        source = internal_dir / directory_name
+        if not source.exists():
+            continue
+        destination = app_dir / directory_name
+        shutil.copytree(source, destination, dirs_exist_ok=True)
 
     print(f"[build_backend] Built at: {app_dir}")
 

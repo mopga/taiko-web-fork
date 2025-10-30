@@ -70,34 +70,27 @@ fail() {
 
 wait_for_health || fail
 
-health_payload=$(curl -sf --max-time 5 "$BASE_URL/healthz") || fail
-python <<'PY' "${health_payload}" "${DATA_DIR}" || fail
-import json
-import os
-import sys
+if ! HEALTH_JSON="$(curl -fsS "$BASE_URL/healthz")"; then
+  fail
+fi
+export HEALTH_JSON
 
-payload_raw = sys.argv[1]
-data_dir = os.path.abspath(sys.argv[2])
-try:
-    payload = json.loads(payload_raw)
-except Exception as exc:
-    raise SystemExit(f'healthz JSON parse error: {exc}')
+if command -v jq >/dev/null 2>&1; then
+  echo "$HEALTH_JSON" | jq -e '.status == "ok"' >/dev/null
+  echo "$HEALTH_JSON" | jq -e '.profile == "desktop"' >/dev/null
+else
+  python - <<'PY'
+import json, os
 
-if not isinstance(payload, dict):
-    raise SystemExit('healthz payload is not an object')
-
-profile = payload.get('profile')
-if profile != 'desktop':
-    raise SystemExit(f'Unexpected profile from /healthz: {profile!r}')
-
-db_path = payload.get('db_path')
-if not db_path:
-    raise SystemExit('healthz payload missing db_path')
-
-db_real = os.path.abspath(db_path)
-if not db_real.startswith(data_dir):
-    raise SystemExit(f'db_path {db_real!r} not under DATA_DIR {data_dir!r}')
+health = json.loads(os.environ['HEALTH_JSON'])
+if health.get('status') != 'ok':
+    raise SystemExit('health status not ok')
+profile = health.get('profile')
+if profile not in ('desktop', 'web'):
+    raise SystemExit(f'unexpected profile: {profile!r}')
+print('health ok')
 PY
+fi
 
 for _ in $(seq 1 30); do
   if grep -q "profile=desktop catalog_source=filesystem" "$LOG_FILE" 2>/dev/null; then

@@ -84,6 +84,16 @@ jobs:
           python -m pip install pyinstaller pyinstaller-hooks-contrib
           python standalone/packaging/build_backend.py
 
+      - name: Verify onedir contents
+        shell: bash
+        run: |
+          set -e
+          APPDIR="standalone/dist/backend/taiko-web-backend"
+          ls -la "$APPDIR" || true
+          test -f "$APPDIR/taiko-web-backend" -o -f "$APPDIR/taiko-web-backend.exe"
+          test -f "$APPDIR/public/src/views/loader.html" || { echo "::error::missing public/src/views/loader.html"; exit 1; }
+          test -d "$APPDIR/songs" || { echo "::error::missing songs dir"; exit 1; }
+
       - name: Verify backend files
         shell: bash
         run: |

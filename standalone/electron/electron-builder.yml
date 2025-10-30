@@ -14,7 +14,7 @@ files:
   - "!dist/**"
 
 extraResources:
-  - from: ../dist/backend
+  - from: ../standalone/dist/backend
     to: app/backend
     filter:
       - "**/*"
