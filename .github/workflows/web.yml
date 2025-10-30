@@ -2,7 +2,8 @@ name: Web smoke & tests
 
 on:
   push:
-  pull_request:
+    branches:
+      - '**'
 
 jobs:
   web-invariants:

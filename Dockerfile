@@ -5,18 +5,16 @@ FROM python:3.13-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# Аргументы для выбора форка/ветки
-ARG TAIKO_REPO_URL="https://github.com/mopga/taiko-web-fork.git"
-
 # Рабочая директория приложения
 WORKDIR /app
 
-# Клонируем исходники (форк yuuki/taiko-web)
-RUN git clone "${TAIKO_REPO_URL}" /app
-
 # Ставим зависимости Python
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir gunicorn
+
+# Копируем исходники приложения
+COPY . /app
 
 # Создаём точки монтирования для песен/ассетов и конфигурации
 RUN mkdir -p /data/songs /app/config
@@ -24,8 +22,6 @@ RUN mkdir -p /data/songs /app/config
 # По умолчанию HTTP слушает 0.0.0.0:8000
 EXPOSE 8000
 
-COPY entrypoint.sh /app/entrypoint.sh
-COPY start.sh      /app/start.sh
 RUN chmod 0755 /app/entrypoint.sh /app/start.sh \
  && sed -i 's/\r$//' /app/start.sh
 

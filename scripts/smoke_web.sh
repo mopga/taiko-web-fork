@@ -46,10 +46,11 @@ cleanup() {
 trap 'cleanup "$?"' EXIT
 
 echo "Starting docker compose stack..."
-docker compose -f "$COMPOSE_FILE" up -d --build || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
+docker compose -f "$COMPOSE_FILE" build --pull --no-cache || { echo "[smoke] failed to build docker compose stack" >&2; exit 1; }
+docker compose -f "$COMPOSE_FILE" up -d || { echo "[smoke] failed to start docker compose" >&2; exit 1; }
 
 BASE_URL="${BASE_URL:-http://localhost:8000}"
-health_url="${BASE_URL%/}/healthz?full=1"
+health_url="${BASE_URL%/}/healthz"
 echo "Waiting for $health_url"
 ready=0
 for attempt in $(seq 1 30); do
@@ -87,7 +88,7 @@ fi
 # Validate /healthz JSON: минимальный обязательный набор полей.
 # Без heredoc — на jq. Это надёжнее и прозрачнее в CI.
 #
-if ! jq -e '.status=="ok" and .mongo=="ok" and .redis=="ok" and .profile=="web"' "$TMP_HEALTH" >/dev/null; then
+if ! jq -e '.status=="ok" and .mongo=="ok" and .profile=="web"' "$TMP_HEALTH" >/dev/null; then
   echo "[smoke] healthz validation failed" >&2
   echo "---- response body ----" >&2
   cat "$TMP_HEALTH" >&2 || true
