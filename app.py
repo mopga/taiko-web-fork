@@ -1210,11 +1210,6 @@ def healthz():
 
             return client, created_here
 
-        payload: dict[str, Any] = {
-            'profile': 'web',
-        }
-        overall_ok = True
-
         mongo_client, mongo_created = _resolve_client(
             'MONGO_CLIENT',
             'MONGO_CLIENT_FACTORY',
@@ -1237,13 +1232,11 @@ def healthz():
                 except Exception:
                     current_app.logger.debug('failed to close healthz MongoClient', exc_info=True)
 
-        payload['mongo'] = mongo_status
-        if mongo_status != 'ok':
-            overall_ok = False
-
         full_health = request.args.get('full') == '1'
 
         if full_health:
+            redis_client = None
+            redis_created = False
             redis_client, redis_created = _resolve_client(
                 'REDIS_CLIENT',
                 'REDIS_CLIENT_FACTORY',
@@ -1267,13 +1260,22 @@ def healthz():
                     except Exception:
                         current_app.logger.debug('failed to close healthz Redis client', exc_info=True)
 
-            payload['redis'] = redis_status
-            if redis_status != 'ok':
-                overall_ok = False
+            overall_ok = (mongo_status == 'ok' and redis_status == 'ok')
+            status_code = 200 if overall_ok else 503
+            payload = {
+                'status': 'ok' if overall_ok else 'fail',
+                'mongo': mongo_status,
+                'redis': redis_status,
+                'profile': 'web',
+            }
+            return jsonify(payload), status_code
 
-        payload['status'] = 'ok' if overall_ok else 'fail'
-        status_code = 200 if overall_ok else 503
-
+        status_code = 200 if mongo_status == 'ok' else 503
+        payload = {
+            'status': 'ok' if mongo_status == 'ok' else 'fail',
+            'mongo': mongo_status,
+            'profile': 'web',
+        }
         return jsonify(payload), status_code
 
     sqlite_path = current_app.config.get('SQLITE_PATH')
