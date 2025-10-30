@@ -876,8 +876,29 @@ def create_app():
     compress.init_app(app_instance)
 
     mongo_config = take_config('MONGO') or {}
-    mongo_uri = os.environ.get("TAIKO_WEB_MONGO_URI") or mongo_config.get('uri')
-    mongo_host = os.environ.get("TAIKO_WEB_MONGO_HOST") or mongo_config.get('host')
+
+    mongo_uri_candidates = [
+        os.environ.get("TAIKO_WEB_MONGO_URI"),
+        os.environ.get("MONGO_URI"),
+        os.environ.get("MONGO_URL"),
+        mongo_config.get('uri'),
+        mongo_config.get('url'),
+    ]
+    mongo_uri = next((value for value in mongo_uri_candidates if isinstance(value, str) and value.strip()), None)
+
+    mongo_host_candidates: list[object] = []
+    for env_name in ("TAIKO_WEB_MONGO_HOST", "MONGO_HOST", "MONGO_HOSTS"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            mongo_host_candidates.append(env_value)
+            break
+    mongo_host_candidates.append(mongo_config.get('host'))
+    mongo_host_candidates.append(mongo_config.get('hosts'))
+
+    mongo_host: object | None = next(
+        (value for value in mongo_host_candidates if value),
+        None,
+    )
 
     mongo_hosts = mongo_host or ['127.0.0.1:27017']
 
@@ -945,11 +966,30 @@ def create_app():
     else:
         redis_config = dict(take_config('REDIS', required=True))
 
-        redis_host = os.environ.get("TAIKO_WEB_REDIS_HOST") or redis_config.get('CACHE_REDIS_HOST') or 'redis'
-        redis_port = int(os.environ.get("TAIKO_WEB_REDIS_PORT", redis_config.get('CACHE_REDIS_PORT', 6379)))
-        redis_password_env = os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
-        redis_password = redis_password_env if redis_password_env is not None else redis_config.get('CACHE_REDIS_PASSWORD')
-        redis_db = int(os.environ.get("TAIKO_WEB_REDIS_DB", redis_config.get('CACHE_REDIS_DB', 0)))
+        redis_host = (
+            os.environ.get("TAIKO_WEB_REDIS_HOST")
+            or os.environ.get("REDIS_HOST")
+            or redis_config.get('CACHE_REDIS_HOST')
+            or 'redis'
+        )
+        redis_port = int(
+            os.environ.get("TAIKO_WEB_REDIS_PORT")
+            or os.environ.get("REDIS_PORT", redis_config.get('CACHE_REDIS_PORT', 6379))
+        )
+        redis_password_env = (
+            os.environ.get("TAIKO_WEB_REDIS_PASSWORD")
+            if os.environ.get("TAIKO_WEB_REDIS_PASSWORD") is not None
+            else os.environ.get("REDIS_PASSWORD")
+        )
+        redis_password = (
+            redis_password_env
+            if redis_password_env is not None
+            else redis_config.get('CACHE_REDIS_PASSWORD')
+        )
+        redis_db = int(
+            os.environ.get("TAIKO_WEB_REDIS_DB")
+            or os.environ.get("REDIS_DB", redis_config.get('CACHE_REDIS_DB', 0))
+        )
 
         redis_config['CACHE_REDIS_HOST'] = redis_host
         redis_config['CACHE_REDIS_PORT'] = redis_port
@@ -1171,45 +1211,57 @@ def _maybe_log_startup_duration(*, fast_path: bool) -> None:
 
 
 @app.route('/healthz')
-def healthz():
+def route_healthcheck():
     if not is_desktop():
         want_full = request.args.get('full') in ('1', 'true', 'yes')
+        status: dict[str, str] = {'status': 'ok', 'profile': 'web'}
 
-        # --- Mongo ---
-        mongo_status = 'ok'
         try:
-            client = current_app.config.get('MONGO_CLIENT') or _create_mongo_client()
-            client.admin.command('ping')
+            mongo_client = current_app.config.get('MONGO_CLIENT')
+            if mongo_client is None:
+                factory = current_app.config.get('MONGO_CLIENT_FACTORY')
+                if callable(factory):
+                    mongo_client = factory()
+                else:
+                    mongo_client = _create_mongo_client()
+                current_app.config['MONGO_CLIENT'] = mongo_client
+            mongo_client.admin.command('ping')
+            status['mongo'] = 'ok'
         except Exception:
             current_app.logger.exception('mongo ping failed')
-            mongo_status = 'fail'
+            status['status'] = 'error'
+            status['mongo'] = 'error'
+            return jsonify(status), 503
 
-        if not want_full:
-            # МИНИМАЛЬНЫЙ КОНТРАКТ: РОВНО 3 ключа
-            return jsonify({
-                'status': 'ok' if mongo_status == 'ok' else 'fail',
-                'mongo': mongo_status,
-                'profile': 'web',
-            }), (200 if mongo_status == 'ok' else 503)
+        redis_client = (
+            current_app.config.get('SESSION_REDIS')
+            or current_app.config.get('REDIS_CLIENT')
+        )
+        if redis_client is None:
+            redis_factory = current_app.config.get('REDIS_CLIENT_FACTORY')
+            if callable(redis_factory):
+                try:
+                    redis_client = redis_factory()
+                    current_app.config['REDIS_CLIENT'] = redis_client
+                except Exception:
+                    current_app.logger.exception('redis factory failed')
+                    redis_client = None
 
-        # --- Redis (расширенный режим для smoke) ---
-        redis_status = 'ok'
         try:
-            r = current_app.config.get('REDIS_CLIENT') or _create_redis_client()
-            r.ping()
+            if redis_client is not None:
+                redis_client.ping()
+            status_redis = 'ok'
         except Exception:
             current_app.logger.exception('redis ping failed')
-            redis_status = 'fail'
+            status['status'] = 'error'
+            status['redis'] = 'error'
+            return jsonify(status), 503
+        else:
+            if want_full:
+                status['redis'] = status_redis
 
-        overall_ok = (mongo_status == 'ok' and redis_status == 'ok')
-        return jsonify({
-            'status': 'ok' if overall_ok else 'fail',
-            'mongo': mongo_status,
-            'redis': redis_status,
-            'profile': 'web',
-        }), (200 if overall_ok else 503)
+        return jsonify(status), 200
 
-    # desktop — как было
     payload = {'status': 'ok', 'profile': 'desktop'}
     sqlite_path = current_app.config.get('SQLITE_PATH') or current_app.config.get('SQLITE_DB_PATH')
     if sqlite_path:

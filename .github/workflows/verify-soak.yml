@@ -1,0 +1,61 @@
+name: verify-soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      soak_runs:
+        description: "Number of repeated pytest runs"
+        required: false
+        default: '3'
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    env:
+      SOAK_RUNS: ${{ inputs.soak_runs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest soak
+        run: |
+          runs=${SOAK_RUNS:-3}
+          for i in $(seq 1 "$runs"); do
+            echo "::group::pytest run $i/$runs"
+            pytest -q
+            echo "::endgroup::"
+          done
+
+      - name: Build docker compose stack
+        run: docker compose -f docker-compose.yml build --pull --no-cache
+
+      - name: Launch web stack
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml up -d
+          cleanup() {
+            docker compose -f docker-compose.yml down -v
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 120); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/healthz)
+            echo "attempt $i: status=$code"
+            if [ "$code" = "200" ]; then
+              curl -fsS http://localhost:8000/healthz
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'web stack did not become healthy in time' >&2
+          docker compose -f docker-compose.yml logs
+          exit 1
