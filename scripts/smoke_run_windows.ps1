@@ -18,33 +18,48 @@ Write-Host "Exe (before resolve): $exe"
 $absExe = (Resolve-Path -LiteralPath $exe).Path
 Write-Host "Exe (abs): $absExe"
 
-$songsDir = Join-Path (Split-Path $absExe) "songs"
-New-Item -ItemType Directory -Force -Path $songsDir | Out-Null
+$absRoot = Split-Path $absExe
+$dataDir = (Resolve-Path -LiteralPath $env:DATA_DIR).Path
+$songsRoot1 = Join-Path $absRoot "songs"
+$songsRoot2 = Join-Path $dataDir "songs"
+New-Item -ItemType Directory -Force -Path $songsRoot1, $songsRoot2 | Out-Null
 
-$testTrackDir = Join-Path $songsDir "TestTrack"
-if (Test-Path $testTrackDir) {
-    Remove-Item -Path $testTrackDir -Recurse -Force -ErrorAction SilentlyContinue
+$trackDir1 = Join-Path $songsRoot1 "test-track"
+$trackDir2 = Join-Path $songsRoot2 "test-track"
+foreach ($dir in @($trackDir1, $trackDir2)) {
+    if (Test-Path $dir) {
+        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
-New-Item -ItemType Directory -Force -Path $testTrackDir | Out-Null
+New-Item -ItemType Directory -Force -Path $trackDir1, $trackDir2 | Out-Null
 
-$chartPath = Join-Path $testTrackDir "chart.tja"
-$audioPath = Join-Path $testTrackDir "audio.ogg"
+$chartPath1 = Join-Path $trackDir1 "test.tja"
+$chartPath2 = Join-Path $trackDir2 "test.tja"
+$audioPath1 = Join-Path $trackDir1 "audio.ogg"
+$audioPath2 = Join-Path $trackDir2 "audio.ogg"
 
 $chartBody = @'
-TITLE:Smoke Test Track
-SUBTITLE:Desktop smoke
-WAVE:audio.ogg
-BPM:120
-OFFSET:0
-COURSE:Easy
-LEVEL:1
-BALLOON:
+TITLE: Test Track
+SUBTITLE: Smoke
+WAVE: audio.ogg
+OFFSET: 0
+COURSE: Oni
+LEVEL: 1
 #START
-00000000
+1111,
+0000,
+2222,
+0000,
+3333,
+0000,
+4444,
+0000,
 #END
 '@
-Set-Content -Path $chartPath -Value $chartBody -Encoding UTF8
-[System.IO.File]::WriteAllBytes($audioPath, [byte[]]::new(0))
+Set-Content -Path $chartPath1 -Value $chartBody -Encoding UTF8
+Set-Content -Path $chartPath2 -Value $chartBody -Encoding UTF8
+[System.IO.File]::WriteAllBytes($audioPath1, [byte[]]::new(0))
+[System.IO.File]::WriteAllBytes($audioPath2, [byte[]]::new(0))
 
 $logDir = Join-Path (Get-Location) "_logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -54,11 +69,12 @@ Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
 $port = $env:APP_PORT
 $env:PORT = $port
+$baseUrl = "http://127.0.0.1:$port"
 $args = @("--host", "127.0.0.1", "--port", $port)
 $startParams = @{
     FilePath = $absExe
     ArgumentList = $args
-    WorkingDirectory = $backendRoot
+    WorkingDirectory = $absRoot
     PassThru = $true
     RedirectStandardOutput = $stdoutLog
     RedirectStandardError = $stderrLog
@@ -86,7 +102,11 @@ try {
     & $Action
   }
 
-  $baseUrl = "http://127.0.0.1:$port"
+  try {
+    Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5 | Out-Null
+  } catch {
+    Start-Sleep -Milliseconds 200
+  }
 
   # --- дождаться здоровья (status: ok) ---
   $health = Invoke-WithRetry {
@@ -122,24 +142,59 @@ try {
   Assert (@(200,304) -contains $fav.StatusCode) "favicon unexpected: $($fav.StatusCode)"
 
   # --- /api/songs ---
-  $songsResp = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5 }
-  Assert ($songsResp.StatusCode -eq 200) "/api/songs not 200: $($songsResp.StatusCode)"
-  try {
-    $songsJson = $songsResp.Content | ConvertFrom-Json -ErrorAction Stop
-  } catch {
-    Write-Host "---- /api/songs raw body ----"
-    Write-Host $songsResp.Content
-    throw "Songs JSON parse failed: $($_.Exception.Message)"
+  $songsResp = $null
+  $songsJson = $null
+  $deadline = (Get-Date).AddSeconds(45)
+  do {
+    try {
+      $songsResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5
+    } catch {
+      $songsResp = $null
+    }
+    if ($null -eq $songsResp) {
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    Assert ($songsResp.StatusCode -eq 200) "/api/songs not 200: $($songsResp.StatusCode)"
+    try {
+      $songsJson = $songsResp.Content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      $songsJson = $null
+    }
+    if ($null -eq $songsJson) {
+      Start-Sleep -Milliseconds 500
+    }
+  } while ($null -eq $songsJson -and (Get-Date) -lt $deadline)
+
+  if ($null -eq $songsJson) {
+    if ($songsResp) {
+      Write-Host "---- /api/songs raw body (still null) ----"
+      Write-Host $songsResp.Content
+    }
+    throw "Songs payload is null after wait"
   }
   # Нормализация к массиву (устойчиво к 0/1/N элементов)
   if ($null -eq $songsJson) {
     $songs = @()
   }
+  elseif ($songsJson -is [pscustomobject] -and ($songsJson | Get-Member -Name items -ErrorAction SilentlyContinue)) {
+    # /api/songs вернул объект с items
+    $items = $songsJson.items
+    if ($items -is [System.Array]) {
+      $songs = $items
+    } elseif ($items -is [System.Collections.IEnumerable]) {
+      $songs = @($items)
+    } else {
+      $songs = @()
+    }
+  }
   elseif ($songsJson -is [System.Array]) {
     $songs = $songsJson
   }
-  else {
+  elseif ($songsJson -is [System.Collections.IEnumerable]) {
     $songs = @($songsJson)
+  } else {
+    $songs = @()
   }
 
   if ($songs.Count -gt 0) {
@@ -232,7 +287,16 @@ catch {
   exit 1
 }
 finally {
-    if ($process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    if ($process) {
+        try {
+            if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+            try {
+                [void]$process.WaitForExit(5000)
+            } catch {}
+        } finally {
+            try { $process.Dispose() } catch {}
+        }
     }
 }
