@@ -23,6 +23,14 @@ UPSERT_CHUNK_SIZE = 500
 
 
 @dataclass(frozen=True)
+class SQLiteSongUpsertItem:
+    """Container for providing filter context during upserts."""
+
+    payload: Mapping[str, Any]
+    filter: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class DifficultyFilter:
     """Filtering constraint for a difficulty entry."""
 
@@ -546,6 +554,7 @@ class SQLiteSongStore:
         self._title_recovered_callback: Callable[[str, Optional[str]], None] | None = None
         self._normalization_warned_fields: set[str] = set()
         self._normalization_failure_warned_fields: set[str] = set()
+        self._key_mismatch_logged = False
 
     def set_title_recovered_callback(
         self, callback: Callable[[str, Optional[str]], None] | None
@@ -556,8 +565,22 @@ class SQLiteSongStore:
     def path(self) -> Path:
         return self._db.path
 
-    def upsert_many(self, songs: Iterable[Mapping[str, Any]]) -> list[int]:
-        prepared_rows = [self._prepare_song_row(song) for song in songs]
+    def upsert_many(
+        self, songs: Iterable[Mapping[str, Any] | SQLiteSongUpsertItem]
+    ) -> list[int]:
+        prepared_rows: list[tuple[Any, ...]] = []
+        for entry in songs:
+            if isinstance(entry, SQLiteSongUpsertItem):
+                payload = entry.payload
+                filter_doc = entry.filter
+            elif isinstance(entry, Mapping):
+                payload = entry
+                filter_doc = None
+            else:
+                raise TypeError(
+                    f"Unsupported upsert entry type: {type(entry).__name__}"
+                )
+            prepared_rows.append(self._prepare_song_row(payload, filter_doc))
         if not prepared_rows:
             return []
 
@@ -754,9 +777,9 @@ class SQLiteSongStore:
 
         modified = _apply_update_ops(base, update)
         if modified:
-            self.upsert_many([base])
+            self.upsert_many([SQLiteSongUpsertItem(base, filter)])
         elif existing is None and upsert:
-            self.upsert_many([base])
+            self.upsert_many([SQLiteSongUpsertItem(base, filter)])
         matched = 1 if existing is not None else 0
         upserted_id = None if existing is not None else base.get("song_id")
         return SQLiteUpdateResult(matched, 1 if modified else 0, upserted_id)
@@ -772,7 +795,7 @@ class SQLiteSongStore:
         existing = self.find_one(filter)
         if existing is None and not upsert:
             return SQLiteUpdateResult(0, 0)
-        self.upsert_many([replacement])
+        self.upsert_many([SQLiteSongUpsertItem(replacement, filter)])
         matched = 1 if existing is not None else 0
         upserted_id = None if existing is not None else replacement.get("song_id")
         return SQLiteUpdateResult(matched, 1, upserted_id)
@@ -790,7 +813,11 @@ class SQLiteSongStore:
         for document in documents:
             payload = dict(document)
             if _apply_update_ops(payload, update):
-                self.upsert_many([payload])
+                stable_filter = {
+                    "scanner_stable_id": document.get("scanner_stable_id"),
+                    "group_key": document.get("group_key"),
+                }
+                self.upsert_many([SQLiteSongUpsertItem(payload, stable_filter)])
                 modified += 1
         return SQLiteUpdateResult(len(documents), modified)
 
@@ -945,21 +972,34 @@ class SQLiteSongStore:
         }
         return stats
 
-    def _prepare_song_row(self, song: Mapping[str, Any]) -> tuple[Any, ...]:
-        stable_id = song.get("scanner_stable_id")
+    def _prepare_song_row(
+        self, song: Mapping[str, Any], filter_doc: Mapping[str, Any] | None
+    ) -> tuple[Any, ...]:
+        filter_scanner = self._extract_filter_value(filter_doc, "scanner_stable_id")
+        payload_scanner = self._normalize_string(song.get("scanner_stable_id"))
+        stable_id = filter_scanner or payload_scanner
         if not isinstance(stable_id, str) or not stable_id:
             raise ValueError("song payload missing scanner_stable_id")
-        group_key = song.get("group_key")
+
+        filter_group = self._extract_filter_value(filter_doc, "group_key")
+        payload_group = self._normalize_string(song.get("group_key"))
+        group_key = filter_group or payload_group
         if not isinstance(group_key, str) or not group_key:
             raise ValueError("song payload missing group_key")
 
-        raw_song_id = song.get("song_id")
-        if isinstance(raw_song_id, str) and raw_song_id:
+        self._maybe_log_key_mismatch(
+            filter_scanner, payload_scanner, filter_group, payload_group
+        )
+
+        raw_song_id = self._normalize_identifier(song.get("song_id"))
+        if raw_song_id:
             song_id = raw_song_id
-        elif raw_song_id is None:
-            song_id = stable_id
         else:
-            song_id = str(raw_song_id)
+            raw_payload_id = self._normalize_identifier(song.get("id"))
+            if raw_payload_id:
+                song_id = raw_payload_id
+            else:
+                song_id = stable_id
         title = song.get("title")
         if not isinstance(title, str) or not title.strip():
             recovered_title, source = _recover_song_title(song)
@@ -1040,6 +1080,57 @@ class SQLiteSongStore:
         LOGGER.warning(
             "Unable to normalise song field %s type=%s; using fallback", field, type(value).__name__
         )
+
+    def _normalize_string(self, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        return None
+
+    def _normalize_identifier(self, value: Any) -> Optional[str]:
+        normalized = self._normalize_string(value)
+        if normalized is not None:
+            return normalized
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            token = str(value).strip()
+            return token or None
+        return None
+
+    def _extract_filter_value(
+        self, filter_doc: Mapping[str, Any] | None, key: str
+    ) -> Optional[str]:
+        if not isinstance(filter_doc, Mapping):
+            return None
+        candidate = filter_doc.get(key)
+        if isinstance(candidate, Mapping):
+            if "$eq" in candidate:
+                return self._normalize_string(candidate.get("$eq"))
+            return None
+        return self._normalize_string(candidate)
+
+    def _maybe_log_key_mismatch(
+        self,
+        filter_scanner: Optional[str],
+        payload_scanner: Optional[str],
+        filter_group: Optional[str],
+        payload_group: Optional[str],
+    ) -> None:
+        if self._key_mismatch_logged:
+            return
+        mismatch = False
+        if filter_scanner and payload_scanner and filter_scanner != payload_scanner:
+            mismatch = True
+        if filter_group and payload_group and filter_group != payload_group:
+            mismatch = True
+        if mismatch:
+            self._key_mismatch_logged = True
+            LOGGER.error(
+                "SQLiteSongStore ignoring payload key mismatch: filter(scanner_stable_id=%s, group_key=%s) payload(scanner_stable_id=%s, group_key=%s)",
+                filter_scanner,
+                filter_group,
+                payload_scanner,
+                payload_group,
+            )
 
     def _row_to_song(self, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(row)

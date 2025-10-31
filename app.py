@@ -3476,6 +3476,21 @@ else:
 
     @app.route("/songs/<path:filename>")
     def desktop_song_files(filename: str):
+        if not isinstance(filename, str) or not filename:
+            abort(404)
+        parts = filename.split("/", 1)
+        raw_song_id = parts[0].strip()
+        if not raw_song_id:
+            abort(404)
+        try:
+            song_doc = _require_song_store().get_by_id(raw_song_id)
+        except Exception:  # pragma: no cover - defensive logging
+            app.logger.exception("Failed to resolve song for static request id=%s", raw_song_id)
+            abort(500)
+        if not isinstance(song_doc, Mapping):
+            abort(404)
+        if len(parts) < 2 or not parts[1].strip():
+            abort(404)
         return cache_wrap(
             send_from_directory(str(DESKTOP_SONGS_DIR), filename),
             604800,
