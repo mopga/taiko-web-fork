@@ -117,7 +117,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: backend-installer
+          name: taiko-web-desktop-windows
           path: out\*.exe
 
       - name: Upload electron bundle
@@ -180,7 +180,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: backend-installer
+          name: taiko-web-desktop-windows
           path: release
 
       - name: Prepare release payload
