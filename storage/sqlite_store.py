@@ -10,8 +10,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence, Tuple, TypeVar
+from urllib.parse import unquote, urlparse
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1106,7 +1107,111 @@ class SQLiteSongStore:
         is_playable = 1 if song.get("is_playable", True) else 0
         difficulties = song.get("difficulties") or {}
         tags = song.get("tags")
-        meta = song.get("meta")
+        raw_meta = song.get("meta")
+        meta_map: dict[str, Any]
+        if isinstance(raw_meta, Mapping):
+            meta_map = dict(raw_meta)
+        else:
+            meta_map = {}
+
+        desktop_meta_source = meta_map.get("desktop")
+        desktop_meta: dict[str, Any]
+        if isinstance(desktop_meta_source, Mapping):
+            desktop_meta = dict(desktop_meta_source)
+        else:
+            desktop_meta = {}
+
+        def _coerce_relpath_value(value: Any) -> Optional[str]:
+            if isinstance(value, PurePosixPath):
+                return _coerce_relpath_value(value.as_posix())
+            if isinstance(value, Path):
+                return _coerce_relpath_value(value.as_posix())
+            if not isinstance(value, str):
+                return None
+            token = value.strip()
+            if not token:
+                return None
+            token = token.replace("\\", "/")
+            parsed = urlparse(token)
+            if parsed.scheme or parsed.netloc:
+                path_component = parsed.path or ""
+            else:
+                path_component = token
+            candidate = unquote(path_component)
+            candidate = candidate.split("?")[0].split("#")[0]
+            while candidate.startswith("./"):
+                candidate = candidate[2:]
+            while candidate.startswith("/"):
+                candidate = candidate[1:]
+            if not candidate:
+                return None
+            try:
+                posix = PurePosixPath(candidate)
+            except ValueError:
+                return None
+            parts = [part for part in posix.parts if part not in ("", ".")]
+            if not parts:
+                return None
+            if parts[0].lower() == "songs":
+                parts = parts[1:]
+                if not parts:
+                    return None
+            if any(part == ".." for part in parts):
+                return None
+            normalised = PurePosixPath(*parts)
+            return normalised.as_posix()
+
+        paths_doc = song.get("paths") if isinstance(song.get("paths"), Mapping) else None
+        main_tja_relpath: Optional[str] = None
+        candidates: list[Any] = [
+            song.get("main_tja_relpath"),
+            meta_map.get("main_tja_relpath"),
+            desktop_meta.get("main_tja_relpath"),
+            desktop_meta.get("tja_relpath"),
+        ]
+        if isinstance(paths_doc, Mapping):
+            candidates.append(paths_doc.get("tja_relpath"))
+            candidates.append(paths_doc.get("tja_url"))
+        charts_payload = song.get("charts") if isinstance(song.get("charts"), Sequence) else []
+        if isinstance(charts_payload, Sequence) and not isinstance(charts_payload, (str, bytes)):
+            for entry in charts_payload:
+                if not isinstance(entry, Mapping):
+                    continue
+                candidates.append(entry.get("tja_path"))
+                candidates.append(entry.get("tja_url"))
+        for candidate in candidates:
+            relpath = _coerce_relpath_value(candidate)
+            if relpath:
+                main_tja_relpath = relpath
+                break
+
+        dir_relpath: Optional[str] = None
+        if isinstance(paths_doc, Mapping):
+            dir_relpath = _coerce_relpath_value(paths_doc.get("dir_url"))
+        if not dir_relpath and main_tja_relpath:
+            parent_path = PurePosixPath(main_tja_relpath).parent
+            if parent_path != PurePosixPath(""):
+                dir_relpath = parent_path.as_posix()
+
+        pack_relpath: Optional[str] = None
+        if dir_relpath and dir_relpath not in {".", ""}:
+            pack_relpath = dir_relpath.split("/", 1)[0]
+        elif main_tja_relpath and "/" in main_tja_relpath:
+            pack_relpath = main_tja_relpath.split("/", 1)[0]
+
+        if main_tja_relpath:
+            desktop_meta["main_tja_relpath"] = main_tja_relpath
+        if dir_relpath:
+            desktop_meta["dir_relpath"] = dir_relpath
+        if pack_relpath:
+            desktop_meta["pack_relpath"] = pack_relpath
+
+        if desktop_meta:
+            meta_map["desktop"] = desktop_meta
+        elif "desktop" in meta_map:
+            meta_map.pop("desktop")
+
+        meta = meta_map or None
         updated_at = self._coerce_timestamp_field("updated_at", song.get("updated_at"), "milliseconds", 0)
         created_at = self._coerce_timestamp_field(
             "created_at", song.get("created_at"), "milliseconds", updated_at

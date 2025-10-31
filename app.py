@@ -2255,9 +2255,14 @@ def _serialize_catalog_entry(
                 return None
         return None
 
-    primary_id = _normalize_identifier(_first('song_id'))
-    if not primary_id:
+    if RUN_PROFILE == 'desktop':
         primary_id = _normalize_identifier(_first('scanner_stable_id'))
+        if not primary_id:
+            primary_id = _normalize_identifier(_first('song_id'))
+    else:
+        primary_id = _normalize_identifier(_first('song_id'))
+        if not primary_id:
+            primary_id = _normalize_identifier(_first('scanner_stable_id'))
     if not primary_id:
         app.logger.error('Failed to serialize song entry without identifier sources=%s', sources)
         raise RuntimeError('song entry missing identifier')
@@ -3566,6 +3571,15 @@ else:
             song_store=store,
         )
 
+    def _desktop_extract_desktop_meta(song_doc: Mapping[str, Any]) -> Mapping[str, Any]:
+        meta_doc = song_doc.get("meta") if isinstance(song_doc.get("meta"), Mapping) else None
+        if not isinstance(meta_doc, Mapping):
+            return {}
+        desktop_meta = meta_doc.get("desktop")
+        if isinstance(desktop_meta, Mapping):
+            return desktop_meta
+        return {}
+
     def _desktop_load_manifest_entry(
         song_doc: Mapping[str, Any],
         *,
@@ -3647,7 +3661,11 @@ else:
             return None
         if not entries:
             return None
-        selected = min(entries, key=lambda item: item.name)
+        main_candidate = next((child for child in entries if child.name.lower() == "main.tja"), None)
+        if main_candidate is not None:
+            selected = main_candidate
+        else:
+            selected = min(entries, key=lambda item: (item.name.lower(), item.name))
         try:
             relative_path = selected.relative_to(songs_root)
         except ValueError:
@@ -3661,6 +3679,30 @@ else:
     ) -> PurePosixPath:
         candidate_files: list[PurePosixPath] = []
         candidate_dirs: list[PurePosixPath] = []
+
+        desktop_meta = _desktop_extract_desktop_meta(song_doc)
+
+        def _register_stored_file_candidate(value: object) -> None:
+            normalized = _desktop_normalize_posix_path(value)
+            if normalized is None:
+                return
+            if normalized not in candidate_files:
+                candidate_files.insert(0, normalized)
+
+        def _register_stored_directory(value: object) -> None:
+            normalized = _desktop_normalize_posix_path(value)
+            if normalized is None:
+                return
+            directory = normalized if normalized != PurePosixPath("") else PurePosixPath(".")
+            if directory not in candidate_dirs:
+                candidate_dirs.insert(0, directory)
+
+        _register_stored_file_candidate(song_doc.get("main_tja_relpath"))
+        if desktop_meta:
+            _register_stored_file_candidate(desktop_meta.get("main_tja_relpath"))
+            _register_stored_file_candidate(desktop_meta.get("tja_relpath"))
+            _register_stored_directory(desktop_meta.get("dir_relpath"))
+            _register_stored_directory(desktop_meta.get("pack_relpath"))
 
         def _register_file_candidate(value: object) -> None:
             normalized = _desktop_normalize_posix_path(value)
@@ -3735,13 +3777,18 @@ else:
         song_store: Optional[SongStoreInterface] = None,
         manifest_store: Optional[ManifestStoreInterface] = None,
         songs_dir: Optional[Path] = None,
+        document: Optional[Mapping[str, Any]] = None,
     ) -> Path:
         normalized_id = _desktop_normalize_identifier(song_identifier)
         if not normalized_id:
             raise FileNotFoundError("song identifier is missing")
         store = song_store or _require_song_store()
         songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
-        document = _desktop_fetch_song_document(normalized_id, song_store=store)
+        if document is not None and isinstance(document, Mapping):
+            document_map: Optional[Mapping[str, Any]] = document
+        else:
+            document_map = _desktop_fetch_song_document(normalized_id, song_store=store)
+        document = document_map
         if document is None:
             raise FileNotFoundError("song not found")
         manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
@@ -3762,6 +3809,7 @@ else:
         song_store: Optional[SongStoreInterface] = None,
         manifest_store: Optional[ManifestStoreInterface] = None,
         songs_dir: Optional[Path] = None,
+        document: Optional[Mapping[str, Any]] = None,
     ) -> Path:
         normalized_id = _desktop_normalize_identifier(song_identifier)
         if not normalized_id:
@@ -3771,7 +3819,11 @@ else:
             raise FileNotFoundError("requested asset name is missing")
         store = song_store or _require_song_store()
         songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
-        document = _desktop_fetch_song_document(normalized_id, song_store=store)
+        if document is not None and isinstance(document, Mapping):
+            document_map: Optional[Mapping[str, Any]] = document
+        else:
+            document_map = _desktop_fetch_song_document(normalized_id, song_store=store)
+        document = document_map
         if document is None:
             raise FileNotFoundError("song not found")
         manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
@@ -3782,7 +3834,23 @@ else:
             component = _desktop_normalize_posix_path(name_token)
             if component is None or component.is_absolute():
                 raise FileNotFoundError("invalid asset path")
-            relative = relative_main.parent.joinpath(component)
+            base_directory = relative_main.parent
+            desktop_meta = _desktop_extract_desktop_meta(document)
+            for key in ("dir_relpath", "pack_relpath"):
+                candidate = desktop_meta.get(key) if desktop_meta else None
+                normalized_dir = _desktop_normalize_posix_path(candidate)
+                if normalized_dir is None:
+                    continue
+                directory = normalized_dir if normalized_dir != PurePosixPath("") else PurePosixPath(".")
+                try:
+                    absolute_dir = (songs_root / directory.as_posix()).resolve()
+                    absolute_dir.relative_to(songs_root)
+                except Exception:
+                    continue
+                if absolute_dir.is_dir():
+                    base_directory = directory
+                    break
+            relative = base_directory.joinpath(component)
         absolute = (songs_root / relative.as_posix()).resolve()
         try:
             absolute.relative_to(songs_root)
@@ -3820,22 +3888,37 @@ else:
             3600,
         )
 
-    @app.route("/songs/<path:filename>")
-    def desktop_song_files(filename: str):
-        if not isinstance(filename, str) or not filename:
+    @app.route("/songs/<scanner_stable_id>/<path:filename>")
+    def desktop_song_files(scanner_stable_id: str, filename: str):
+        normalized_id = _desktop_normalize_identifier(scanner_stable_id)
+        if not normalized_id:
             abort(404)
-        parts = filename.split("/", 1)
-        raw_song_id = parts[0].strip()
-        if not raw_song_id:
+        name_token = filename.strip() if isinstance(filename, str) else ""
+        if not name_token:
             abort(404)
-        if len(parts) < 2 or not parts[1].strip():
+        song_store = _require_song_store()
+        try:
+            document = song_store.find_one({"scanner_stable_id": normalized_id})
+        except Exception:  # pragma: no cover - defensive logging
+            app.logger.exception("Failed to load song for asset request id=%s", normalized_id)
+            abort(500)
+        if not isinstance(document, Mapping):
             abort(404)
         try:
-            asset_path = resolve_song_file_path(raw_song_id, parts[1])
+            asset_path = resolve_song_file_path(
+                normalized_id,
+                name_token,
+                song_store=song_store,
+                document=document,
+            )
         except FileNotFoundError:
             abort(404)
         except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to resolve song asset id=%s name=%s", raw_song_id, parts[1])
+            app.logger.exception(
+                "Failed to resolve song asset id=%s name=%s",
+                normalized_id,
+                name_token,
+            )
             abort(500)
         return cache_wrap(flask.send_file(asset_path), 604800)
 

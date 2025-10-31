@@ -445,8 +445,8 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     pack_dir = songs_dir / "ScannerPack"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    tja_path = pack_dir / "main.tja"
-    tja_path.write_text(
+    primary_tja = pack_dir / "Scanner Song.tja"
+    primary_tja.write_text(
         "\n".join(
             [
                 "TITLE:Scanner Song",
@@ -460,6 +460,7 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
+    (pack_dir / "Another.tja").write_text("TITLE:Other\n#START\n1111,\n#END\n", encoding="utf-8")
     (pack_dir / "main.ogg").write_bytes(b"\x00\x00")
 
     scanner = SongScanner(
@@ -477,12 +478,23 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     stored_doc = song_store.find_one()
     assert stored_doc is not None
-    song_identifier = stored_doc.get('song_id')
+    song_identifier = stored_doc.get('scanner_stable_id')
     assert isinstance(song_identifier, str)
+
+    desktop_meta = (
+        stored_doc.get('meta') or {}
+    )
+    desktop_section = desktop_meta.get('desktop') if isinstance(desktop_meta, dict) else None
+    assert isinstance(desktop_section, dict)
+    assert desktop_section.get('main_tja_relpath') == 'ScannerPack/Scanner Song.tja'
+    assert desktop_section.get('dir_relpath') == 'ScannerPack'
+    assert desktop_section.get('pack_relpath') == 'ScannerPack'
 
     client = app_module.app.test_client()
     response = client.get(f"/songs/{song_identifier}/main.tja")
     assert response.status_code == 200
+    body_text = response.get_data(as_text=True)
+    assert body_text.startswith("TITLE:Scanner Song")
 
     api_response = client.get("/api/songs?limit=5")
     assert api_response.status_code == 200
@@ -495,6 +507,13 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
         assert isinstance(entry_id, str) and entry_id.strip()
         song_response = client.get(f"/songs/{entry_id}/main.tja")
         assert song_response.status_code == 200
+        assert song_response.get_data(as_text=True).startswith("TITLE:")
+
+    missing_response = client.get("/songs/missing/main.tja")
+    assert missing_response.status_code == 404
+
+    traversal_response = client.get(f"/songs/{song_identifier}/../app.py")
+    assert traversal_response.status_code == 404
 
     summary_second = scanner.scan(full=True)
     assert summary_second.get('errors', 0) == 0

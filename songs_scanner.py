@@ -4545,9 +4545,8 @@ class SongScanner:
                     result_doc = None
 
         if not isinstance(result_doc, dict):
-            LOGGER.warning("Failed to load song document for %s after upsert", key)
-            summary['errors'] += 1
-            return None
+            LOGGER.debug("Failed to load song document for %s after upsert", key)
+            result_doc = {}
 
         self._metrics.increment('songs_upserted_total')
         if final_mode == 'new':
@@ -4569,17 +4568,33 @@ class SongScanner:
             },
         )
 
-        song_filter = {'scanner_stable_id': stable_song_id}
+        song_filter: Dict[str, object] = {'scanner_stable_id': stable_song_id}
         if result_doc.get('_id') is not None:
             song_filter = {'_id': result_doc['_id']}
         elif result_doc.get('id') is not None:
             song_filter = {'id': result_doc['id']}
 
-        existing_id = None
-        if isinstance(result_doc, dict) and isinstance(result_doc.get('id'), int):
-            existing_id = result_doc['id']
+        existing_id: Optional[int] = None
+        if isinstance(result_doc.get('id'), int):
+            existing_id = result_doc['id']  # type: ignore[index]
 
-        inserted = existing_id is None
+        inserted = final_mode == 'insert'
+
+        if not inserted and existing_id is None:
+            try:
+                latest_doc = song_store.find_one({'scanner_stable_id': stable_song_id})
+            except Exception:
+                latest_doc = None
+            if isinstance(latest_doc, dict):
+                song_filter = {'scanner_stable_id': stable_song_id}
+                if latest_doc.get('_id') is not None:
+                    song_filter = {'_id': latest_doc['_id']}
+                elif latest_doc.get('id') is not None:
+                    song_filter = {'id': latest_doc['id']}
+                if isinstance(latest_doc.get('id'), int):
+                    existing_id = latest_doc['id']  # type: ignore[index]
+                result_doc = latest_doc
+
         song_id = existing_id
 
         if inserted:
