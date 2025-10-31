@@ -21,6 +21,8 @@ from storage.sqlite_store import (
 def _make_song(
     song_id: str,
     *,
+    scanner_stable_id: str | None = None,
+    group_key: str | None = None,
     title: str | None = None,
     title_reading: str | None = None,
     artist: str | None = None,
@@ -34,8 +36,12 @@ def _make_song(
     updated_at: int = 0,
     created_at: int | None = None,
 ):
+    stable_id = scanner_stable_id if scanner_stable_id is not None else song_id
+    group_value = group_key if group_key is not None else f"group::{song_id}"
     payload = {
         "song_id": song_id,
+        "scanner_stable_id": stable_id,
+        "group_key": group_value,
         "title": title or f"Song {song_id}",
         "title_reading": title_reading,
         "artist": artist,
@@ -83,7 +89,7 @@ def sqlite_storage(tmp_path: Path) -> SQLiteStorage:
 
 
 def test_schema_initialization(sqlite_storage: SQLiteStorage) -> None:
-    assert sqlite_storage.schema_version == 1
+    assert sqlite_storage.schema_version == 2
     assert sqlite_storage.path.exists()
 
 
@@ -104,7 +110,8 @@ def test_upsert_and_get(sqlite_storage: SQLiteStorage) -> None:
         _make_song("gamma", title="Gamma Song", artist="Producer", genre="Pop", updated_at=103),
     ]
     inserted = sqlite_storage.song_store.upsert_many(payloads)
-    assert inserted == len(payloads)
+    assert len(inserted) == len(payloads)
+    assert all(isinstance(identifier, int) for identifier in inserted)
 
     beta = sqlite_storage.song_store.get_by_id("beta")
     assert beta is not None
@@ -301,6 +308,8 @@ def test_prepare_song_row_normalizes_datetime(sqlite_storage: SQLiteStorage) -> 
     row = store._prepare_song_row(  # type: ignore[attr-defined]
         {
             "song_id": "dt",
+            "scanner_stable_id": "dt",
+            "group_key": "group::dt",
             "title": "Date Song",
             "updated_at": updated_dt,
             "created_at": created_iso,
@@ -317,6 +326,8 @@ def test_prepare_song_row_coerces_float(sqlite_storage: SQLiteStorage) -> None:
     row = store._prepare_song_row(  # type: ignore[attr-defined]
         {
             "song_id": "float",
+            "scanner_stable_id": "float",
+            "group_key": "group::float",
             "title": "Float Song",
             "updated_at": 1000.4,
             "created_at": 2000.9,
@@ -334,6 +345,8 @@ def test_prepare_song_row_handles_invalid_timestamp(
     row = store._prepare_song_row(  # type: ignore[attr-defined]
         {
             "song_id": "invalid",
+            "scanner_stable_id": "invalid",
+            "group_key": "group::invalid",
             "title": "Invalid",
             "updated_at": {"bad": True},
         }
@@ -353,9 +366,11 @@ def test_title_recovery_callback_invoked(sqlite_storage: SQLiteStorage) -> None:
     store.set_title_recovered_callback(_callback)  # type: ignore[attr-defined]
     payload = {
         "song_id": "missing",
+        "scanner_stable_id": "missing-stable",
+        "group_key": "group::missing",
         "title": " ",
         "title_en": "Recovered Title",
         "updated_at": datetime(2024, 1, 2, tzinfo=UTC),
     }
     store.upsert_many([payload])
-    assert recovered == [("missing", "title_en")]
+    assert recovered == [("missing-stable", "title_en")]

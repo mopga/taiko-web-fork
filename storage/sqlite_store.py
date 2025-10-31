@@ -11,13 +11,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence, Tuple, TypeVar
 
 
 LOGGER = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 UPSERT_CHUNK_SIZE = 500
 
@@ -241,6 +241,9 @@ def _recover_song_title(song: Mapping[str, Any]) -> Tuple[Optional[str], Optiona
     return None, None
 
 
+T = TypeVar("T")
+
+
 class SQLiteDatabase:
     """Light-weight helper for managing the SQLite connection."""
 
@@ -343,7 +346,7 @@ class SQLiteDatabase:
             )
             row = cursor.fetchone()
             if row is None:
-                self._create_schema_v1(cursor)
+                self._create_schema_v2(cursor)
                 cursor.execute(
                     "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
                     (SCHEMA_VERSION,),
@@ -351,14 +354,27 @@ class SQLiteDatabase:
                 version = SCHEMA_VERSION
             else:
                 version = int(row[0])
+                if version < 2:
+                    LOGGER.info(
+                        "Migrating SQLite schema from v%s to v%s", version, SCHEMA_VERSION
+                    )
+                    self._migrate_schema_v1_to_v2(cursor)
+                    cursor.execute(
+                        "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
+                        (SCHEMA_VERSION,),
+                    )
+                    version = SCHEMA_VERSION
             cursor.close()
         return version
 
-    def _create_schema_v1(self, cursor: sqlite3.Cursor) -> None:
+    def _create_schema_v2(self, cursor: sqlite3.Cursor) -> None:
         cursor.executescript(
             """
             CREATE TABLE IF NOT EXISTS songs(
-                song_id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scanner_stable_id TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                song_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 title_reading TEXT,
                 artist TEXT,
@@ -377,11 +393,84 @@ class SQLiteDatabase:
                 value_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_songs_scanner_group
+                ON songs(scanner_stable_id, group_key);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_songs_song_id
+                ON songs(song_id);
             CREATE INDEX IF NOT EXISTS idx_songs_is_playable ON songs(is_playable);
             CREATE INDEX IF NOT EXISTS idx_songs_title ON songs(title);
             CREATE INDEX IF NOT EXISTS idx_songs_artist ON songs(artist);
             CREATE INDEX IF NOT EXISTS idx_songs_genre ON songs(genre);
             CREATE INDEX IF NOT EXISTS idx_songs_updated_at ON songs(updated_at);
+            """
+        )
+
+    def _migrate_schema_v1_to_v2(self, cursor: sqlite3.Cursor) -> None:
+        cursor.executescript(
+            """
+            ALTER TABLE songs RENAME TO songs_v1;
+            CREATE TABLE songs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scanner_stable_id TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                song_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                title_reading TEXT,
+                artist TEXT,
+                genre TEXT,
+                bpm REAL,
+                duration_ms INTEGER,
+                is_playable INTEGER NOT NULL,
+                difficulties_json TEXT NOT NULL,
+                tags_json TEXT,
+                meta_json TEXT,
+                updated_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO songs(
+                scanner_stable_id,
+                group_key,
+                song_id,
+                title,
+                title_reading,
+                artist,
+                genre,
+                bpm,
+                duration_ms,
+                is_playable,
+                difficulties_json,
+                tags_json,
+                meta_json,
+                updated_at,
+                created_at
+            )
+            SELECT
+                song_id,
+                song_id,
+                song_id,
+                title,
+                title_reading,
+                artist,
+                genre,
+                bpm,
+                duration_ms,
+                is_playable,
+                difficulties_json,
+                tags_json,
+                meta_json,
+                updated_at,
+                created_at
+            FROM songs_v1;
+            DROP TABLE songs_v1;
+            CREATE UNIQUE INDEX idx_songs_scanner_group
+                ON songs(scanner_stable_id, group_key);
+            CREATE UNIQUE INDEX idx_songs_song_id
+                ON songs(song_id);
+            CREATE INDEX idx_songs_is_playable ON songs(is_playable);
+            CREATE INDEX idx_songs_title ON songs(title);
+            CREATE INDEX idx_songs_artist ON songs(artist);
+            CREATE INDEX idx_songs_genre ON songs(genre);
+            CREATE INDEX idx_songs_updated_at ON songs(updated_at);
             """
         )
 
@@ -406,6 +495,20 @@ class SQLiteDatabase:
                     sql,
                     len(rows),
                 )
+                self._connection.rollback()
+                raise
+            finally:
+                cursor.close()
+
+    def execute_in_transaction(self, callback: Callable[[sqlite3.Cursor], T]) -> T:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                result = callback(cursor)
+                self._connection.commit()
+                return result
+            except Exception:
                 self._connection.rollback()
                 raise
             finally:
@@ -453,10 +556,10 @@ class SQLiteSongStore:
     def path(self) -> Path:
         return self._db.path
 
-    def upsert_many(self, songs: Iterable[Mapping[str, Any]]) -> int:
+    def upsert_many(self, songs: Iterable[Mapping[str, Any]]) -> list[int]:
         prepared_rows = [self._prepare_song_row(song) for song in songs]
         if not prepared_rows:
-            return 0
+            return []
 
         total_rows = len(prepared_rows)
         start = time.perf_counter()
@@ -468,12 +571,13 @@ class SQLiteSongStore:
         query = (
             """
             INSERT INTO songs(
-                song_id, title, title_reading, artist, genre, bpm, duration_ms,
+                scanner_stable_id, group_key, song_id, title, title_reading, artist, genre, bpm, duration_ms,
                 is_playable, difficulties_json, tags_json, meta_json, updated_at, created_at
             ) VALUES(
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
-            ON CONFLICT(song_id) DO UPDATE SET
+            ON CONFLICT(scanner_stable_id, group_key) DO UPDATE SET
+                song_id=excluded.song_id,
                 title=excluded.title,
                 title_reading=excluded.title_reading,
                 artist=excluded.artist,
@@ -486,16 +590,19 @@ class SQLiteSongStore:
                 meta_json=excluded.meta_json,
                 updated_at=excluded.updated_at,
                 created_at=excluded.created_at
+            RETURNING id
             """
         )
 
         processed = 0
+        returned_ids: list[int] = []
         for chunk_index, chunk_start in enumerate(
             range(0, total_rows, UPSERT_CHUNK_SIZE), start=1
         ):
             chunk_rows = prepared_rows[chunk_start : chunk_start + UPSERT_CHUNK_SIZE]
             chunk_begin = time.perf_counter()
-            self._db.execute_bulk(query, chunk_rows)
+            chunk_ids = self._execute_upsert_chunk(query, chunk_rows)
+            returned_ids.extend(chunk_ids)
             processed += len(chunk_rows)
             chunk_duration_ms = (time.perf_counter() - chunk_begin) * 1000
             LOGGER.info(
@@ -513,7 +620,48 @@ class SQLiteSongStore:
             total_rows,
             duration_ms,
         )
-        return total_rows
+        return returned_ids
+
+    def _execute_upsert_chunk(
+        self, query: str, chunk_rows: Sequence[tuple[Any, ...]]
+    ) -> list[int]:
+        def _callback(cursor: sqlite3.Cursor) -> list[int]:
+            chunk_identifiers: list[int] = []
+            for params in chunk_rows:
+                cursor.execute(query, params)
+                returning_row = cursor.fetchone()
+                identifier = self._resolve_upsert_identifier(cursor, returning_row, params)
+                chunk_identifiers.append(identifier)
+            return chunk_identifiers
+
+        try:
+            return self._db.execute_in_transaction(_callback)
+        except Exception:
+            LOGGER.exception("SQLiteSongStore upsert_many chunk failed")
+            raise
+
+    def _resolve_upsert_identifier(
+        self,
+        cursor: sqlite3.Cursor,
+        returning_row: Optional[Sequence[Any]],
+        params: Sequence[Any],
+    ) -> int:
+        if returning_row:
+            identifier = returning_row[0]
+            if identifier is not None:
+                return int(identifier)
+        stable_id, group_key = params[0], params[1]
+        cursor.execute(
+            "SELECT id FROM songs WHERE scanner_stable_id = ? AND group_key = ? LIMIT 1",
+            (stable_id, group_key),
+        )
+        fallback = cursor.fetchone()
+        if fallback and fallback[0] is not None:
+            return int(fallback[0])
+        raise RuntimeError(
+            "Failed to resolve song identifier after upsert for scanner_stable_id=%s group_key=%s"
+            % (stable_id, group_key)
+        )
 
     # ------------------------------------------------------------------
     # Compatibility helpers for the ``SongStore`` protocol
@@ -584,8 +732,9 @@ class SQLiteSongStore:
         *args: Any,
         **kwargs: Any,
     ) -> SQLiteInsertOneResult:
-        self.upsert_many([document])
-        return SQLiteInsertOneResult(document.get("song_id"))
+        identifiers = self.upsert_many([document])
+        inserted_id = identifiers[0] if identifiers else None
+        return SQLiteInsertOneResult(inserted_id)
 
     def update_one(
         self,
@@ -797,22 +946,37 @@ class SQLiteSongStore:
         return stats
 
     def _prepare_song_row(self, song: Mapping[str, Any]) -> tuple[Any, ...]:
-        song_id = str(song.get("song_id"))
-        if not song_id:
-            raise ValueError("song payload missing song_id")
+        stable_id = song.get("scanner_stable_id")
+        if not isinstance(stable_id, str) or not stable_id:
+            raise ValueError("song payload missing scanner_stable_id")
+        group_key = song.get("group_key")
+        if not isinstance(group_key, str) or not group_key:
+            raise ValueError("song payload missing group_key")
+
+        raw_song_id = song.get("song_id")
+        if isinstance(raw_song_id, str) and raw_song_id:
+            song_id = raw_song_id
+        elif raw_song_id is None:
+            song_id = stable_id
+        else:
+            song_id = str(raw_song_id)
         title = song.get("title")
         if not isinstance(title, str) or not title.strip():
             recovered_title, source = _recover_song_title(song)
             if recovered_title:
                 LOGGER.warning(
-                    "Recovered missing song title for song_id=%s via %s", song_id, source or "fallback"
+                    "Recovered missing song title for scanner_stable_id=%s via %s",
+                    stable_id,
+                    source or "fallback",
                 )
                 if self._title_recovered_callback is not None:
                     try:
-                        self._title_recovered_callback(song_id, source)
+                        self._title_recovered_callback(stable_id, source)
                     except Exception:  # pragma: no cover - callbacks must not break storage
                         LOGGER.debug(
-                            "Title recovery callback failed for song_id=%s", song_id, exc_info=True
+                            "Title recovery callback failed for scanner_stable_id=%s",
+                            stable_id,
+                            exc_info=True,
                         )
                 title = recovered_title
             else:
@@ -831,6 +995,8 @@ class SQLiteSongStore:
             "created_at", song.get("created_at"), "milliseconds", updated_at
         )
         return (
+            stable_id,
+            group_key,
             song_id,
             title,
             title_reading,

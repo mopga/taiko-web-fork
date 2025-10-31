@@ -2185,10 +2185,21 @@ def _serialize_catalog_entry(
                     return value
         return default
 
-    stable_id = _first('scanner_stable_id')
-    if not isinstance(stable_id, str) or not stable_id:
-        fallback = _first('id') or _first('song_id')
-        if isinstance(fallback, str) and fallback:
+    def _normalize_identifier(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return str(int(value))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    stable_id = _normalize_identifier(_first('scanner_stable_id'))
+    if not stable_id:
+        fallback = _normalize_identifier(_first('id')) or _normalize_identifier(_first('song_id'))
+        if fallback:
             stable_id = fallback
         else:
             return None
@@ -3685,8 +3696,23 @@ def _serialize_song_detail(song_doc: dict, *, include_notes: bool, manifest_entr
         if duration_candidate:
             max_duration = max(max_duration, duration_candidate)
 
+    def _normalize_identifier(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return str(int(value))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    stable_identifier = _normalize_identifier(song_doc.get('scanner_stable_id'))
+    if not stable_identifier:
+        stable_identifier = _normalize_identifier(song_doc.get('id'))
+
     payload = {
-        'id': song_doc.get('scanner_stable_id') or song_doc.get('id'),
+        'id': stable_identifier or '',
         'legacy_id': song_doc.get('id'),
         'title': song_doc.get('title'),
         'titleJa': song_doc.get('titleJa'),
