@@ -4545,8 +4545,9 @@ class SongScanner:
                     result_doc = None
 
         if not isinstance(result_doc, dict):
-            LOGGER.debug("Failed to load song document for %s after upsert", key)
-            result_doc = {}
+            LOGGER.error("Failed to load song document for %s after upsert", key)
+            summary['errors'] += 1
+            return None
 
         self._metrics.increment('songs_upserted_total')
         if final_mode == 'new':

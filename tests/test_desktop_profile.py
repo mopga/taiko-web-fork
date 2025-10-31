@@ -478,7 +478,7 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     stored_doc = song_store.find_one()
     assert stored_doc is not None
-    song_identifier = stored_doc.get('scanner_stable_id')
+    song_identifier = stored_doc.get('song_id')
     assert isinstance(song_identifier, str)
 
     desktop_meta = (
@@ -495,6 +495,9 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     assert response.status_code == 200
     body_text = response.get_data(as_text=True)
     assert body_text.startswith("TITLE:Scanner Song")
+
+    asset_response = client.get(f"/songs/{song_identifier}/main.ogg")
+    assert asset_response.status_code == 200
 
     api_response = client.get("/api/songs?limit=5")
     assert api_response.status_code == 200

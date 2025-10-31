@@ -579,7 +579,7 @@ def _load_song_document_for_identifier(
         if document:
             return dict(document)
 
-    lookup_keys = ('song_id', 'scanner_stable_id')
+    lookup_keys = ('song_id', 'id', 'scanner_stable_id')
     for key in lookup_keys:
         filter_doc = {key: identifier}
         try:
@@ -2256,9 +2256,9 @@ def _serialize_catalog_entry(
         return None
 
     if RUN_PROFILE == 'desktop':
-        primary_id = _normalize_identifier(_first('scanner_stable_id'))
+        primary_id = _normalize_identifier(_first('song_id'))
         if not primary_id:
-            primary_id = _normalize_identifier(_first('song_id'))
+            primary_id = _normalize_identifier(_first('scanner_stable_id'))
     else:
         primary_id = _normalize_identifier(_first('song_id'))
         if not primary_id:
@@ -3563,13 +3563,33 @@ else:
         *,
         song_store: Optional[SongStoreInterface] = None,
         projection: Optional[Mapping[str, Any]] = None,
+        allow_scanner_fallback: bool = True,
     ) -> Optional[Mapping[str, Any]]:
+        normalized = _desktop_normalize_identifier(identifier)
+        if not normalized:
+            return None
         store = song_store or _require_song_store()
-        return _load_song_document_for_identifier(
-            identifier,
-            projection=projection,
-            song_store=store,
-        )
+        lookup_filters: list[Mapping[str, Any]] = [
+            {'song_id': normalized},
+            {'id': normalized},
+        ]
+        if allow_scanner_fallback and RUN_PROFILE == 'desktop':
+            lookup_filters.append({'scanner_stable_id': normalized})
+
+        for filter_doc in lookup_filters:
+            try:
+                document = store.find_one(filter_doc, projection=projection)
+            except Exception:
+                app.logger.debug(
+                    'desktop song lookup failed filter=%s store=%s',
+                    filter_doc,
+                    type(store).__name__,
+                    exc_info=app.logger.isEnabledFor(logging.DEBUG),
+                )
+                document = None
+            if document:
+                return dict(document)
+        return None
 
     def _desktop_extract_desktop_meta(song_doc: Mapping[str, Any]) -> Mapping[str, Any]:
         meta_doc = song_doc.get("meta") if isinstance(song_doc.get("meta"), Mapping) else None
@@ -3828,8 +3848,31 @@ else:
             raise FileNotFoundError("song not found")
         manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
         relative_main = _desktop_resolve_main_tja_relative_path(document, manifest_entry, songs_root)
-        if name_token.lower() == "main.tja":
+        name_token_lower = name_token.lower()
+        if name_token_lower == "main.tja":
             relative = relative_main
+            if manifest_store is not None:
+                stable_identifier = _desktop_normalize_identifier(document.get("scanner_stable_id"))
+                existing_main: Optional[PurePosixPath] = None
+                if isinstance(manifest_entry, Mapping):
+                    existing_value = manifest_entry.get("main_tja_relpath")
+                    if isinstance(existing_value, str) and existing_value.strip():
+                        try:
+                            existing_main = PurePosixPath(existing_value.strip())
+                        except ValueError:
+                            existing_main = None
+                if stable_identifier and (existing_main is None or existing_main != relative_main):
+                    try:
+                        manifest_store.update_one(
+                            {"_id": stable_identifier},
+                            {"$set": {"main_tja_relpath": relative_main.as_posix()}},
+                            upsert=True,
+                        )
+                    except Exception:
+                        app.logger.debug(
+                            "Failed to persist main_tja_relpath id=%s", stable_identifier,
+                            exc_info=app.logger.isEnabledFor(logging.DEBUG),
+                        )
         else:
             component = _desktop_normalize_posix_path(name_token)
             if component is None or component.is_absolute():
@@ -3888,27 +3931,43 @@ else:
             3600,
         )
 
-    @app.route("/songs/<scanner_stable_id>/<path:filename>")
-    def desktop_song_files(scanner_stable_id: str, filename: str):
-        normalized_id = _desktop_normalize_identifier(scanner_stable_id)
-        if not normalized_id:
+    @app.route("/songs/<path:filename>")
+    def desktop_song_files(filename: str):
+        if not isinstance(filename, str):
             abort(404)
-        name_token = filename.strip() if isinstance(filename, str) else ""
-        if not name_token:
+        first, separator, remainder = filename.partition("/")
+        if not separator or not remainder:
             abort(404)
+        song_token = _desktop_normalize_identifier(first)
+        name_token = remainder.strip()
+        if not song_token or not name_token:
+            abort(404)
+
         song_store = _require_song_store()
         try:
-            document = song_store.find_one({"scanner_stable_id": normalized_id})
+            document = _desktop_fetch_song_document(song_token, song_store=song_store)
         except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to load song for asset request id=%s", normalized_id)
+            app.logger.exception(
+                "Failed to load song for asset request id=%s", song_token
+            )
             abort(500)
         if not isinstance(document, Mapping):
             abort(404)
+
+        lookup_identifier = (
+            _desktop_normalize_identifier(document.get("song_id"))
+            or _desktop_normalize_identifier(document.get("scanner_stable_id"))
+            or song_token
+        )
+
+        manifest_store = _get_manifest_store()
+
         try:
             asset_path = resolve_song_file_path(
-                normalized_id,
+                lookup_identifier,
                 name_token,
                 song_store=song_store,
+                manifest_store=manifest_store,
                 document=document,
             )
         except FileNotFoundError:
@@ -3916,7 +3975,7 @@ else:
         except Exception:  # pragma: no cover - defensive logging
             app.logger.exception(
                 "Failed to resolve song asset id=%s name=%s",
-                normalized_id,
+                lookup_identifier,
                 name_token,
             )
             abort(500)

@@ -1677,7 +1677,7 @@ class SQLiteManifestStore:
                     LOGGER.info('SQLiteManifestStore enabling UpdateOne bulk compatibility')
                     self._update_one_info_logged = True
                 continue
-            LOGGER.warning(
+            LOGGER.debug(
                 "Unsupported manifest bulk operation: %s", type(operation).__name__
             )
 
