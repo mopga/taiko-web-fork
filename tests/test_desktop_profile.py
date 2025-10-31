@@ -269,6 +269,41 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
     )
 
 
+def test_desktop_song_static_route_validates_song_id(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "static-001",
+                "scanner_stable_id": "static-001",
+                "group_key": "group::static-001",
+                "title": "Static Song",
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+
+    song_dir = app_module.DESKTOP_SONGS_DIR / "static-001"
+    song_dir.mkdir()
+    (song_dir / "main.tja").write_text("# TJA")
+
+    client = app_module.app.test_client()
+
+    ok_response = client.get("/songs/static-001/main.tja")
+    assert ok_response.status_code == 200
+
+    missing_response = client.get("/songs/missing/main.tja")
+    assert missing_response.status_code == 404
+
+    directory_response = client.get("/songs/static-001/")
+    assert directory_response.status_code == 404
+
+
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):
     app_module = _import_desktop_app(monkeypatch, tmp_path)
     client = app_module.app.test_client()

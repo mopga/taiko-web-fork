@@ -14,6 +14,7 @@ from storage.sqlite_store import (
     Page,
     SongFilter,
     SortField,
+    SQLiteSongUpsertItem,
     SQLiteStorage,
 )
 
@@ -130,6 +131,26 @@ def test_upsert_and_get(sqlite_storage: SQLiteStorage) -> None:
     assert [song["song_id"] for song in page.items] == ["alpha", "gamma"]
 
 
+def test_upsert_uses_filter_song_id(sqlite_storage: SQLiteStorage) -> None:
+    store = sqlite_storage.song_store
+    payload = {
+        "scanner_stable_id": "ignored",
+        "group_key": "group::ignored",
+        "title": "Filter Song",
+        "updated_at": 0,
+        "created_at": 0,
+    }
+    filter_doc = {"scanner_stable_id": "stable-1", "group_key": "group::stable-1"}
+
+    inserted = store.upsert_many([SQLiteSongUpsertItem(payload, filter_doc)])
+    assert inserted
+
+    stored = store.find_one({"scanner_stable_id": "stable-1"})
+    assert stored is not None
+    assert stored["song_id"] == "stable-1"
+    assert stored["group_key"] == "group::stable-1"
+
+
 def test_filters_and_sorting(sqlite_storage: SQLiteStorage) -> None:
     sqlite_storage.song_store.upsert_many(
         [
@@ -187,6 +208,40 @@ def test_difficulty_filter(sqlite_storage: SQLiteStorage) -> None:
     page = sqlite_storage.song_store.query(filter, [SortField("title")], limit=10, offset=0)
     assert [entry["song_id"] for entry in page.items] == ["d1"]
     assert sqlite_storage.song_store.count(filter) == 1
+
+
+def test_upsert_logs_key_mismatch_once(
+    sqlite_storage: SQLiteStorage, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = sqlite_storage.song_store
+    payload = _make_song(
+        "payload-id",
+        scanner_stable_id="payload-stable",
+        group_key="group::payload",
+        title="Payload Title",
+    )
+    filter_doc = {"scanner_stable_id": "stable-id", "group_key": "group::stable"}
+
+    caplog.set_level(logging.ERROR)
+    store.upsert_many([SQLiteSongUpsertItem(payload, filter_doc)])
+
+    mismatch_logs = [
+        record
+        for record in caplog.records
+        if "ignoring payload key mismatch" in record.getMessage()
+    ]
+    assert mismatch_logs
+
+    caplog.clear()
+    store.upsert_many([SQLiteSongUpsertItem(payload, filter_doc)])
+    assert not any(
+        "ignoring payload key mismatch" in record.getMessage() for record in caplog.records
+    )
+
+    stored = store.get_by_id("payload-id")
+    assert stored is not None
+    assert stored["scanner_stable_id"] == "stable-id"
+    assert stored["group_key"] == "group::stable"
 
 
 def test_delete_obsolete(sqlite_storage: SQLiteStorage) -> None:
@@ -313,7 +368,8 @@ def test_prepare_song_row_normalizes_datetime(sqlite_storage: SQLiteStorage) -> 
             "title": "Date Song",
             "updated_at": updated_dt,
             "created_at": created_iso,
-        }
+        },
+        None,
     )
     expected_updated = int(round(updated_dt.timestamp() * 1000))
     expected_created = int(round(datetime.fromisoformat(created_iso).timestamp() * 1000))
@@ -331,7 +387,8 @@ def test_prepare_song_row_coerces_float(sqlite_storage: SQLiteStorage) -> None:
             "title": "Float Song",
             "updated_at": 1000.4,
             "created_at": 2000.9,
-        }
+        },
+        None,
     )
     assert row[-2] == 1000
     assert row[-1] == 2001
@@ -349,7 +406,8 @@ def test_prepare_song_row_handles_invalid_timestamp(
             "group_key": "group::invalid",
             "title": "Invalid",
             "updated_at": {"bad": True},
-        }
+        },
+        None,
     )
     assert row[-2] == 0
     assert row[-1] == 0
