@@ -37,6 +37,22 @@ function Get-JsonSnapshot([object]$value) {
   try { return ($value | ConvertTo-Json -Depth 8 -Compress) } catch { return '<unserializable>' }
 }
 
+# Safe field extractor: supports IDictionary and PSCustomObject, never throws
+function Get-Field([object]$obj, [string]$name) {
+  try {
+    if ($null -eq $obj) { return $null }
+    if ($obj -is [System.Collections.IDictionary]) {
+      if ($obj.Contains($name)) { return $obj[$name] }
+      return $null
+    }
+    if ($obj -is [pscustomobject]) {
+      $prop = $obj.PSObject.Properties[$name]
+      if ($null -ne $prop) { return $prop.Value }
+    }
+    return $null
+  } catch { return $null }
+}
+
 function Convert-CategoriesPayloadToArray([object]$payload) {
   if ($null -eq $payload) { return @() }
   if ($payload -is [System.Array]) { return @($payload) }
@@ -315,15 +331,14 @@ try {
       $snapshot = Get-JsonSnapshot $category
       throw "Unexpected /api/categories entry type: type=$categoryType json=$snapshot"
     }
-    $slug = $null
-    $title = $null
-    if ($category -is [System.Collections.IDictionary]) {
-      if ($category.Contains('slug')) { $slug = $category['slug'] }
-      if ($category.Contains('title')) { $title = $category['title'] }
-    } else {
-      $slug = $category.slug
-      $title = $category.title
-    }
+    # --- SAFE extraction (won't throw even if property/key missing)
+    $slug  = Get-Field $category 'slug'
+    $title = Get-Field $category 'title'
+    $id    = Get-Field $category 'id'
+
+    # tolerances (backend уже нормализует, но на всякий случай)
+    if (-not $slug -and $id -ne $null) { $slug = "$id" }
+    if (-not $title -and $slug) { $title = "$slug" }
     if ([string]::IsNullOrWhiteSpace([string]$slug)) {
       $snapshot = Get-JsonSnapshot $category
       throw "Category missing slug: type=$categoryType json=$snapshot"
