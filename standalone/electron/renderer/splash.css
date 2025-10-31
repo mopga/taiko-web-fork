@@ -28,7 +28,6 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-image: url('../assets/launcher/title-screen.png');
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
@@ -58,6 +57,45 @@ body {
   text-align: center;
   font-weight: 600;
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.splash__detail {
+  font-size: 0.95rem;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.85);
+  max-width: 360px;
+}
+
+.splash__info {
+  font-size: 0.95rem;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.splash__actions {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  width: 100%;
+}
+
+.splash__button {
+  padding: 0.6rem 1.4rem;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(90deg, #ffe066, #ff8c42, #ff3c38);
+  color: #151515;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.45);
+}
+
+.splash__button:disabled {
+  opacity: 0.6;
+  cursor: default;
+  box-shadow: none;
 }
 
 .splash__progress {

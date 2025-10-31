@@ -190,11 +190,15 @@ try {
     if ((Get-SeqCount $songs) -eq 0) { Start-Sleep -Milliseconds 500 }
   } while ((Get-SeqCount $songs) -eq 0 -and (Get-Date) -lt $deadline -and ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes')))
 
-  if ((Get-SeqCount $songs) -eq 0 -and ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))) {
+  $songCount = Get-SeqCount $songs
+  if ($songCount -eq 0 -and -not ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))) {
+    Write-Host "Songs list is empty (expected in CI)"
+  }
+  if ($songCount -eq 0 -and ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))) {
     throw "No songs found in /api/songs after wait"
   }
 
-  Write-Host ("Smoke OK: /api/songs count={0}" -f (Get-SeqCount $songs))
+  Write-Host ("Smoke OK: /api/songs count={0}" -f $songCount)
 }
 catch {
   $errMsg = $null

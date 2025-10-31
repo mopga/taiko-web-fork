@@ -8,12 +8,16 @@
   <body>
     <div class="splash">
       <div class="splash__overlay">
-        <img
-          class="splash__mascot"
-          src="../assets/launcher/dancing-don.gif"
-          alt="Загрузка"
-        />
+        <img class="splash__mascot" id="mascot" alt="Загрузка" />
         <div class="splash__status" id="status">Запускаем Taiko Web…</div>
+        <div class="splash__detail" id="status-detail" hidden></div>
+        <div class="splash__info" id="songs-info">Папка песен: —</div>
+        <div class="splash__info" id="port-info">Порт: —</div>
+        <div class="splash__actions">
+          <button class="splash__button" id="choose-songs" type="button">
+            Выбрать папку с песнями
+          </button>
+        </div>
         <div class="splash__progress" aria-hidden="true">
           <div class="splash__progress-bar"></div>
         </div>

@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const { spawn } = require('child_process');
 const treeKill = require('tree-kill');
 
@@ -17,7 +18,18 @@ let backendUrl = null;
 let backendReady = false;
 let quitting = false;
 let starting = false;
-let lastStatusMessage = '';
+let currentPort = null;
+let dataDirPath = null;
+let songsLinkPath = null;
+let selectedSongsPath = null;
+let songsScanPromise = null;
+let lastStatusMessage = 'Запускаем Taiko Web…';
+let lastStatusPayload = {
+  message: lastStatusMessage,
+  port: currentPort,
+  songsPath: selectedSongsPath,
+  errorMessage: null,
+};
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -41,6 +53,31 @@ ipcMain.handle('desktop:quit', async () => {
   quitting = true;
   await stopBackend();
   app.quit();
+});
+
+ipcMain.handle('desktop:chooseSongsDir', async () => {
+  try {
+    const info = ensureDataDirectory();
+    emitStatus();
+    const window = createMainWindow();
+    const result = await dialog.showOpenDialog(window, {
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    const selectedPath = result.filePaths[0];
+    const appliedPath = applySongsDirectory(selectedPath, info);
+    updateStatus(`Папка песен: ${appliedPath}`);
+    if (backendReady && backendUrl) {
+      await runSongsScan();
+    }
+    return { canceled: false, path: appliedPath };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    updateStatus('Не удалось обновить папку песен.', { errorMessage: message });
+    return { canceled: false, error: message };
+  }
 });
 
 app.whenReady().then(() => {
@@ -108,8 +145,8 @@ function createMainWindow() {
   });
 
   window.webContents.once('did-finish-load', () => {
-    if (lastStatusMessage) {
-      window.webContents.send('desktop:status', { message: lastStatusMessage });
+    if (lastStatusPayload) {
+      window.webContents.send('desktop:status', lastStatusPayload);
     }
   });
 
@@ -122,6 +159,7 @@ function createMainWindow() {
   });
 
   mainWindow = window;
+  emitStatus();
   return window;
 }
 
@@ -132,28 +170,32 @@ async function startBackendFlow() {
   starting = true;
 
   try {
+    backendReady = false;
+    backendUrl = null;
+    currentPort = getEnvPort();
+    songsScanPromise = null;
+
     updateStatus('Подготавливаем среду…');
     const backendExecutable = resolveBackendExecutable();
     const backendWorkingDir = path.dirname(backendExecutable);
     ensurePathExists(backendWorkingDir);
 
-    const dataDir = ensureDataDirectory();
-    const port = resolvePort();
+    const info = ensureDataDirectory();
+    emitStatus();
+
+    updateStatus('Определяем порт…');
+    const port = await resolvePort();
+    currentPort = port;
+    emitStatus();
     backendUrl = `http://127.0.0.1:${port}`;
 
     updateStatus('Запускаем сервер…');
-    backendProcess = spawnBackend(backendExecutable, backendWorkingDir, dataDir, port);
+    backendProcess = spawnBackend(backendExecutable, backendWorkingDir, info.dataDir, port);
 
     updateStatus('Ожидаем запуск сервера…');
     await waitForHealthz(`${backendUrl}/healthz`, HEALTH_TIMEOUT_MS);
 
-    updateStatus('Сканируем песни…');
-    const songCount = await waitForSongs(`${backendUrl}/api/songs`, SONGS_TIMEOUT_MS);
-    if (songCount > 0) {
-      updateStatus(`Найдено песен: ${songCount}`);
-    } else {
-      updateStatus('Песни будут доступны после сканирования…');
-    }
+    await runSongsScan();
 
     backendReady = true;
     const window = createMainWindow();
@@ -191,20 +233,50 @@ function ensurePathExists(targetPath) {
 function ensureDataDirectory() {
   const userRoot = app.getPath('userData');
   const dataDir = path.join(userRoot, 'taiko-web-data');
-  const songsDir = path.join(dataDir, 'songs');
-  fs.mkdirSync(songsDir, { recursive: true });
-  return dataDir;
-}
+  fs.mkdirSync(dataDir, { recursive: true });
 
-function resolvePort() {
-  const sources = [process.env.PORT, process.env.APP_PORT];
-  for (const source of sources) {
-    const value = Number.parseInt(source ?? '', 10);
-    if (Number.isInteger(value) && value > 0 && value < 65_536) {
-      return value;
+  const songsDir = path.join(dataDir, 'songs');
+  try {
+    if (!fs.existsSync(songsDir)) {
+      fs.mkdirSync(songsDir, { recursive: true });
+    }
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
     }
   }
-  return DEFAULT_PORT;
+
+  dataDirPath = dataDir;
+  songsLinkPath = songsDir;
+  selectedSongsPath = resolveSongsTarget(songsDir);
+
+  try {
+    if (!fs.existsSync(selectedSongsPath)) {
+      fs.mkdirSync(selectedSongsPath, { recursive: true });
+    }
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  return {
+    dataDir,
+    songsLink: songsDir,
+    songsTarget: selectedSongsPath,
+  };
+}
+
+async function resolvePort() {
+  const envPort = getEnvPort();
+  if (envPort) {
+    return envPort;
+  }
+  const preferred = DEFAULT_PORT;
+  if (await checkPortAvailability(preferred)) {
+    return preferred;
+  }
+  return findAvailablePort(20_000, 40_000);
 }
 
 function spawnBackend(executable, workingDir, dataDir, port) {
@@ -346,11 +418,184 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function updateStatus(message) {
+function updateStatus(message, extra = {}) {
   lastStatusMessage = message;
+  emitStatus(extra);
+}
+
+function emitStatus(extra = {}) {
+  const payload = {
+    message: lastStatusMessage,
+    port: currentPort,
+    songsPath: getCurrentSongsPath(),
+    errorMessage: null,
+    ...extra,
+  };
+  lastStatusPayload = payload;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('desktop:status', { message });
+    mainWindow.webContents.send('desktop:status', payload);
   }
+}
+
+function getCurrentSongsPath() {
+  if (selectedSongsPath) {
+    return selectedSongsPath;
+  }
+  if (songsLinkPath) {
+    return resolveSongsTarget(songsLinkPath);
+  }
+  return null;
+}
+
+function resolveSongsTarget(linkPath) {
+  if (!linkPath) {
+    return null;
+  }
+  try {
+    const stats = fs.lstatSync(linkPath);
+    if (stats.isSymbolicLink()) {
+      const rawTarget = fs.readlinkSync(linkPath);
+      if (path.isAbsolute(rawTarget)) {
+        return path.normalize(rawTarget);
+      }
+      return path.normalize(path.resolve(path.dirname(linkPath), rawTarget));
+    }
+    return path.normalize(linkPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return path.normalize(linkPath);
+    }
+    throw error;
+  }
+}
+
+function applySongsDirectory(targetPath, info) {
+  const linkPath = (info && info.songsLink) || songsLinkPath;
+  const dataDir = (info && info.dataDir) || dataDirPath;
+  if (!linkPath) {
+    throw new Error('Путь к каталогу песен недоступен.');
+  }
+  if (!targetPath) {
+    throw new Error('Не выбран каталог с песнями.');
+  }
+
+  const resolvedTarget = path.normalize(path.resolve(targetPath));
+  fs.mkdirSync(resolvedTarget, { recursive: true });
+
+  if (path.normalize(path.resolve(linkPath)) === resolvedTarget) {
+    selectedSongsPath = resolvedTarget;
+    return resolvedTarget;
+  }
+
+  try {
+    const stats = fs.lstatSync(linkPath);
+    if (stats.isSymbolicLink()) {
+      fs.unlinkSync(linkPath);
+    } else if (stats.isDirectory()) {
+      const backupName = `songs-backup-${Date.now()}`;
+      const backupPath = path.join(dataDir ?? path.dirname(linkPath), backupName);
+      fs.renameSync(linkPath, backupPath);
+    } else {
+      fs.unlinkSync(linkPath);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  fs.symlinkSync(resolvedTarget, linkPath, linkType);
+
+  songsLinkPath = linkPath;
+  selectedSongsPath = resolvedTarget;
+
+  return resolvedTarget;
+}
+
+function runSongsScan() {
+  if (!backendUrl) {
+    return Promise.resolve(0);
+  }
+  if (songsScanPromise) {
+    return songsScanPromise;
+  }
+
+  songsScanPromise = (async () => {
+    updateStatus('Сканируем песни…');
+    try {
+      const count = await waitForSongs(`${backendUrl}/api/songs`, SONGS_TIMEOUT_MS);
+      if (count > 0) {
+        updateStatus(`Найдено песен: ${count}`);
+      } else {
+        updateStatus('Песни будут доступны после сканирования…');
+      }
+      return count;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateStatus('Не удалось обновить список песен.', { errorMessage: message });
+      return 0;
+    } finally {
+      songsScanPromise = null;
+    }
+  })();
+
+  return songsScanPromise;
+}
+
+function getEnvPort() {
+  const sources = [process.env.PORT, process.env.APP_PORT];
+  for (const source of sources) {
+    if (source === undefined || source === null) {
+      continue;
+    }
+    const value = Number.parseInt(String(source), 10);
+    if (Number.isInteger(value) && value > 0 && value < 65_536) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function checkPortAvailability(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+
+    const cleanup = () => {
+      server.removeAllListeners('error');
+      server.removeAllListeners('listening');
+    };
+
+    server.once('error', () => {
+      cleanup();
+      resolve(false);
+    });
+
+    server.once('listening', () => {
+      server.close(() => {
+        cleanup();
+        resolve(true);
+      });
+    });
+
+    try {
+      server.listen(port, '127.0.0.1');
+    } catch (error) {
+      cleanup();
+      resolve(false);
+    }
+  });
+}
+
+async function findAvailablePort(min, max) {
+  const attempts = 30;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const candidate = min + Math.floor(Math.random() * (max - min + 1));
+    if (await checkPortAvailability(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('Не удалось подобрать свободный порт для запуска.');
 }
 
 async function showStartupError(error) {
@@ -400,6 +645,9 @@ function stopBackend() {
 
   const child = backendProcess;
   backendProcess = null;
+  backendReady = false;
+  backendUrl = null;
+  emitStatus();
 
   return new Promise((resolve) => {
     const cleanup = () => {

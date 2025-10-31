@@ -12,7 +12,7 @@ DisableDirPage=no
 AppendDefaultDirName=no
 UsePreviousAppDir=yes
 DirExistsWarning=yes
-SetupIconFile=assets\launcher\app.ico
+SetupIconFile=..\..\assets\launcher\app.ico
 WizardStyle=modern
 OutputDir=out
 OutputBaseFilename=taiko-web-setup
@@ -21,7 +21,7 @@ SolidCompression=yes
 
 [Files]
 Source: "standalone\electron\dist\win-unpacked\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "assets\launcher\app.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\assets\launcher\app.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Taiko Web"; Filename: "{app}\Taiko Web.exe"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"

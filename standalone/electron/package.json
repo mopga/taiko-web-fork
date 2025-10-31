@@ -28,13 +28,19 @@
       "preload.js",
       "renderer/**/*",
       "node_modules/**/*",
-      "../assets/launcher/**/*",
       "!dist/**/*"
     ],
     "extraResources": [
       {
         "from": "../dist/backend/taiko-web-backend",
         "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../assets/launcher",
+        "to": "assets/launcher",
         "filter": [
           "**/*"
         ]
