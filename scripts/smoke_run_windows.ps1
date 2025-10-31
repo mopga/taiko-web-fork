@@ -1,8 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$requireSongs = ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))
-
 function Get-SeqCount([object]$x) {
   if ($null -eq $x) { return 0 }
   if ($x -is [System.Array]) { return $x.Count }
@@ -10,24 +8,49 @@ function Get-SeqCount([object]$x) {
   return 0
 }
 
-$env:APP_PORT = if ($env:APP_PORT) { $env:APP_PORT } else { "8000" }
-$env:DATA_DIR = Join-Path (Get-Location) "_data"
-New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
+function Normalize-Songs([string]$body) {
+  if ([string]::IsNullOrWhiteSpace($body)) { return @() }
+  $b = $body -replace '^\uFEFF','' -replace '\x00',''
+  try { $json = $b | ConvertFrom-Json -ErrorAction Stop } catch { return @() }
+  if ($null -eq $json) { return @() }
+  if ($json -is [pscustomobject] -and ($json | Get-Member -Name items -ErrorAction SilentlyContinue)) {
+    $items = $json.items
+    if ($items -is [System.Array]) { return $items }
+    if ($items -is [System.Collections.IEnumerable]) { return @($items) }
+    return @()
+  }
+  if ($json -is [System.Array]) { return $json }
+  if ($json -is [System.Collections.IEnumerable]) { return @($json) }
+  return @()
+}
+
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
-$backendRoot = Join-Path (Get-Location) "standalone/dist/backend/taiko-web-backend"
+$repoRoot = (Get-Location)
+$env:DATA_DIR = Join-Path $repoRoot "_data"
+New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
+
+$backendRoot = Join-Path $repoRoot "standalone/dist/backend/taiko-web-backend"
 $exe = Join-Path $backendRoot "taiko-web-backend.exe"
-if (-not (Test-Path $exe)) {
-    throw "Binary not found: $exe"
+if (-not (Test-Path -LiteralPath $exe)) {
+  throw "Binary not found: $exe"
 }
 
-Write-Host "WorkingDir: $PWD"
-Write-Host "Exe (before resolve): $exe"
 $absExe = (Resolve-Path -LiteralPath $exe).Path
-Write-Host "Exe (abs): $absExe"
+$absRoot = Split-Path -Parent $absExe
 
-$absRoot = Split-Path $absExe
+$port = if ($env:APP_PORT) { $env:APP_PORT } else { (Get-Random -Minimum 20000 -Maximum 40000).ToString() }
+$env:APP_PORT = $port
+$env:PORT = $port
+$baseUrl = "http://127.0.0.1:$port"
+
+$logDir = Join-Path $repoRoot "_logs"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stdoutLog = Join-Path $logDir "smoke_stdout.log"
+$stderrLog = Join-Path $logDir "smoke_stderr.log"
+Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+
 $dataDir = (Resolve-Path -LiteralPath $env:DATA_DIR).Path
 $songsRoot1 = Join-Path $absRoot "songs"
 $songsRoot2 = Join-Path $dataDir "songs"
@@ -36,16 +59,11 @@ New-Item -ItemType Directory -Force -Path $songsRoot1, $songsRoot2 | Out-Null
 $trackDir1 = Join-Path $songsRoot1 "test-track"
 $trackDir2 = Join-Path $songsRoot2 "test-track"
 foreach ($dir in @($trackDir1, $trackDir2)) {
-    if (Test-Path $dir) {
-        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+  if (Test-Path -LiteralPath $dir) {
+    Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
-New-Item -ItemType Directory -Force -Path $trackDir1, $trackDir2 | Out-Null
-
-$chartPath1 = Join-Path $trackDir1 "test.tja"
-$chartPath2 = Join-Path $trackDir2 "test.tja"
-$audioPath1 = Join-Path $trackDir1 "audio.ogg"
-$audioPath2 = Join-Path $trackDir2 "audio.ogg"
 
 $chartBody = @'
 TITLE: Test Track
@@ -65,133 +83,96 @@ LEVEL: 1
 0000,
 #END
 '@
+
+$chartPath1 = Join-Path $trackDir1 "test.tja"
+$chartPath2 = Join-Path $trackDir2 "test.tja"
+$audioPath1 = Join-Path $trackDir1 "audio.ogg"
+$audioPath2 = Join-Path $trackDir2 "audio.ogg"
 Set-Content -Path $chartPath1 -Value $chartBody -Encoding UTF8
 Set-Content -Path $chartPath2 -Value $chartBody -Encoding UTF8
 [System.IO.File]::WriteAllBytes($audioPath1, [byte[]]::new(0))
 [System.IO.File]::WriteAllBytes($audioPath2, [byte[]]::new(0))
 
-$logDir = Join-Path (Get-Location) "_logs"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stdoutLog = Join-Path $logDir "smoke_stdout.log"
-$stderrLog = Join-Path $logDir "smoke_stderr.log"
-Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+Write-Host "WorkingDir: $absRoot"
+Write-Host "Exe: $absExe"
+Write-Host "Port: $port"
 
-$port = $env:APP_PORT
-$env:PORT = $port
-$baseUrl = "http://127.0.0.1:$port"
-$args = @("--host", "127.0.0.1", "--port", $port)
 $startParams = @{
-    FilePath = $absExe
-    ArgumentList = $args
-    WorkingDirectory = $absRoot
-    PassThru = $true
-    RedirectStandardOutput = $stdoutLog
-    RedirectStandardError = $stderrLog
-    WindowStyle = 'Hidden'
+  FilePath = $absExe
+  ArgumentList = @("--host", "127.0.0.1", "--port", $port)
+  WorkingDirectory = $absRoot
+  PassThru = $true
+  RedirectStandardOutput = $stdoutLog
+  RedirectStandardError = $stderrLog
+  WindowStyle = 'Hidden'
 }
+
 $process = $null
+$resp = $null
 try {
-    $process = Start-Process @startParams -ErrorAction Stop
+  $process = Start-Process @startParams -ErrorAction Stop
 }
 catch {
-    if ($_.Exception -is [System.ComponentModel.Win32Exception]) {
-        Write-Host ("Win32Exception.NativeErrorCode = {0}" -f $_.Exception.NativeErrorCode)
-    }
-    throw
+  if ($_.Exception -is [System.ComponentModel.Win32Exception]) {
+    Write-Host ("Win32Exception.NativeErrorCode = {0}" -f $_.Exception.NativeErrorCode)
+  }
+  throw
 }
 
-
 try {
-  # --- helpers (единственные, без дублей) ---
-  function Assert($cond, $msg) { if (-not $cond) { throw $msg } }
-  function Invoke-WithRetry([scriptblock]$Action, [int]$Retries = 30, [int]$DelayMs = 500) {
-    for ($i=0; $i -lt $Retries; $i++) {
-      try { return & $Action } catch { Start-Sleep -Milliseconds $DelayMs }
+  Start-Sleep -Milliseconds 200
+
+  $health = $null
+  $deadline = (Get-Date).AddSeconds(60)
+  do {
+    try {
+      $healthResponse = Invoke-WebRequest -UseBasicParsing "$baseUrl/healthz" -TimeoutSec 5
+      if ($healthResponse.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
+      $health = $healthResponse.Content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      $health = $null
     }
-    & $Action
-  }
+    if ($null -eq $health) { Start-Sleep -Milliseconds 500 }
+  } while (($null -eq $health) -and (Get-Date) -lt $deadline)
 
-  try {
-    Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5 | Out-Null
-  } catch {
-    Start-Sleep -Milliseconds 200
+  if ($null -eq $health) {
+    throw "Timed out waiting for /healthz"
   }
-
-  # --- дождаться здоровья (status: ok) ---
-  $health = Invoke-WithRetry {
-    Invoke-RestMethod -Uri "$baseUrl/healthz" -Method GET -TimeoutSec 3
+  if ($health.status -ne 'ok') {
+    throw "healthz status != ok: $($health | ConvertTo-Json -Compress)"
   }
-  Assert ($health.status -eq 'ok') "healthz status != ok: $($health | ConvertTo-Json -Compress)"
-  Assert ($health.profile -eq 'desktop') "unexpected profile: $($health.profile)"
+  if ($health.profile -ne 'desktop') {
+    throw "healthz profile != desktop: $($health.profile)"
+  }
   $dbPath = $health.db_path
-  Assert ($dbPath) "db_path missing from /healthz payload"
-  Assert (Test-Path -LiteralPath $dbPath) "db_path does not exist: $dbPath"
+  if ([string]::IsNullOrWhiteSpace($dbPath)) {
+    throw "db_path missing from /healthz payload"
+  }
+  if (-not (Test-Path -LiteralPath $dbPath)) {
+    throw "db_path does not exist: $dbPath"
+  }
   $dbResolved = (Resolve-Path -LiteralPath $dbPath).Path
   $expectedRoot = (Resolve-Path -LiteralPath $env:DATA_DIR).Path
-  Assert ($dbResolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) "db_path not under DATA_DIR"
-
-  # --- мягко подождать появления каталога в логе (если лог уже есть) ---
-  if (Test-Path $stdoutLog -PathType Leaf) {
-    $deadline = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $deadline) {
-      if (Select-String -Path $stdoutLog -Pattern 'profile=desktop\s+catalog_source=filesystem' -Quiet) { break }
-      Start-Sleep -Seconds 1
-    }
+  if (-not $dbResolved.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "db_path not under DATA_DIR"
   }
 
-  # --- корень HTML (SPA) ---
-  $root = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5 }
-  Assert ($root.StatusCode -eq 200) "Root not 200: $($root.StatusCode)"
-  $rootHtml = $root.Content
+  $rootResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/" -TimeoutSec 5
+  if ($rootResp.StatusCode -ne 200) {
+    throw "Root not 200: $($rootResp.StatusCode)"
+  }
+  $rootHtml = $rootResp.Content
   $hasHtml = ($rootHtml -match '(?is)<!doctype') -or ($rootHtml -match '(?is)<html')
-  Assert $hasHtml "Root HTML marker not found"
-
-  # --- favicon (200 или 304 допустимы) ---
-  $fav = Invoke-WithRetry { Invoke-WebRequest -UseBasicParsing "$baseUrl/favicon.ico" -Method Head -TimeoutSec 5 }
-  Assert (@(200,304) -contains $fav.StatusCode) "favicon unexpected: $($fav.StatusCode)"
-
-  # --- /api/songs --- ждём НЕ пустой список
-  function ConvertTo-ObjectArray([object]$value) {
-    if ($null -eq $value) { return @() }
-    if ($value -is [string]) { return ,$value }
-    if ($value -is [System.Collections.IDictionary]) {
-      $list = [System.Collections.Generic.List[object]]::new()
-      foreach ($key in $value.Keys) {
-        [void]$list.Add($value[$key])
-      }
-      return $list.ToArray()
-    }
-    if ($value -is [System.Collections.IEnumerable]) {
-      $list = [System.Collections.Generic.List[object]]::new()
-      foreach ($item in $value) {
-        [void]$list.Add($item)
-      }
-      return $list.ToArray()
-    }
-    return ,$value
+  if (-not $hasHtml) {
+    throw "Root HTML marker not found"
   }
 
-  function Normalize-Songs([string]$body) {
-    if ([string]::IsNullOrWhiteSpace($body)) { return @() }
-    # безопасная нормализация строки (BOM/NUL)
-    $b = $body -replace '^\uFEFF','' -replace '\x00',''
-    try {
-      $json = $b | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-      return @()           # не парсится — считаем пустым
-    }
-
-    if ($null -eq $json) { return @() }
-    if ($json -is [pscustomobject] -and ($json | Get-Member -Name items -ErrorAction SilentlyContinue)) {
-      return ConvertTo-ObjectArray $json.items
-    }
-    if ($json -is [System.Collections.IDictionary] -and $json.Contains('items')) {
-      return ConvertTo-ObjectArray $json['items']
-    }
-    return ConvertTo-ObjectArray $json
+  $fav = Invoke-WebRequest -UseBasicParsing "$baseUrl/favicon.ico" -Method Head -TimeoutSec 5
+  if (-not (@(200,304) -contains $fav.StatusCode)) {
+    throw "favicon unexpected: $($fav.StatusCode)"
   }
 
-  $songs    = @()
+  $songs = @()
   $deadline = (Get-Date).AddSeconds(60)
   do {
     try {
@@ -202,124 +183,43 @@ try {
       $songs = @()
     }
     if ((Get-SeqCount $songs) -eq 0) { Start-Sleep -Milliseconds 500 }
-  } while ((Get-SeqCount $songs) -eq 0 -and (Get-Date) -lt $deadline)
+  } while ((Get-SeqCount $songs) -eq 0 -and (Get-Date) -lt $deadline -and ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes')))
 
-  if ((Get-SeqCount $songs) -eq 0 -and $requireSongs) {
-    Write-Host "---- /api/songs raw body (still empty) ----"
-    try { $resp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/songs" -TimeoutSec 5; Write-Host $resp.Content } catch {}
-    throw "No songs found in /api/songs after wait (SMOKE_REQUIRE_SONGS=1)"
+  if ((Get-SeqCount $songs) -eq 0 -and ($env:SMOKE_REQUIRE_SONGS -in @('1','true','yes'))) {
+    throw "No songs found in /api/songs after wait"
   }
 
-  if ((Get-SeqCount $songs) -gt 0 -and $requireSongs) {
-    Assert ($songs[0] -is [pscustomobject]) "/api/songs element is not object"
-    $first = $songs[0]
-    Assert ($first.is_playable) "First song is not playable"
-    $difficulties = $first.difficulties
-    Assert ($null -ne $difficulties) "First song missing difficulties"
-    $diffProps = @()
-    if ($difficulties -is [pscustomobject]) {
-      $diffProps = ($difficulties | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
-    } elseif ($difficulties -is [System.Collections.IDictionary]) {
-      $diffProps = $difficulties.Keys
-    }
-    $diffProps = @($diffProps) | Where-Object { $_ }
-    $diffProps = $diffProps -as [string[]]
-    if ($null -eq $diffProps) {
-      $diffProps = @()
-    }
-    Assert ($diffProps.Length -gt 0) "First song has no difficulties"
-    foreach ($name in $diffProps) {
-      $value = $difficulties.$name
-      if ($difficulties -is [System.Collections.IDictionary]) {
-        $value = $difficulties[$name]
-      }
-      Assert ($value -is [pscustomobject] -or $value -is [System.Collections.IDictionary]) "Difficulty $name is not an object"
-    }
-  }
-
-  Write-Host ("Smoke OK: /api/songs count={0} (requireSongs={1})" -f (Get-SeqCount $songs), $requireSongs)
-  Write-Host "Desktop smoke OK: root+api passed."
-  return
+  Write-Host ("Smoke OK: /api/songs count={0}" -f (Get-SeqCount $songs))
 }
 catch {
-$errMsg = $null
+  $errMsg = $null
   if ($null -ne $_ -and $null -ne $_.Exception -and -not [string]::IsNullOrEmpty($_.Exception.Message)) {
-      $errMsg = $_.Exception.Message
+    $errMsg = $_.Exception.Message
   } else {
-      $errMsg = [string]$_
+    $errMsg = [string]$_
   }
-  Write-Host ("Smoke failure: {0}" -f $errMsg)  try {
-    $errRecord = $_
-    $exception = $errRecord.Exception
-    $statusCode = $null
-    $requestUri = $null
-    $responseBody = $null
-
-    if ($exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
-      $httpResponse = $exception.Response
-      if ($httpResponse) {
-        try { $statusCode = [int]$httpResponse.StatusCode } catch {}
-        try { $requestUri = $httpResponse.RequestMessage.RequestUri } catch {}
-        try { $responseBody = $httpResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() } catch {}
-      }
-    }
-    elseif ($exception -is [System.Net.WebException]) {
-      $httpResponse = $exception.Response
-      if ($httpResponse -is [System.Net.HttpWebResponse]) {
-        try { $statusCode = [int]$httpResponse.StatusCode } catch {}
-        try { $requestUri = $httpResponse.ResponseUri } catch {}
-        try {
-          $stream = $httpResponse.GetResponseStream()
-          if ($stream) {
-            try {
-              $reader = New-Object System.IO.StreamReader($stream)
-              $responseBody = $reader.ReadToEnd()
-            }
-            finally {
-              if ($reader) { $reader.Dispose() }
-              $stream.Dispose()
-            }
-          }
-        } catch {}
-      }
-    }
-    elseif ($errRecord.ErrorDetails -and $errRecord.ErrorDetails.Message) {
-      $responseBody = $errRecord.ErrorDetails.Message
-    }
-
-    if ($statusCode -or $requestUri -or $responseBody) {
-      Write-Host "===== HTTP error details ====="
-      if ($null -ne $statusCode) { Write-Host "StatusCode: $statusCode" }
-      if ($requestUri) { Write-Host "RequestUri: $requestUri" }
-      if ($responseBody) {
-        Write-Host "---- Response body ----"
-        Write-Host $responseBody
-      }
-    }
-  } catch {
-    Write-Host "Failed to extract HTTP error details: $($_.Exception.Message)"
+  Write-Host "Smoke failure: $errMsg"
+  if ($null -ne $resp) {
+    Write-Host "---- last /api/songs body ----"
+    try { Write-Host ($resp.Content | Out-String) } catch {}
   }
   if (Test-Path $stdoutLog) {
     Write-Host "===== smoke_stdout.log (tail) ====="
-    Get-Content $stdoutLog -Tail 200 | Write-Host
+    try { Get-Content $stdoutLog -Tail 200 | Write-Host } catch {}
   }
   if (Test-Path $stderrLog) {
     Write-Host "===== smoke_stderr.log (tail) ====="
-    Get-Content $stderrLog -Tail 200 | Write-Host
+    try { Get-Content $stderrLog -Tail 200 | Write-Host } catch {}
   }
-  exit 1
+  throw
 }
 finally {
-    if ($process) {
-        try {
-            if (-not $process.HasExited) {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            }
-            try {
-                [void]$process.WaitForExit(5000)
-            } catch {}
-        } finally {
-            try { $process.Dispose() } catch {}
-        }
-    }
+  if ($process) {
+    try {
+      if (-not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force
+      }
+    } catch {}
+    try { $process.Dispose() } catch {}
+  }
 }

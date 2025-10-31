@@ -63,6 +63,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    icon=str(project_root / "assets" / "launcher" / "app.ico"),
     console=True,
 )
 
