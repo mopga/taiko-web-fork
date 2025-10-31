@@ -823,13 +823,14 @@ def _normalize_categories_payload(categories: Iterable[object]) -> list[dict[str
             song_skin_value = None
 
         normalized_entry: dict[str, object] = {
-            'id': category_id,
             'title': title_value,
             'aliases': aliases_value,
             'title_lang': title_lang_value,
             'song_skin': song_skin_value,
             'count': normalized_count,
         }
+        if category_id is not None:
+            normalized_entry['id'] = category_id
 
         normalized.append(normalized_entry)
 
