@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from cachelib.file import FileSystemCache
+
+from songs_scanner import SongScanner
+
+from tests.test_songs_scanner import _DummyDB
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -274,6 +280,12 @@ def test_desktop_song_static_route_validates_song_id(tmp_path, monkeypatch):
     song_store = app_module.SONG_STORE
     assert song_store is not None
 
+    songs_dir_override = tmp_path / "songs_override"
+    songs_dir_override.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir_override
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir_override
+
     now = int(time.time())
     song_store.upsert_many(
         [
@@ -282,6 +294,7 @@ def test_desktop_song_static_route_validates_song_id(tmp_path, monkeypatch):
                 "scanner_stable_id": "static-001",
                 "group_key": "group::static-001",
                 "title": "Static Song",
+                "paths": {"dir_url": "/songs/static-001/"},
                 "updated_at": now,
                 "created_at": now,
             }
@@ -302,6 +315,190 @@ def test_desktop_song_static_route_validates_song_id(tmp_path, monkeypatch):
 
     directory_response = client.get("/songs/static-001/")
     assert directory_response.status_code == 404
+
+
+def test_resolve_main_tja_path_prefers_manifest(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "songs_manifest"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "alpha-song",
+                "scanner_stable_id": "alpha-stable",
+                "group_key": "group::alpha",
+                "title": "Alpha",
+                "paths": {"dir_url": "/songs/AlphaPack/"},
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+    manifest_store.put("alpha-stable", {"file_path": "AlphaPack/main-alpha.tja"})
+
+    pack_dir = songs_dir / "AlphaPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    target_path = pack_dir / "main-alpha.tja"
+    target_path.write_text("#alpha")
+
+    resolved = app_module.resolve_main_tja_path(
+        "alpha-song",
+        song_store=song_store,
+        manifest_store=manifest_store,
+        songs_dir=songs_dir,
+    )
+    assert resolved == target_path.resolve()
+
+
+def test_resolve_main_tja_path_detects_main_case_insensitive(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "songs_case"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "beta-song",
+                "scanner_stable_id": "beta-stable",
+                "group_key": "group::beta",
+                "title": "Beta",
+                "paths": {"dir_url": "/songs/BetaPack/"},
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+    manifest_store.put("beta-stable", {"paths": {"dir_url": "/songs/BetaPack/"}})
+
+    pack_dir = songs_dir / "BetaPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    main_path = pack_dir / "Main.TJA"
+    main_path.write_text("#beta")
+    (pack_dir / "extra.tja").write_text("#other")
+
+    resolved = app_module.resolve_main_tja_path(
+        "beta-song",
+        song_store=song_store,
+        manifest_store=manifest_store,
+        songs_dir=songs_dir,
+    )
+    assert resolved == main_path.resolve()
+
+
+def test_resolve_main_tja_path_missing_file(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "songs_missing"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "gamma-song",
+                "scanner_stable_id": "gamma-stable",
+                "group_key": "group::gamma",
+                "title": "Gamma",
+                "paths": {"dir_url": "/songs/GammaPack/"},
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+    manifest_store.put("gamma-stable", {"paths": {"dir_url": "/songs/GammaPack/"}})
+
+    with pytest.raises(FileNotFoundError):
+        app_module.resolve_main_tja_path(
+            "gamma-song",
+            song_store=song_store,
+            manifest_store=manifest_store,
+            songs_dir=songs_dir,
+        )
+
+
+def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "scanner_songs"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    pack_dir = songs_dir / "ScannerPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    tja_path = pack_dir / "main.tja"
+    tja_path.write_text(
+        "\n".join(
+            [
+                "TITLE:Scanner Song",
+                "WAVE:main.ogg",
+                "COURSE:Oni",
+                "LEVEL:5",
+                "#START",
+                "1111,",
+                "#END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "main.ogg").write_bytes(b"\x00\x00")
+
+    scanner = SongScanner(
+        db=_DummyDB(),
+        songs_dir=songs_dir,
+        songs_baseurl="/songs/",
+        song_store=song_store,
+        manifest_store=manifest_store,
+    )
+
+    summary_first = scanner.scan(full=True)
+    metrics_first = summary_first.get('metrics') or {}
+    assert metrics_first.get('songs_upserted_total', 0) >= 1
+    assert summary_first.get('errors', 0) == 0
+
+    stored_doc = song_store.find_one()
+    assert stored_doc is not None
+    song_identifier = stored_doc.get('song_id')
+    assert isinstance(song_identifier, str)
+
+    client = app_module.app.test_client()
+    response = client.get(f"/songs/{song_identifier}/main.tja")
+    assert response.status_code == 200
+
+    api_response = client.get("/api/songs?limit=5")
+    assert api_response.status_code == 200
+    payload = api_response.get_json()
+    assert isinstance(payload, list)
+    assert payload
+    for entry in payload:
+        assert isinstance(entry, dict)
+        entry_id = entry.get('id')
+        assert isinstance(entry_id, str) and entry_id.strip()
+        song_response = client.get(f"/songs/{entry_id}/main.tja")
+        assert song_response.status_code == 200
+
+    summary_second = scanner.scan(full=True)
+    assert summary_second.get('errors', 0) == 0
+    assert summary_second.get('updated', 0) >= 1
 
 
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):

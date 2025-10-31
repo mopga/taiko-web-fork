@@ -330,6 +330,26 @@ def test_manifest_store_protocol_surface(sqlite_storage: SQLiteStorage) -> None:
     assert deleted.deleted_count == 1
 
 
+def test_manifest_bulk_update_one_supported(sqlite_storage: SQLiteStorage) -> None:
+    manifest_store = sqlite_storage.manifest_store
+
+    class DummyUpdateOne:
+        def __init__(self, filter_doc, update_doc, upsert=False):
+            self.filter = filter_doc
+            self.update = update_doc
+            self.upsert = upsert
+
+    manifest_store.bulk_write(
+        [
+            DummyUpdateOne({"_id": "entry"}, {"$set": {"value": 1, "updated_at": 1000}}, upsert=True),
+            DummyUpdateOne({"_id": "entry"}, {"$set": {"value": 2}}),
+        ]
+    )
+
+    stored = manifest_store.get("entry")
+    assert stored == {"value": 2, "updated_at": 1000}
+
+
 def test_perf_smoke(sqlite_storage: SQLiteStorage) -> None:
     sqlite_storage.song_store.upsert_many(list(_seed_songs(5000)))
     start = time.perf_counter()
