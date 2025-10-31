@@ -147,9 +147,14 @@ def _resolve_data_dir(value: Optional[str]) -> Path:
     return resolved
 
 
-def _prepare_environment(*, data_dir: Path) -> None:
+def _prepare_environment(*, data_dir: Path) -> dict[str, Optional[str]]:
+    previous = {
+        "RUN_PROFILE": os.environ.get("RUN_PROFILE"),
+        "DATA_DIR": os.environ.get("DATA_DIR"),
+    }
     os.environ["RUN_PROFILE"] = "desktop"
     os.environ.setdefault("DATA_DIR", str(data_dir))
+    return previous
 
 
 def _log_startup(*, server: str, host: str, port: int, data_dir: Path, songs_dir: Path, app) -> None:
@@ -255,7 +260,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         songs_root.mkdir(parents=True, exist_ok=True)
     except Exception:
         LOGGER.warning("desktop.songs_dir ensure_failed path=%s", songs_root, exc_info=True)
-    _prepare_environment(data_dir=data_dir_path)
+    previous_env = _prepare_environment(data_dir=data_dir_path)
 
     host, port = _resolve_host_port(args)
     os.environ.setdefault("PORT", str(port))
@@ -285,6 +290,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             host,
             port,
         )
+        for key, original in previous_env.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
 
     return 0
 

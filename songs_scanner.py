@@ -3386,6 +3386,7 @@ class SongScanner:
                     type(redis_client).__name__,
                 )
         self._redis: Optional["Redis"] = validated_redis
+        self._single_node_mode = False
         single_node_env = os.getenv('SCANNER_SINGLE_NODE')
         if single_node_env is not None:
             try:
@@ -3393,8 +3394,12 @@ class SongScanner:
             except AttributeError:
                 self._single_node_mode = bool(single_node_env)
         else:
-            redis_host_env = os.getenv('TAIKO_WEB_REDIS_HOST') or os.getenv('REDIS_HOST')
-            self._single_node_mode = bool(redis_host_env) is False and validated_redis is None and leader_lock is None
+            run_profile_token = (
+                os.getenv('PROFILE')
+                or os.getenv('RUN_PROFILE')
+                or ''
+            ).strip().lower()
+            self._single_node_mode = run_profile_token == 'desktop'
         if self._single_node_mode:
             LOGGER.info('Scanner operating in single-node mode (desktop fallback)')
         if self._redis is None and leader_lock is None and not self._single_node_mode:
@@ -5679,6 +5684,22 @@ class SongScanner:
                         str(active_summary.get('manifest_checksum', '-')),
                         int(active_summary.get('files_count', 0)),
                     )
+                    SUMMARY_LOGGER.info(
+                        "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d elapsed=%.3fs",
+                        mode_str,
+                        int(active_summary.get('found', 0)),
+                        int(active_summary.get('inserted', 0)),
+                        int(active_summary.get('updated', 0)),
+                        int(active_summary.get('disabled', 0)),
+                        errors_value,
+                        int(active_summary.get('skipped', 0)),
+                        final_duration,
+                        checksum_str,
+                        str(active_summary.get('fs_checksum', '-')),
+                        str(active_summary.get('manifest_checksum', '-')),
+                        int(active_summary.get('files_count', 0)),
+                        final_duration,
+                    )
                 except Exception as exc:  # pragma: no cover - defensive logging path
                     SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
 
@@ -6792,6 +6813,8 @@ class SongScanner:
         summary['single_node'] = self._single_node_mode
         summary['fast_path'] = fast_path
         summary['reason'] = reason
+        if isinstance(self._active_summary, dict):
+            self._active_summary['reason'] = reason
         files_count_value = _coerce_int(summary.get('files_count')) or 0
         manifest_documents_value = _coerce_int(summary.get('manifest_documents')) or 0
         recovered_titles = _coerce_int(summary.get('recovered_titles_total')) or 0
