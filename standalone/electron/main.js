@@ -1,33 +1,38 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const log = require('electron-log');
-const treeKill = require('tree-kill');
+const https = require('https');
+const net = require('net');
 const { spawn } = require('child_process');
+const treeKill = require('tree-kill');
 
-const APP_ID = 'com.taiko.web.desktop';
-const BACKEND_PORT = 8000;
-const isDev = process.env.ELECTRON_DEV === '1';
-const isWindows = process.platform === 'win32';
+const APP_ID = 'com.taikoweb.desktop';
+const DEFAULT_PORT = 8000;
+const HEALTH_TIMEOUT_MS = 60_000;
+const SONGS_TIMEOUT_MS = 60_000;
 
 let mainWindow = null;
 let backendProcess = null;
 let backendUrl = null;
 let backendReady = false;
-let isShuttingDown = false;
-let failureDialogOpen = false;
-let backendRoot = '';
-let songsDir = '';
+let quitting = false;
+let starting = false;
+let currentPort = null;
+let dataDirPath = null;
+let songsLinkPath = null;
+let selectedSongsPath = null;
+let songsScanPromise = null;
+let lastStatusMessage = 'Запускаем Taiko Web…';
+let lastStatusPayload = {
+  message: lastStatusMessage,
+  port: currentPort,
+  songsPath: selectedSongsPath,
+  errorMessage: null,
+};
 
-log.transports.file.level = 'info';
-log.info('Starting Taiko Web Desktop');
-
-if (isWindows) {
-  app.setAppUserModelId(APP_ID);
-}
-
-if (!app.requestSingleInstanceLock()) {
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
   app.quit();
 }
 
@@ -40,552 +45,55 @@ app.on('second-instance', () => {
   }
 });
 
-backendRoot = resolveBackendRoot();
-songsDir = ensureSongsDirectory(backendRoot);
-log.info('Backend root resolved to', backendRoot);
-log.info('Songs directory configured at', songsDir);
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_ID);
+}
 
-ipcMain.handle('open-songs-folder', async () => openSongsFolder());
-ipcMain.handle('toggle-fullscreen', async () => toggleFullscreen());
-ipcMain.handle('graceful-quit', async () => {
-  await initiateShutdown();
+ipcMain.handle('desktop:quit', async () => {
+  quitting = true;
+  await stopBackend();
   app.quit();
-  return true;
 });
 
-function ensureDirectoryExists(targetPath) {
-  if (!fs.existsSync(targetPath)) {
-    fs.mkdirSync(targetPath, { recursive: true });
-  }
-  return targetPath;
-}
-
-function resolveBackendRoot() {
-  const exeName = isWindows ? 'taiko-web-backend.exe' : 'taiko-web-backend';
-  const candidates = [];
-  if (isDev) {
-    candidates.push(path.resolve(__dirname, '..', '..', 'dist', 'backend', 'taiko-web-backend'));
-    candidates.push(path.resolve(__dirname, '..', 'dist', 'backend', 'taiko-web-backend'));
-  } else {
-    const installRoot = resolveInstallRoot();
-    candidates.push(path.join(installRoot, 'resources', 'app', 'backend'));
-    candidates.push(path.join(installRoot, 'resources', 'backend'));
-    candidates.push(path.join(installRoot, 'backend'));
-  }
-  for (const candidate of candidates) {
-    const binaryCandidate = path.join(candidate, exeName);
-    if (fs.existsSync(binaryCandidate)) {
-      return candidate;
-    }
-  }
-  return candidates[0];
-}
-
-function ensureSongsDirectory(root) {
-  const target = path.join(root, 'songs');
-  return ensureDirectoryExists(target);
-}
-
-function resolveInstallRoot() {
-  if (isDev) {
-    return path.resolve(__dirname, '..', '..');
-  }
-  if (process.platform === 'darwin') {
-    return path.resolve(process.execPath, '..', '..');
-  }
-  return path.dirname(process.execPath);
-}
-
-function resolveAssetPath(...segments) {
-  if (!isDev && process.platform === 'darwin') {
-    return path.join(resolveInstallRoot(), 'Resources', 'assets', 'launcher', ...segments);
-  }
-  return path.join(resolveInstallRoot(), 'assets', 'launcher', ...segments);
-}
-
-function resolveLauncherIcon() {
-  const candidate = resolveAssetPath('app.ico');
-  if (fs.existsSync(candidate)) {
-    return candidate;
-  }
-  log.warn('Launcher icon not found at', candidate);
-  return null;
-}
-
-function openSongsFolder() {
-  log.info('Opening songs folder at', songsDir);
-  return shell.openPath(songsDir);
-}
-
-function toggleFullscreen() {
-  const focused = BrowserWindow.getFocusedWindow();
-  if (focused) {
-    const next = !focused.isFullScreen();
-    focused.setFullScreen(next);
-    return next;
-  }
-  return false;
-}
-
-async function quitAndExit() {
-  await initiateShutdown();
-  app.quit();
-}
-
-function createMenu() {
-  const template = [];
-  if (process.platform === 'darwin') {
-    template.push({
-      label: app.name,
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideothers' },
-        { role: 'unhide' },
-        { type: 'separator' },
-        {
-          label: 'Quit',
-          accelerator: 'Cmd+Q',
-          click: () => {
-            quitAndExit().catch((error) => log.error('Failed to quit application', error));
-          },
-        },
-      ],
-    });
-  }
-
-  template.push({
-    label: 'File',
-    submenu: [
-      {
-        label: 'Open Songs Folder',
-        accelerator: 'CmdOrCtrl+O',
-        click: () => openSongsFolder(),
-      },
-      { type: 'separator' },
-      {
-        label: 'Exit',
-        accelerator: process.platform === 'darwin' ? 'Cmd+Q' : 'Alt+F4',
-        click: () => {
-          quitAndExit().catch((error) => log.error('Failed to quit application', error));
-        },
-      },
-    ],
-  });
-
-  const viewSubmenu = [
-    {
-      label: 'Toggle Fullscreen',
-      accelerator: process.platform === 'darwin' ? 'Ctrl+Cmd+F' : 'F11',
-      click: () => toggleFullscreen(),
-    },
-  ];
-
-  if (isDev) {
-    viewSubmenu.push({
-      label: 'Toggle Developer Tools',
-      accelerator: 'CmdOrCtrl+Shift+I',
-      click: () => {
-        const focused = BrowserWindow.getFocusedWindow();
-        if (focused) {
-          focused.webContents.toggleDevTools();
-        }
-      },
-    });
-  }
-
-  template.push({ label: 'View', submenu: viewSubmenu });
-
-  if (!isDev) {
-    template.push({ label: 'Help', submenu: [{ role: 'toggleDevTools', visible: false }] });
-  }
-
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
-}
-
-function createWindow() {
-  if (!backendUrl) {
-    throw new Error('Cannot create window before backend URL is defined');
-  }
-  const targetUrl = `${normalizeBaseUrl(backendUrl)}/`;
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    log.info('Reloading UI from', targetUrl);
-    mainWindow.loadURL(targetUrl);
-    return mainWindow;
-  }
-
-  const preloadPath = path.join(__dirname, 'preload.js');
-  const windowIcon = resolveLauncherIcon();
-
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 720,
-    useContentSize: true,
-    show: false,
-    backgroundColor: '#000000',
-    icon: windowIcon || undefined,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      preload: preloadPath,
-    },
-  });
-
-  createMenu();
-
-  log.info('Loading UI from', targetUrl);
-  mainWindow.loadURL(targetUrl);
-
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-    }
-  });
-
-  mainWindow.on('close', (event) => {
-    if (isShuttingDown) {
-      return;
-    }
-    event.preventDefault();
-    quitAndExit().catch((error) => log.error('Failed to quit application', error));
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  return mainWindow;
-}
-
-async function isPortAvailable(port) {
-  return new Promise((resolve) => {
-    const server = http.createServer();
-    const cleanUp = () => {
-      try {
-        server.close();
-      } catch (error) {
-        log.warn('Port check cleanup error', error.message);
-      }
-    };
-    server.once('error', () => {
-      cleanUp();
-      resolve(false);
-    });
-    server.listen(port, '127.0.0.1', () => {
-      cleanUp();
-      resolve(true);
-    });
-    server.unref();
-  });
-}
-
-async function allocateBackendPort() {
-  const desired = BACKEND_PORT;
-  const envPort = process.env.PORT ? Number(process.env.PORT) : null;
-  if (envPort && envPort !== desired) {
-    log.warn(`Ignoring PORT=${envPort}; desktop build uses fixed port ${desired}`);
-  }
-  const available = await isPortAvailable(desired);
-  if (!available) {
-    throw new Error(`Backend port ${desired} is unavailable. Is another instance running?`);
-  }
-  return desired;
-}
-
-function resolveBackendBinary() {
-  const exeName = isWindows ? 'taiko-web-backend.exe' : 'taiko-web-backend';
-  const root = backendRoot || resolveBackendRoot();
-  return path.join(root, exeName);
-}
-
-function spawnBackend(port) {
-  backendRoot = backendRoot || resolveBackendRoot();
-  songsDir = ensureSongsDirectory(backendRoot);
-  const backendPath = resolveBackendBinary();
-  if (!fs.existsSync(backendPath)) {
-    throw new Error(`Backend binary not found at ${backendPath}`);
-  }
-  log.info('Spawning backend at', backendPath, 'on port', port);
-  const chosenPort = port;
-  const env = {
-    ...process.env,
-    RUN_PROFILE: 'desktop',
-    PORT: String(chosenPort),
-  };
-  const child = spawn(backendPath, [], {
-    env,
-    cwd: backendRoot,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-    windowsHide: true,
-  });
-  if (child.stdout) {
-    child.stdout.setEncoding('utf-8');
-    child.stdout.on('data', (chunk) => {
-      chunk
-        .toString()
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .forEach((line) => log.info('[backend]', line));
-    });
-  }
-  if (child.stderr) {
-    child.stderr.setEncoding('utf-8');
-    child.stderr.on('data', (chunk) => {
-      chunk
-        .toString()
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .forEach((line) => log.error('[backend]', line));
-    });
-  }
-  child.once('error', (error) => {
-    log.error('Backend process error', error);
-    if (!isShuttingDown) {
-      handleBackendFailure('Backend process failed to launch.');
-    }
-  });
-  child.once('exit', (code, signal) => {
-    log.warn('Backend exited', { code, signal });
-    if (backendProcess === child) {
-      backendProcess = null;
-    }
-    if (isShuttingDown) {
-      return;
-    }
-    backendReady = false;
-    if (app.isReady()) {
-      handleBackendFailure('Backend process exited unexpectedly.');
-    }
-  });
-  backendProcess = child;
-  return child;
-}
-
-function httpRequest(method, url, timeout = 1000, allowedStatuses = []) {
-  return new Promise((resolve, reject) => {
-    const request = http.request(url, { method, timeout }, (response) => {
-      const statusCode = response.statusCode ?? 0;
-      const acceptable =
-        (statusCode >= 200 && statusCode < 300) || allowedStatuses.includes(statusCode);
-      if (acceptable) {
-        response.resume();
-        resolve({ statusCode });
-      } else {
-        const error = new Error(`Unexpected status: ${statusCode}`);
-        error.statusCode = statusCode;
-        reject(error);
-      }
-    });
-    request.on('timeout', () => {
-      const timeoutError = new Error('Request timed out');
-      timeoutError.code = 'ETIMEDOUT';
-      request.destroy(timeoutError);
-    });
-    request.on('error', reject);
-    request.end();
-  });
-}
-
-function normalizeBaseUrl(url) {
-  return url.replace(/\/+$/, '');
-}
-
-async function waitForHealthz(url) {
-  const timeout = 45000;
-  const startedAt = Date.now();
-  let delay = 200;
-  const baseUrl = normalizeBaseUrl(url);
-  while (!isShuttingDown && Date.now() - startedAt < timeout) {
-    try {
-      await httpRequest('GET', `${baseUrl}/healthz`, 1500);
-      log.info('Backend is healthy at', baseUrl);
-      backendReady = true;
-      return true;
-    } catch (error) {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      delay = Math.min(delay * 2, 5000);
-    }
-  }
-  return false;
-}
-
-async function initiateShutdown() {
-  if (isShuttingDown) {
-    return;
-  }
-  isShuttingDown = true;
-  backendReady = false;
-  log.info('Initiating graceful shutdown');
-
-  let shutdownStatus = null;
-  if (!process.env.ELECTRON_BACKEND_URL && backendUrl) {
-    try {
-      const response = await httpRequest(
-        'POST',
-        `${normalizeBaseUrl(backendUrl)}/admin/shutdown`,
-        1500,
-        [404],
-      );
-      shutdownStatus = response.statusCode;
-      if (shutdownStatus === 404) {
-        log.info('Backend shutdown endpoint unavailable (404); will terminate process manually.');
-      } else {
-        log.info('Requested backend shutdown via HTTP');
-      }
-    } catch (error) {
-      if (error && error.statusCode === 404) {
-        shutdownStatus = 404;
-        log.info('Backend shutdown endpoint returned 404; terminating manually.');
-      } else if (error && error.code === 'ETIMEDOUT') {
-        log.warn('Backend shutdown request timed out; forcing termination.');
-      } else {
-        log.warn('Failed to request backend shutdown', error ? error.message : error);
-      }
-    }
-  }
-
-  if (backendProcess && backendProcess.pid) {
-    await new Promise((resolve) => {
-      let settled = false;
-      const cleanup = () => {
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-
-      const shutdownTimeoutMs = 1500;
-      let timer = null;
-      const forceTerminate = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        if (backendProcess && backendProcess.pid) {
-          log.warn('Forcing backend termination');
-          treeKill(backendProcess.pid, 'SIGKILL', cleanup);
-        } else {
-          cleanup();
-        }
-      };
-
-      timer = setTimeout(forceTerminate, shutdownTimeoutMs);
-
-      backendProcess.once('exit', () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        cleanup();
-      });
-
-      if (shutdownStatus === 404) {
-        forceTerminate();
-        return;
-      }
-
-      try {
-        if (isWindows) {
-          treeKill(backendProcess.pid, 'SIGTERM', (error) => {
-            if (error) {
-              log.warn('Error sending SIGTERM to backend', error.message);
-            }
-          });
-        } else {
-          backendProcess.kill('SIGTERM');
-        }
-      } catch (error) {
-        log.warn('Error sending SIGTERM to backend', error.message);
-        forceTerminate();
-      }
-    });
-  }
-  backendProcess = null;
-}
-
-async function handleBackendFailure(message) {
-  if (isShuttingDown || failureDialogOpen) {
-    return;
-  }
-  failureDialogOpen = true;
-  const result = await dialog.showMessageBox({
-    type: 'error',
-    buttons: ['Retry', 'Quit'],
-    defaultId: 0,
-    cancelId: 1,
-    title: 'Taiko Web Desktop',
-    message,
-    detail: 'Would you like to retry starting the backend or quit the application?',
-  });
-  failureDialogOpen = false;
-  if (result.response === 0) {
-    startBackendFlow();
-  } else {
-    await initiateShutdown();
-    app.quit();
-  }
-}
-
-async function startBackendFlow() {
-  if (isShuttingDown) {
-    return;
-  }
-
-  backendReady = false;
-
+ipcMain.handle('desktop:chooseSongsDir', async () => {
   try {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.stop();
-      mainWindow.hide();
+    const info = ensureDataDirectory();
+    emitStatus();
+    const window = createMainWindow();
+    const result = await dialog.showOpenDialog(window, {
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { canceled: true };
     }
-
-    if (process.env.ELECTRON_BACKEND_URL) {
-      backendUrl = normalizeBaseUrl(process.env.ELECTRON_BACKEND_URL);
-      log.info('Using external backend at', backendUrl);
-      const healthy = await waitForHealthz(backendUrl);
-      if (!healthy) {
-        await handleBackendFailure('Failed to reach external backend.');
-        return;
-      }
-      createWindow();
-      return;
+    const selectedPath = result.filePaths[0];
+    const appliedPath = applySongsDirectory(selectedPath, info);
+    updateStatus(`Папка песен: ${appliedPath}`);
+    if (backendReady && backendUrl) {
+      await runSongsScan();
     }
-
-    const port = await allocateBackendPort();
-    backendUrl = normalizeBaseUrl(`http://127.0.0.1:${port}`);
-    spawnBackend(port);
-    const healthy = await waitForHealthz(backendUrl);
-    if (!healthy) {
-      log.error('Backend health check failed');
-      if (backendProcess && backendProcess.pid) {
-        treeKill(backendProcess.pid, 'SIGKILL');
-      }
-      backendProcess = null;
-      await handleBackendFailure('Backend did not become ready in time.');
-      return;
-    }
-    createWindow();
+    return { canceled: false, path: appliedPath };
   } catch (error) {
-    log.error('Failed to start backend flow', error);
-    await handleBackendFailure('Failed to start the backend process.');
+    const message = error instanceof Error ? error.message : String(error);
+    updateStatus('Не удалось обновить папку песен.', { errorMessage: message });
+    return { canceled: false, error: message };
   }
-}
+});
 
 app.whenReady().then(() => {
+  createMainWindow();
   startBackendFlow();
 });
 
 app.on('before-quit', (event) => {
-  if (!isShuttingDown) {
-    event.preventDefault();
-    quitAndExit().catch((error) => log.error('Failed to quit application', error));
+  if (quitting) {
+    return;
   }
+  event.preventDefault();
+  quitting = true;
+  stopBackend().finally(() => {
+    app.exit();
+  });
 });
 
 app.on('window-all-closed', () => {
@@ -595,16 +103,595 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (mainWindow === null && backendReady) {
-    createWindow();
+  if (mainWindow === null) {
+    createMainWindow();
+    if (!backendReady && !starting) {
+      startBackendFlow();
+    }
   }
 });
 
-['SIGINT', 'SIGTERM', 'SIGHUP'].forEach((signal) => {
-  process.on(signal, async () => {
-    log.info(`Received ${signal}, shutting down.`);
-    await initiateShutdown();
-    process.exit(0);
-  });
+process.on('exit', () => {
+  quitting = true;
+  if (backendProcess) {
+    try {
+      treeKill(backendProcess.pid);
+    } catch (error) {
+      // noop
+    }
+  }
 });
+
+function createMainWindow() {
+  if (mainWindow) {
+    return mainWindow;
+  }
+
+  const window = new BrowserWindow({
+    width: 1280,
+    height: 720,
+    show: false,
+    useContentSize: true,
+    backgroundColor: '#000000',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  window.once('ready-to-show', () => {
+    window.show();
+  });
+
+  window.webContents.once('did-finish-load', () => {
+    if (lastStatusPayload) {
+      window.webContents.send('desktop:status', lastStatusPayload);
+    }
+  });
+
+  window.on('closed', () => {
+    mainWindow = null;
+  });
+
+  window.loadFile(path.join(__dirname, 'renderer', 'splash.html')).catch(() => {
+    // window load failures handled later during bootstrap
+  });
+
+  mainWindow = window;
+  emitStatus();
+  return window;
+}
+
+async function startBackendFlow() {
+  if (starting) {
+    return;
+  }
+  starting = true;
+
+  try {
+    backendReady = false;
+    backendUrl = null;
+    currentPort = getEnvPort();
+    songsScanPromise = null;
+
+    updateStatus('Подготавливаем среду…');
+    const backendExecutable = resolveBackendExecutable();
+    const backendWorkingDir = path.dirname(backendExecutable);
+    ensurePathExists(backendWorkingDir);
+
+    const info = ensureDataDirectory();
+    emitStatus();
+
+    updateStatus('Определяем порт…');
+    const port = await resolvePort();
+    currentPort = port;
+    emitStatus();
+    backendUrl = `http://127.0.0.1:${port}`;
+
+    updateStatus('Запускаем сервер…');
+    backendProcess = spawnBackend(backendExecutable, backendWorkingDir, info.dataDir, port);
+
+    updateStatus('Ожидаем запуск сервера…');
+    await waitForHealthz(`${backendUrl}/healthz`, HEALTH_TIMEOUT_MS);
+
+    await runSongsScan();
+
+    backendReady = true;
+    const window = createMainWindow();
+    await window.loadURL(`${backendUrl}/`);
+  } catch (error) {
+    backendReady = false;
+    await stopBackend();
+    await showStartupError(error);
+  } finally {
+    starting = false;
+  }
+}
+
+function resolveBackendExecutable() {
+  const exeName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+  if (process.env.ELECTRON_DEV === '1' || !app.isPackaged) {
+    const candidate = path.resolve(__dirname, '..', 'dist', 'backend', 'taiko-web-backend', exeName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    throw new Error(`Backend executable not found at ${candidate}`);
+  }
+
+  const packaged = path.join(process.resourcesPath, 'backend', exeName);
+  if (fs.existsSync(packaged)) {
+    return packaged;
+  }
+  throw new Error(`Backend executable not found at ${packaged}`);
+}
+
+function ensurePathExists(targetPath) {
+  fs.mkdirSync(targetPath, { recursive: true });
+}
+
+function ensureDataDirectory() {
+  const userRoot = app.getPath('userData');
+  const dataDir = path.join(userRoot, 'taiko-web-data');
+  fs.mkdirSync(dataDir, { recursive: true });
+
+  const songsDir = path.join(dataDir, 'songs');
+  try {
+    if (!fs.existsSync(songsDir)) {
+      fs.mkdirSync(songsDir, { recursive: true });
+    }
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  dataDirPath = dataDir;
+  songsLinkPath = songsDir;
+  selectedSongsPath = resolveSongsTarget(songsDir);
+
+  try {
+    if (!fs.existsSync(selectedSongsPath)) {
+      fs.mkdirSync(selectedSongsPath, { recursive: true });
+    }
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  return {
+    dataDir,
+    songsLink: songsDir,
+    songsTarget: selectedSongsPath,
+  };
+}
+
+async function resolvePort() {
+  const envPort = getEnvPort();
+  if (envPort) {
+    return envPort;
+  }
+  const preferred = DEFAULT_PORT;
+  if (await checkPortAvailability(preferred)) {
+    return preferred;
+  }
+  return findAvailablePort(20_000, 40_000);
+}
+
+function spawnBackend(executable, workingDir, dataDir, port) {
+  const env = {
+    ...process.env,
+    RUN_PROFILE: 'desktop',
+    PORT: String(port),
+    DATA_DIR: dataDir,
+  };
+
+  const args = ['--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir];
+  const child = spawn(executable, args, {
+    cwd: workingDir,
+    windowsHide: true,
+    stdio: 'ignore',
+    env,
+  });
+
+  child.unref();
+
+  child.once('exit', (code, signal) => {
+    if (quitting) {
+      return;
+    }
+    backendProcess = null;
+    if (!backendReady) {
+      showStartupError(new Error('Бэкенд завершился до запуска.')).catch(() => {
+        app.quit();
+      });
+    } else {
+      showFatalBackendExit(code, signal);
+    }
+  });
+
+  child.once('error', (error) => {
+    if (quitting) {
+      return;
+    }
+    backendProcess = null;
+    showStartupError(error).catch(() => {
+      app.quit();
+    });
+  });
+
+  return child;
+}
+
+async function waitForHealthz(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const payload = await fetchJson(url);
+      if (payload && payload.status === 'ok' && payload.profile === 'desktop') {
+        const dbPath = payload.db_path;
+        if (typeof dbPath === 'string') {
+          return payload;
+        }
+      }
+    } catch (error) {
+      // retry until timeout
+    }
+    await delay(500);
+  }
+  throw new Error('Не удалось дождаться готовности бэкенда.');
+}
+
+async function waitForSongs(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const payload = await fetchJson(url);
+      return extractSongCount(payload);
+    } catch (error) {
+      lastError = error;
+      await delay(500);
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return 0;
+}
+
+function extractSongCount(payload) {
+  if (!payload) {
+    return 0;
+  }
+  if (Array.isArray(payload)) {
+    return payload.length;
+  }
+  if (payload.items && Array.isArray(payload.items)) {
+    return payload.items.length;
+  }
+  return 0;
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const request = lib.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        timeout: 5_000,
+      },
+      (response) => {
+        if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+          const chunks = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => {
+            try {
+              const body = Buffer.concat(chunks).toString('utf-8');
+              resolve(JSON.parse(body));
+            } catch (error) {
+              reject(error);
+            }
+          });
+        } else {
+          reject(new Error(`Unexpected status ${response.statusCode}`));
+        }
+      }
+    );
+
+    request.on('timeout', () => {
+      request.destroy(new Error('Request timeout'));
+    });
+
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function updateStatus(message, extra = {}) {
+  lastStatusMessage = message;
+  emitStatus(extra);
+}
+
+function emitStatus(extra = {}) {
+  const payload = {
+    message: lastStatusMessage,
+    port: currentPort,
+    songsPath: getCurrentSongsPath(),
+    errorMessage: null,
+    ...extra,
+  };
+  lastStatusPayload = payload;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:status', payload);
+  }
+}
+
+function getCurrentSongsPath() {
+  if (selectedSongsPath) {
+    return selectedSongsPath;
+  }
+  if (songsLinkPath) {
+    return resolveSongsTarget(songsLinkPath);
+  }
+  return null;
+}
+
+function resolveSongsTarget(linkPath) {
+  if (!linkPath) {
+    return null;
+  }
+  try {
+    const stats = fs.lstatSync(linkPath);
+    if (stats.isSymbolicLink()) {
+      const rawTarget = fs.readlinkSync(linkPath);
+      if (path.isAbsolute(rawTarget)) {
+        return path.normalize(rawTarget);
+      }
+      return path.normalize(path.resolve(path.dirname(linkPath), rawTarget));
+    }
+    return path.normalize(linkPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return path.normalize(linkPath);
+    }
+    throw error;
+  }
+}
+
+function applySongsDirectory(targetPath, info) {
+  const linkPath = (info && info.songsLink) || songsLinkPath;
+  const dataDir = (info && info.dataDir) || dataDirPath;
+  if (!linkPath) {
+    throw new Error('Путь к каталогу песен недоступен.');
+  }
+  if (!targetPath) {
+    throw new Error('Не выбран каталог с песнями.');
+  }
+
+  const resolvedTarget = path.normalize(path.resolve(targetPath));
+  fs.mkdirSync(resolvedTarget, { recursive: true });
+
+  if (path.normalize(path.resolve(linkPath)) === resolvedTarget) {
+    selectedSongsPath = resolvedTarget;
+    return resolvedTarget;
+  }
+
+  try {
+    const stats = fs.lstatSync(linkPath);
+    if (stats.isSymbolicLink()) {
+      fs.unlinkSync(linkPath);
+    } else if (stats.isDirectory()) {
+      const backupName = `songs-backup-${Date.now()}`;
+      const backupPath = path.join(dataDir ?? path.dirname(linkPath), backupName);
+      fs.renameSync(linkPath, backupPath);
+    } else {
+      fs.unlinkSync(linkPath);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  fs.symlinkSync(resolvedTarget, linkPath, linkType);
+
+  songsLinkPath = linkPath;
+  selectedSongsPath = resolvedTarget;
+
+  return resolvedTarget;
+}
+
+function runSongsScan() {
+  if (!backendUrl) {
+    return Promise.resolve(0);
+  }
+  if (songsScanPromise) {
+    return songsScanPromise;
+  }
+
+  songsScanPromise = (async () => {
+    updateStatus('Сканируем песни…');
+    try {
+      const count = await waitForSongs(`${backendUrl}/api/songs`, SONGS_TIMEOUT_MS);
+      if (count > 0) {
+        updateStatus(`Найдено песен: ${count}`);
+      } else {
+        updateStatus('Песни будут доступны после сканирования…');
+      }
+      return count;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateStatus('Не удалось обновить список песен.', { errorMessage: message });
+      return 0;
+    } finally {
+      songsScanPromise = null;
+    }
+  })();
+
+  return songsScanPromise;
+}
+
+function getEnvPort() {
+  const sources = [process.env.PORT, process.env.APP_PORT];
+  for (const source of sources) {
+    if (source === undefined || source === null) {
+      continue;
+    }
+    const value = Number.parseInt(String(source), 10);
+    if (Number.isInteger(value) && value > 0 && value < 65_536) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function checkPortAvailability(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+
+    const cleanup = () => {
+      server.removeAllListeners('error');
+      server.removeAllListeners('listening');
+    };
+
+    server.once('error', () => {
+      cleanup();
+      resolve(false);
+    });
+
+    server.once('listening', () => {
+      server.close(() => {
+        cleanup();
+        resolve(true);
+      });
+    });
+
+    try {
+      server.listen(port, '127.0.0.1');
+    } catch (error) {
+      cleanup();
+      resolve(false);
+    }
+  });
+}
+
+async function findAvailablePort(min, max) {
+  const attempts = 30;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const candidate = min + Math.floor(Math.random() * (max - min + 1));
+    if (await checkPortAvailability(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('Не удалось подобрать свободный порт для запуска.');
+}
+
+async function showStartupError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const window = createMainWindow();
+  const result = await dialog.showMessageBox(window, {
+    type: 'error',
+    title: 'Taiko Web',
+    message: 'Не удалось запустить сервер.',
+    detail: message,
+    buttons: ['Повторить', 'Выход'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+
+  if (result.response === 0) {
+    startBackendFlow();
+  } else {
+    quitting = true;
+    await stopBackend();
+    app.quit();
+  }
+}
+
+function showFatalBackendExit(code, signal) {
+  const message = `Бэкенд завершился (${signal ?? code ?? 'unknown'}). Приложение будет закрыто.`;
+  const window = createMainWindow();
+  dialog
+    .showMessageBox(window, {
+      type: 'error',
+      title: 'Taiko Web',
+      message,
+      buttons: ['OK'],
+    })
+    .finally(() => {
+      quitting = true;
+      stopBackend().finally(() => {
+        app.quit();
+      });
+    });
+}
+
+function stopBackend() {
+  if (!backendProcess) {
+    return Promise.resolve();
+  }
+
+  const child = backendProcess;
+  backendProcess = null;
+  backendReady = false;
+  backendUrl = null;
+  emitStatus();
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      resolve();
+    };
+
+    const onExit = () => {
+      child.removeListener('exit', onExit);
+      cleanup();
+    };
+
+    child.once('exit', onExit);
+
+    try {
+      if (process.platform === 'win32') {
+        treeKill(child.pid, 'SIGTERM', () => {
+          setTimeout(() => {
+            try {
+              treeKill(child.pid, 'SIGKILL');
+            } catch (error) {
+              // ignore
+            }
+          }, 2000);
+        });
+      } else {
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          try {
+            if (!child.killed) {
+              child.kill('SIGKILL');
+            }
+          } catch (error) {
+            // ignore
+          }
+        }, 2000);
+      }
+    } catch (error) {
+      cleanup();
+    }
+
+    setTimeout(() => {
+      child.removeListener('exit', onExit);
+      cleanup();
+    }, 5000);
+  });
+}
 
