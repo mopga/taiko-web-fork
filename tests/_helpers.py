@@ -37,6 +37,9 @@ class _StubRedis:
     def __init__(self, *args, **kwargs):  # pragma: no cover - smoke shim
         pass
 
+    def ping(self):  # pragma: no cover - smoke shim
+        return True
+
 
 class _StubCache:
     def __init__(self, *args, **kwargs):  # pragma: no cover - smoke shim

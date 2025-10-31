@@ -11,7 +11,7 @@ def test_resolve_catalog_source_desktop_without_dsn():
     config_module = SimpleNamespace(MONGO={})
     with mock.patch.dict(os.environ, {}, clear=True):
         result = taiko_app._resolve_catalog_source(run_profile='desktop', config_module=config_module)
-    assert result == 'filesystem'
+    assert result == 'sqlite'
 
 
 def test_resolve_catalog_source_respects_env_override():

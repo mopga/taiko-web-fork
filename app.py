@@ -1069,6 +1069,8 @@ def _normalize_catalog_source_token(value: object) -> Optional[str]:
         "fs": "filesystem",
         "file": "filesystem",
         "file_system": "filesystem",
+        "sqlite": "sqlite",
+        "sql": "sqlite",
     }
     return mapping.get(token)
 
@@ -1135,9 +1137,7 @@ def _resolve_catalog_source(*, run_profile: str, config_module: object) -> str:
     if legacy_config is not None:
         return "mongo" if bool(legacy_config) else "filesystem"
     if run_profile == "desktop":
-        if _has_valid_mongo_dsn(config_module=config_module):
-            return "mongo"
-        return "filesystem"
+        return "sqlite"
     return "mongo"
 
 
@@ -1227,7 +1227,11 @@ def create_app():
         static_folder=STATIC_DIR,
         static_url_path="/static",
     )
-    app_instance.logger.info("run_profile=%s", RUN_PROFILE)
+    app_instance.logger.info(
+        "run_profile=%s catalog_source=%s",
+        RUN_PROFILE,
+        CATALOG_SOURCE,
+    )
     try:
         frontend_dir_resolved = FRONTEND_DIR.resolve()
     except Exception:
@@ -1569,7 +1573,10 @@ def create_app():
 
     try:
         routes_snapshot = [getattr(rule, 'rule', str(rule)) for rule in app_instance.url_map.iter_rules()]
-        app_instance.logger.info('Routes: %s', routes_snapshot)
+        if RUN_PROFILE == 'desktop' and CATALOG_SOURCE == 'sqlite':
+            app_instance.logger.info('Routes: %s, api_songs=enabled(sqlite)', routes_snapshot)
+        else:
+            app_instance.logger.info('Routes: %s', routes_snapshot)
         app_instance.logger.info('Routes count: %s', len(routes_snapshot))
     except Exception as exc:  # pragma: no cover - diagnostic helper
         app_instance.logger.warning('Failed to list routes: %s', exc)
@@ -2408,7 +2415,7 @@ def _load_filesystem_catalog_entries(
     try:
         cursor = store.find({}, projection=projection)
     except Exception:
-        app.logger.exception('Failed to load filesystem songs catalog')
+        app.logger.exception('Failed to load sqlite songs catalog')
         return []
 
     docs: list[dict[str, Any]] = []
@@ -2478,7 +2485,7 @@ def _load_filesystem_catalog_entries(
             item = _serialize_catalog_entry(doc, manifest_entry=manifest_entry)
         except RuntimeError:
             app.logger.exception(
-                'Failed to serialize filesystem song entry id=%s',
+                'Failed to serialize sqlite song entry id=%s',
                 doc.get('song_id') or doc.get('scanner_stable_id') or '<unknown>',
             )
             raise
@@ -2533,7 +2540,8 @@ def route_api_songs():
     else:
         search_value = ''
 
-    if CATALOG_SOURCE == 'filesystem':
+    use_sqlite_catalog = RUN_PROFILE == 'desktop' or CATALOG_SOURCE in {'filesystem', 'sqlite'}
+    if use_sqlite_catalog:
         try:
             payload = _load_filesystem_catalog_entries(
                 limit=limit_value,
@@ -2542,12 +2550,12 @@ def route_api_songs():
                 search_value=search_value,
             )
         except RuntimeError:
-            app.logger.exception('filesystem catalog serialization error')
+            app.logger.exception('sqlite catalog serialization error')
             abort(500)
         except Exception as exc:
-            app.logger.warning('filesystem catalog error: %s', exc, exc_info=app.logger.isEnabledFor(logging.DEBUG))
+            app.logger.warning('sqlite catalog error: %s', exc, exc_info=app.logger.isEnabledFor(logging.DEBUG))
             payload = []
-    else:
+    elif CATALOG_SOURCE == 'mongo':
         unavailable = _desktop_mongo_unavailable_response(api=True)
         if unavailable is not None:
             return unavailable
@@ -2561,6 +2569,9 @@ def route_api_songs():
         except RuntimeError:
             app.logger.exception('mongo catalog serialization error')
             abort(500)
+    else:
+        app.logger.warning('Unknown catalog_source=%s for /api/songs', CATALOG_SOURCE)
+        payload = []
 
     normalized_payload: list[Any]
     if payload is None:
