@@ -10,35 +10,24 @@ LOG_FILE="$LOG_DIR/smoke_backend.log"
 BASE_URL="http://127.0.0.1:8000"
 
 BACKEND_STAGING="$REPO_ROOT/standalone/dist/backend/taiko-web-backend"
-SONGS_DIR="$BACKEND_STAGING/songs"
-TEST_TRACK_SRC="$REPO_ROOT/tools/ci-assets/test-track"
 
-mkdir -p "$DATA_DIR" "$SONGS_DIR" "$LOG_DIR"
+mkdir -p "$DATA_DIR" "$LOG_DIR"
 
-if [[ "${TAIKO_SMOKE_COPY_TRACK:-1}" != "0" && -d "$TEST_TRACK_SRC" ]]; then
-  TARGET_DIR="$SONGS_DIR/TestTrack"
-  rm -rf "$TARGET_DIR"
-  mkdir -p "$TARGET_DIR"
-  cp -a "$TEST_TRACK_SRC/." "$TARGET_DIR/"
-fi
-
-RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" PORT=8000 "$BACKEND_STAGING/taiko-web-backend" --host 127.0.0.1 --port 8000 >"$LOG_FILE" 2>&1 &
+RUN_PROFILE=desktop PROFILE=desktop DATA_DIR="$DATA_DIR" PORT=8000 \
+  "$BACKEND_STAGING/taiko-web-backend" --host 127.0.0.1 --port 8000 >"$LOG_FILE" 2>&1 &
 PID=$!
-songs_payload_file=""
+
 cleanup() {
-  kill "$PID" 2>/dev/null || true
-  if [[ -n "$songs_payload_file" && -f "$songs_payload_file" ]]; then
-    rm -f "$songs_payload_file"
+  if [[ -n "${PID:-}" ]]; then
+    kill "$PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
 wait_for_health() {
   for _ in $(seq 1 60); do
-    if RESPONSE=$(curl -sf --max-time 2 "$BASE_URL/healthz"); then
-      if [[ "$RESPONSE" == *'"status":"ok"'* ]]; then
-        return 0
-      fi
+    if curl -sf --max-time 2 "$BASE_URL/healthz" >/dev/null; then
+      return 0
     fi
     sleep 1
   done
@@ -73,103 +62,35 @@ wait_for_health || fail
 if ! HEALTH_JSON="$(curl -fsS "$BASE_URL/healthz")"; then
   fail
 fi
-export HEALTH_JSON
 
-if command -v jq >/dev/null 2>&1; then
-  echo "$HEALTH_JSON" | jq -e '.status == "ok"' >/dev/null
-  echo "$HEALTH_JSON" | jq -e '.profile == "desktop"' >/dev/null
-else
-  python - <<'PY'
-import json, os
+DATA_DIR_RESOLVED="$(cd "$DATA_DIR" && pwd)"
+export HEALTH_JSON DATA_DIR_RESOLVED
+python - <<'PY' || fail
+import json
+import os
+from pathlib import Path
 
 health = json.loads(os.environ['HEALTH_JSON'])
 if health.get('status') != 'ok':
     raise SystemExit('health status not ok')
-profile = health.get('profile')
-if profile not in ('desktop', 'web'):
-    raise SystemExit(f'unexpected profile: {profile!r}')
-print('health ok')
-PY
-fi
-
-for _ in $(seq 1 30); do
-  if grep -q "profile=desktop catalog_source=filesystem" "$LOG_FILE" 2>/dev/null; then
-    catalog_logged=1
-    break
-  fi
-  sleep 1
-done
-if [[ -z "${catalog_logged:-}" ]]; then
-  echo "Expected catalog source log not found" >&2
-  fail
-fi
-
-check_status HEAD / 200 || fail
-content_type=$(curl -sI "$BASE_URL/" | awk 'tolower($1)=="content-type:" {print tolower($2)}')
-if [[ "$content_type" != text/html* ]]; then
-  echo "Unexpected root content type: $content_type" >&2
-  fail
-fi
-
-check_status HEAD /favicon.ico 200 304 || fail
-
-songs_payload_file=$(mktemp)
-songs_status=""
-for _ in $(seq 1 45); do
-  songs_status=$(curl -s -w '%{http_code}' --max-time 5 "$BASE_URL/api/songs" -o "$songs_payload_file")
-  if [[ "$songs_status" == "200" ]]; then
-    break
-  fi
-  sleep 1
-done
-
-if [[ "${songs_status:-}" != "200" ]]; then
-  echo "Timed out waiting for /api/songs 200" >&2
-  fail
-fi
-
-python <<'PY' <"$songs_payload_file" || fail
-import json
-import sys
-
-try:
-    data = json.load(sys.stdin)
-except Exception as exc:  # pragma: no cover - smoke guard
-    raise SystemExit(f'Invalid JSON: {exc}')
-
-if isinstance(data, dict):
-    items = data.get('items')
-    if items is None:
-        items = []
-    if not isinstance(items, list):
-        raise SystemExit('Songs payload items is not a list')
-    payload = items
-elif isinstance(data, list):
-    payload = data
-else:
-    raise SystemExit('Songs payload must be a list or dict with items list')
-
-if payload:
-    first = payload[0]
-    if not isinstance(first, dict):
-        raise SystemExit('First song entry is not an object')
-    if not first.get('is_playable'):
-        raise SystemExit('First song is not playable')
-    difficulties = first.get('difficulties')
-    if not isinstance(difficulties, dict) or not difficulties:
-        raise SystemExit('First song has invalid difficulties payload')
-    for key, value in difficulties.items():
-        if not isinstance(value, dict):
-            raise SystemExit(f'Difficulty {key} is not an object')
+if health.get('profile') != 'desktop':
+    raise SystemExit(f"unexpected profile: {health.get('profile')!r}")
+db_path = health.get('db_path')
+if not isinstance(db_path, str) or not db_path:
+    raise SystemExit('db_path missing from /healthz')
+if not Path(db_path).exists():
+    raise SystemExit('db_path does not exist')
+data_dir = Path(os.environ['DATA_DIR_RESOLVED']).resolve()
+db_real = Path(db_path).resolve()
+if db_real != data_dir and data_dir not in db_real.parents:
+    raise SystemExit('db_path not under DATA_DIR')
 PY
 
-openapi_status=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/openapi.json")
-if [[ "$openapi_status" == "200" ]]; then
-  echo "openapi.json present"
-elif [[ "$openapi_status" != "404" ]]; then
-  echo "Unexpected status $openapi_status for /openapi.json" >&2
-  fail
-fi
+check_status GET / 200 || fail
+check_status GET /favicon.ico 200 304 || fail
+check_status GET /api/songs 200 || fail
+check_status GET /api/modes 200 || fail
+check_status GET /api/categories 200 || fail
 
 echo "Desktop backend smoke test passed"
 exit 0

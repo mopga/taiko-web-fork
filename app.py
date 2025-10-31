@@ -564,14 +564,6 @@ def _normalize_category_title(value: object) -> str:
     return ''
 
 
-def _normalize_category_slug(value: object) -> str:
-    if isinstance(value, str):
-        token = value.strip()
-        if token:
-            return token
-    return ''
-
-
 def _coerce_category_id(value: object) -> Optional[int]:
     if isinstance(value, bool):  # guard against True/False being treated as 1/0
         return None
@@ -781,69 +773,92 @@ def _normalize_categories_payload(categories: Iterable[object]) -> list[dict[str
     normalized: list[dict[str, object]] = []
 
     for raw_entry in iterator:
-        if raw_entry is None:
-            continue
         if not isinstance(raw_entry, Mapping):
             continue
 
         entry = dict(raw_entry)
+        metadata = entry.get('meta')
+        if isinstance(metadata, Mapping):
+            _merge_category_documents(entry, metadata)
+        entry.pop('meta', None)
 
         category_id = _coerce_category_id(entry.get('id'))
         if category_id is None:
             category_id = _coerce_category_id(entry.get('category_id'))
 
-        slug_value = _normalize_category_slug(entry.get('slug'))
-        if not slug_value and category_id is not None:
-            slug_value = str(category_id)
-        if not slug_value:
-            raw_identifier = entry.get('id')
-            if isinstance(raw_identifier, str):
-                slug_value = raw_identifier.strip()
-            elif raw_identifier is not None and category_id is None:
-                slug_value = str(raw_identifier).strip()
-        if not slug_value:
-            fallback = entry.get('title') or entry.get('name')
+        title_value = _normalize_category_title(
+            entry.get('title')
+            or entry.get('category')
+            or entry.get('name')
+        )
+        if not title_value:
+            fallback = entry.get('slug') or entry.get('scanner_stable_id') or entry.get('id')
             if isinstance(fallback, str):
-                slug_value = fallback.strip()
-        slug_value = slug_value or ''
-        if not slug_value:
+                token = fallback.strip()
+                if token:
+                    title_value = token
+        if not title_value:
             continue
 
-        title_value = _normalize_category_title(entry.get('title'))
-        if not title_value:
-            title_value = slug_value
-
         count_value = entry.get('count')
-        normalized_count = 0
-        if isinstance(count_value, bool):
-            normalized_count = int(count_value)
-        elif isinstance(count_value, int):
-            normalized_count = count_value
-        elif isinstance(count_value, str):
-            token = count_value.strip()
-            if token:
-                try:
-                    normalized_count = int(token)
-                except ValueError:
-                    normalized_count = 0
-        elif count_value is not None:
-            try:
-                normalized_count = int(count_value)
-            except (TypeError, ValueError):
-                normalized_count = 0
-
-        normalized_entry: dict[str, object] = dict(entry)
-        if category_id is not None:
-            normalized_entry['id'] = category_id
+        if count_value is None:
+            normalized_count = 0
         else:
-            normalized_entry.pop('id', None)
-        normalized_entry['slug'] = slug_value
-        normalized_entry['title'] = title_value
-        normalized_entry['count'] = normalized_count
+            normalized_count = _coerce_int(count_value, 0)
+        if normalized_count <= 0:
+            items_value = entry.get('items')
+            if isinstance(items_value, Sequence) and not isinstance(items_value, (str, bytes)):
+                normalized_count = sum(1 for item in items_value if item is not None)
+
+        aliases_value = entry.get('aliases')
+        if not isinstance(aliases_value, list):
+            aliases_value = []
+
+        title_lang_value = entry.get('title_lang') or entry.get('titleLang')
+        if not isinstance(title_lang_value, Mapping):
+            title_lang_value = {}
+
+        song_skin_value = entry.get('song_skin') or entry.get('songSkin')
+        if not isinstance(song_skin_value, Mapping):
+            song_skin_value = None
+
+        normalized_entry: dict[str, object] = {
+            'id': category_id,
+            'title': title_value,
+            'aliases': aliases_value,
+            'title_lang': title_lang_value,
+            'song_skin': song_skin_value,
+            'count': normalized_count,
+        }
 
         normalized.append(normalized_entry)
 
     return normalized
+
+
+def _load_categories_documents_for_profile() -> tuple[Optional[Response], list[dict[str, object]]]:
+    if RUN_PROFILE == 'desktop':
+        documents = list(_collect_desktop_categories())
+        return None, documents
+
+    unavailable = _desktop_mongo_unavailable_response(api=True)
+    if unavailable is not None:
+        return unavailable, []
+
+    projection = {'_id': False}
+    documents: list[dict[str, object]] = []
+    try:
+        try:
+            cursor = db.categories.find({}, projection)
+        except TypeError:
+            cursor = db.categories.find({}, {'_id': False})
+        for doc in cursor:
+            if isinstance(doc, Mapping):
+                documents.append(dict(doc))
+    except Exception:
+        documents = []
+
+    return None, documents
 
 
 def _load_manifest_meta() -> Optional[dict]:
@@ -2675,17 +2690,9 @@ def route_api_modes():
     if cached_payload and expires_at > now:
         return jsonify(cached_payload)
 
-    if RUN_PROFILE == 'desktop':
-        categories = _collect_desktop_categories()
-    else:
-        unavailable = _desktop_mongo_unavailable_response(api=True)
-        if unavailable is not None:
-            return unavailable
-        try:
-            categories_cursor = db.categories.find({}, {'_id': False})
-            categories = list(categories_cursor)
-        except Exception:
-            categories = []
+    error_response, categories = _load_categories_documents_for_profile()
+    if error_response is not None:
+        return error_response
 
     manifest = build_modes_manifest(categories, cache_ttl=DEFAULT_CACHE_TTL)
     ttl_value = manifest.get('cache_ttl', DEFAULT_CACHE_TTL)
@@ -2872,18 +2879,11 @@ def route_api_dan_chart():
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)
 def route_api_categories():
-    if RUN_PROFILE == 'desktop':
-        categories = _normalize_categories_payload(_collect_desktop_categories())
-        return jsonify(categories)
+    error_response, documents = _load_categories_documents_for_profile()
+    if error_response is not None:
+        return error_response
 
-    unavailable = _desktop_mongo_unavailable_response(api=True)
-    if unavailable is not None:
-        return unavailable
-    try:
-        raw_categories = db.categories.find({}, {'_id': False})
-    except Exception:
-        raw_categories = []
-    categories = _normalize_categories_payload(raw_categories)
+    categories = _normalize_categories_payload(documents)
     return jsonify(categories)
 
 
