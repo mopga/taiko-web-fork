@@ -564,6 +564,14 @@ def _normalize_category_title(value: object) -> str:
     return ''
 
 
+def _normalize_category_slug(value: object) -> str:
+    if isinstance(value, str):
+        token = value.strip()
+        if token:
+            return token
+    return ''
+
+
 def _coerce_category_id(value: object) -> Optional[int]:
     if isinstance(value, bool):  # guard against True/False being treated as 1/0
         return None
@@ -754,6 +762,88 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
     )
 
     return ordered
+
+
+def _normalize_categories_payload(categories: Iterable[object]) -> list[dict[str, object]]:
+    if categories is None:
+        return []
+
+    if isinstance(categories, Mapping):
+        source_iterable: Iterable[object] = categories.values()
+    else:
+        source_iterable = categories
+
+    try:
+        iterator = iter(source_iterable)
+    except TypeError:
+        return []
+
+    normalized: list[dict[str, object]] = []
+
+    for raw_entry in iterator:
+        if raw_entry is None:
+            continue
+        if not isinstance(raw_entry, Mapping):
+            continue
+
+        entry = dict(raw_entry)
+
+        category_id = _coerce_category_id(entry.get('id'))
+        if category_id is None:
+            category_id = _coerce_category_id(entry.get('category_id'))
+
+        slug_value = _normalize_category_slug(entry.get('slug'))
+        if not slug_value and category_id is not None:
+            slug_value = str(category_id)
+        if not slug_value:
+            raw_identifier = entry.get('id')
+            if isinstance(raw_identifier, str):
+                slug_value = raw_identifier.strip()
+            elif raw_identifier is not None and category_id is None:
+                slug_value = str(raw_identifier).strip()
+        if not slug_value:
+            fallback = entry.get('title') or entry.get('name')
+            if isinstance(fallback, str):
+                slug_value = fallback.strip()
+        slug_value = slug_value or ''
+        if not slug_value:
+            continue
+
+        title_value = _normalize_category_title(entry.get('title'))
+        if not title_value:
+            title_value = slug_value
+
+        count_value = entry.get('count')
+        normalized_count = 0
+        if isinstance(count_value, bool):
+            normalized_count = int(count_value)
+        elif isinstance(count_value, int):
+            normalized_count = count_value
+        elif isinstance(count_value, str):
+            token = count_value.strip()
+            if token:
+                try:
+                    normalized_count = int(token)
+                except ValueError:
+                    normalized_count = 0
+        elif count_value is not None:
+            try:
+                normalized_count = int(count_value)
+            except (TypeError, ValueError):
+                normalized_count = 0
+
+        normalized_entry: dict[str, object] = dict(entry)
+        if category_id is not None:
+            normalized_entry['id'] = category_id
+        else:
+            normalized_entry.pop('id', None)
+        normalized_entry['slug'] = slug_value
+        normalized_entry['title'] = title_value
+        normalized_entry['count'] = normalized_count
+
+        normalized.append(normalized_entry)
+
+    return normalized
 
 
 def _load_manifest_meta() -> Optional[dict]:
@@ -2783,13 +2873,17 @@ def route_api_dan_chart():
 @app.cache.cached(timeout=15)
 def route_api_categories():
     if RUN_PROFILE == 'desktop':
-        categories = list(_collect_desktop_categories())
+        categories = _normalize_categories_payload(_collect_desktop_categories())
         return jsonify(categories)
 
     unavailable = _desktop_mongo_unavailable_response(api=True)
     if unavailable is not None:
         return unavailable
-    categories = list(db.categories.find({}, {'_id': False}))
+    try:
+        raw_categories = db.categories.find({}, {'_id': False})
+    except Exception:
+        raw_categories = []
+    categories = _normalize_categories_payload(raw_categories)
     return jsonify(categories)
 
 
