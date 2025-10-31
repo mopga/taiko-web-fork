@@ -114,6 +114,7 @@ $startParams = @{
 
 $process = $null
 $resp = $null
+$categoriesRawBody = $null
 try {
   $process = Start-Process @startParams -ErrorAction Stop
 }
@@ -230,13 +231,15 @@ try {
   }
 
   $categoriesJson = $null
+  $categoriesRawBody = $null
   $deadline = (Get-Date).AddSeconds(30)
   do {
     try {
       $categoriesResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/categories" -TimeoutSec 5
       if ($categoriesResp.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
       try {
-        $categoriesJson = $categoriesResp.Content | ConvertFrom-Json -ErrorAction Stop
+        $categoriesRawBody = $categoriesResp.Content
+        $categoriesJson = $categoriesRawBody | ConvertFrom-Json -ErrorAction Stop
       } catch {
         $categoriesJson = $null
       }
@@ -249,17 +252,45 @@ try {
   if ($null -eq $categoriesJson) {
     throw "Failed to load /api/categories"
   }
-  $isArray = $categoriesJson -is [System.Array]
-  if (-not $isArray) {
-    $isEnumerable = $categoriesJson -is [System.Collections.IEnumerable]
-    $isObject = $categoriesJson -is [pscustomobject]
-    if ($isObject) {
-      $hasItems = $categoriesJson | Get-Member -Name items -ErrorAction SilentlyContinue
-      if ($null -eq $hasItems) {
-        throw "Unexpected /api/categories object payload"
+  $categoriesArray = $null
+  if ($categoriesJson -is [System.Array]) {
+    $categoriesArray = $categoriesJson
+  } elseif ($categoriesJson -is [pscustomobject]) {
+    $hasItems = $categoriesJson | Get-Member -Name items -ErrorAction SilentlyContinue
+    if ($null -ne $hasItems) {
+      $items = $categoriesJson.items
+      if ($null -eq $items) {
+        $categoriesArray = @()
+      } elseif ($items -is [System.Array]) {
+        $categoriesArray = $items
+      } elseif ($items -is [System.Collections.IEnumerable]) {
+        $categoriesArray = @($items)
+      } else {
+        $categoriesArray = @($items)
       }
-    } elseif (-not $isEnumerable) {
-      throw "Unexpected /api/categories payload type"
+    } else {
+      $values = $categoriesJson.psobject.Properties | ForEach-Object { $_.Value }
+      $categoriesArray = @($values)
+    }
+  } else {
+    throw "Unexpected /api/categories payload type"
+  }
+
+  if ($null -eq $categoriesArray) {
+    $categoriesArray = @()
+  }
+
+  foreach ($category in $categoriesArray) {
+    if ($null -eq $category) { continue }
+    if (-not ($category -is [pscustomobject])) {
+      throw "Unexpected /api/categories entry type"
+    }
+    $props = $category.PSObject.Properties.Name
+    if (-not ($props -contains 'title')) {
+      throw "Category missing title field"
+    }
+    if (-not ($props -contains 'id')) {
+      throw "Category missing id field"
     }
   }
 
@@ -276,6 +307,10 @@ catch {
   if ($null -ne $resp) {
     Write-Host "---- last /api/songs body ----"
     try { Write-Host ($resp.Content | Out-String) } catch {}
+  }
+  if ($null -ne $categoriesRawBody) {
+    Write-Host "---- last /api/categories raw body ----"
+    try { Write-Host ($categoriesRawBody | Out-String) } catch {}
   }
   if (Test-Path $stdoutLog) {
     Write-Host "===== smoke_stdout.log (tail) ====="
