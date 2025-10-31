@@ -24,6 +24,40 @@ function Normalize-Songs([string]$body) {
   return @()
 }
 
+function Normalize-JsonText([string]$text) {
+  if ($null -eq $text) { return "" }
+  $normalized = [string]$text
+  $normalized = $normalized -replace '^\uFEFF',''
+  $normalized = $normalized -replace '^\u0000+',''
+  $normalized = $normalized -replace '\u0000',''
+  return $normalized
+}
+
+function Get-JsonSnapshot([object]$value) {
+  try { return ($value | ConvertTo-Json -Depth 8 -Compress) } catch { return '<unserializable>' }
+}
+
+function Convert-CategoriesPayloadToArray([object]$payload) {
+  if ($null -eq $payload) { return @() }
+  if ($payload -is [System.Array]) { return @($payload) }
+  if ($payload -is [pscustomobject]) {
+    $hasItems = $payload | Get-Member -Name items -ErrorAction SilentlyContinue
+    if ($null -ne $hasItems) {
+      $items = $payload.items
+      if ($null -eq $items) { return @() }
+      if ($items -is [System.Array]) { return @($items) }
+      if ($items -is [System.Collections.IEnumerable] -and -not ($items -is [string])) { return @($items) }
+      return @($items)
+    }
+    $values = $payload.PSObject.Properties | ForEach-Object { $_.Value }
+    return @($values)
+  }
+  if ($payload -is [System.Collections.IEnumerable] -and -not ($payload -is [string])) { return @($payload) }
+  $typeName = $payload.GetType().FullName
+  $snapshot = Get-JsonSnapshot $payload
+  throw "Unexpected /api/categories payload type: type=$typeName json=$snapshot"
+}
+
 $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
@@ -231,66 +265,72 @@ try {
   }
 
   $categoriesJson = $null
+  $categoriesArray = @()
   $categoriesRawBody = $null
-  $deadline = (Get-Date).AddSeconds(30)
+  $deadline = (Get-Date).AddSeconds(60)
   do {
     try {
       $categoriesResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/categories" -TimeoutSec 5
       if ($categoriesResp.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
-      try {
-        $categoriesRawBody = $categoriesResp.Content
-        $categoriesJson = $categoriesRawBody | ConvertFrom-Json -ErrorAction Stop
-      } catch {
-        $categoriesJson = $null
+      $categoriesRawBody = $categoriesResp.Content
+      $body = Normalize-JsonText $categoriesRawBody
+      $body = $body.Trim()
+      if ([string]::IsNullOrWhiteSpace($body)) {
+        $categoriesJson = @()
+      } else {
+        try {
+          $categoriesJson = $body | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+          $categoriesJson = $null
+        }
       }
     } catch {
       $categoriesJson = $null
     }
-    if ($null -eq $categoriesJson) { Start-Sleep -Milliseconds 500 }
-  } while (($null -eq $categoriesJson) -and (Get-Date) -lt $deadline)
+    if ($null -eq $categoriesJson) {
+      $categoriesArray = @()
+      Start-Sleep -Milliseconds 500
+      continue
+    }
+    try {
+      $categoriesArray = Convert-CategoriesPayloadToArray $categoriesJson
+    } catch {
+      throw
+    }
+    $categoriesArray = @($categoriesArray | Where-Object { $null -ne $_ })
+    if ((Get-SeqCount $categoriesArray) -eq 0) { Start-Sleep -Milliseconds 500 }
+  } while ((Get-SeqCount $categoriesArray) -eq 0 -and (Get-Date) -lt $deadline)
 
   if ($null -eq $categoriesJson) {
     throw "Failed to load /api/categories"
   }
-  $categoriesArray = $null
-  if ($categoriesJson -is [System.Array]) {
-    $categoriesArray = $categoriesJson
-  } elseif ($categoriesJson -is [pscustomobject]) {
-    $hasItems = $categoriesJson | Get-Member -Name items -ErrorAction SilentlyContinue
-    if ($null -ne $hasItems) {
-      $items = $categoriesJson.items
-      if ($null -eq $items) {
-        $categoriesArray = @()
-      } elseif ($items -is [System.Array]) {
-        $categoriesArray = $items
-      } elseif ($items -is [System.Collections.IEnumerable]) {
-        $categoriesArray = @($items)
-      } else {
-        $categoriesArray = @($items)
-      }
-    } else {
-      $values = $categoriesJson.psobject.Properties | ForEach-Object { $_.Value }
-      $categoriesArray = @($values)
-    }
-  } else {
-    throw "Unexpected /api/categories payload type"
-  }
-
-  if ($null -eq $categoriesArray) {
-    $categoriesArray = @()
+  if ((Get-SeqCount $categoriesArray) -eq 0) {
+    throw "Empty /api/categories payload after wait"
   }
 
   foreach ($category in $categoriesArray) {
+    $categoryType = if ($null -eq $category) { 'null' } else { $category.GetType().FullName }
     if ($null -eq $category) { continue }
-    if (-not ($category -is [pscustomobject])) {
-      throw "Unexpected /api/categories entry type"
+    if (-not ($category -is [pscustomobject] -or $category -is [System.Collections.IDictionary])) {
+      $snapshot = Get-JsonSnapshot $category
+      throw "Unexpected /api/categories entry type: type=$categoryType json=$snapshot"
     }
-    $props = $category.PSObject.Properties.Name
-    if (-not ($props -contains 'title')) {
-      throw "Category missing title field"
+    $slug = $null
+    $title = $null
+    if ($category -is [System.Collections.IDictionary]) {
+      if ($category.Contains('slug')) { $slug = $category['slug'] }
+      if ($category.Contains('title')) { $title = $category['title'] }
+    } else {
+      $slug = $category.slug
+      $title = $category.title
     }
-    if (-not ($props -contains 'id')) {
-      throw "Category missing id field"
+    if ([string]::IsNullOrWhiteSpace([string]$slug)) {
+      $snapshot = Get-JsonSnapshot $category
+      throw "Category missing slug: type=$categoryType json=$snapshot"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$title)) {
+      $snapshot = Get-JsonSnapshot $category
+      throw "Category missing title: type=$categoryType json=$snapshot"
     }
   }
 
