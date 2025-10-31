@@ -219,6 +219,8 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
         [
             {
                 "song_id": "song-001",
+                "scanner_stable_id": "song-001",
+                "group_key": "group::song-001",
                 "title": "Tower Intro",
                 "category_id": 7,
                 "category": "Taiko Towers",
@@ -228,6 +230,8 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
             },
             {
                 "song_id": "song-002",
+                "scanner_stable_id": "song-002",
+                "group_key": "group::song-002",
                 "title": "Dan Challenge",
                 "category_id": 9,
                 "category": "Dan Dojo",
