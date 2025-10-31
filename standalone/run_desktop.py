@@ -178,11 +178,13 @@ def _restore_signals(previous: dict[int, object]) -> None:
 def _run_uvicorn(app, *, host: str, port: int) -> None:
     try:
         import uvicorn
-        from uvicorn.middleware.wsgi import WSGIMiddleware
     except ImportError as exc:  # pragma: no cover - runtime guard
         raise RuntimeError("uvicorn is required for desktop profile") from exc
 
-    asgi_app = WSGIMiddleware(app)
+    from standalone.asgi import create_desktop_asgi_app
+
+    static_root = Path(getattr(app, 'static_folder', '') or '.').resolve()
+    asgi_app = create_desktop_asgi_app(app, static_dir=static_root)
     config = uvicorn.Config(
         asgi_app,
         host=host,

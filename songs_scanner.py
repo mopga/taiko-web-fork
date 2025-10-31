@@ -186,6 +186,8 @@ def _apply_empty_summary_defaults(
         'manifest_checksum': '-',
         'manifest_entry_checksum': '-',
         'rehydrated': 0,
+        'recovered_titles_total': 0,
+        'single_node': False,
     }
     if reason and 'reason' not in summary:
         defaults['reason'] = reason
@@ -1652,6 +1654,122 @@ def md5_bytes(data: bytes) -> str:
 
 def md5_text(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _clean_title_candidate(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = _clean_metadata_value(value).strip()
+    if not cleaned:
+        return None
+    normalised = _normalise_space_runs(cleaned)
+    if not normalised:
+        return None
+    return normalised
+
+
+def _title_from_group_key(group_key: Optional[str]) -> Optional[str]:
+    if not isinstance(group_key, str) or not group_key.strip():
+        return None
+    parts = [part.strip() for part in group_key.split(":") if part.strip()]
+    if not parts:
+        return None
+    candidate: Optional[str] = None
+    if parts[0] == "missing" and len(parts) >= 3:
+        # ``missing`` keys end with a deterministic hash; prefer the segment
+        # preceding the hash which contains the best-effort title token.
+        candidate = parts[-2]
+    else:
+        candidate = parts[-1]
+    if not candidate:
+        return None
+    candidate = candidate.replace("_", " ").replace("-", " ")
+    candidate = _normalise_space_runs(candidate)
+    candidate = _clean_metadata_value(candidate)
+    candidate = _normalise_space_runs(candidate)
+    return candidate or None
+
+
+def _resolve_song_title(
+    document: Mapping[str, object],
+    records: Sequence["TjaImportRecord"],
+    group_key: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    def _iter_payload_candidates() -> Iterable[Tuple[str, Optional[str]]]:
+        title_value = _clean_title_candidate(document.get('title'))
+        if title_value:
+            yield title_value, 'payload.title'
+        for field in ('title_en', 'title_ru', 'title_ja', 'title_kana', 'titleJa'):
+            candidate = _clean_title_candidate(document.get(field))
+            if candidate:
+                yield candidate, f'payload.{field}'
+        titles_mapping = document.get('titles')
+        if isinstance(titles_mapping, Mapping):
+            for lang in ('en', 'ru', 'ja', 'kana'):
+                candidate = _clean_title_candidate(titles_mapping.get(lang))
+                if candidate:
+                    yield candidate, f'payload.titles.{lang}'
+        title_lang = document.get('title_lang')
+        if isinstance(title_lang, Mapping):
+            for lang, value in title_lang.items():
+                candidate = _clean_title_candidate(value)
+                if candidate:
+                    yield candidate, f'payload.title_lang.{lang}'
+        locale_mapping = document.get('locale')
+        if isinstance(locale_mapping, Mapping):
+            for lang, payload in locale_mapping.items():
+                if isinstance(payload, Mapping):
+                    candidate = _clean_title_candidate(payload.get('title'))
+                    if candidate:
+                        yield candidate, f'payload.locale.{lang}'
+        charts_payload = document.get('charts')
+        if isinstance(charts_payload, Sequence):
+            for chart in charts_payload:
+                if not isinstance(chart, Mapping):
+                    continue
+                candidate = _clean_title_candidate(chart.get('title'))
+                if candidate:
+                    yield candidate, 'chart.title'
+                meta = chart.get('meta')
+                if isinstance(meta, Mapping):
+                    candidate = _clean_title_candidate(meta.get('title'))
+                    if candidate:
+                        yield candidate, 'chart.meta.title'
+                chart_data = chart.get('chart_data')
+                if isinstance(chart_data, Mapping):
+                    candidate = _clean_title_candidate(chart_data.get('title'))
+                    if candidate:
+                        yield candidate, 'chart_data.title'
+                    meta_payload = chart_data.get('meta')
+                    if isinstance(meta_payload, Mapping):
+                        candidate = _clean_title_candidate(meta_payload.get('title'))
+                        if candidate:
+                            yield candidate, 'chart_data.meta.title'
+
+    def _iter_record_candidates() -> Iterable[Tuple[str, Optional[str]]]:
+        for record in records:
+            candidate = _clean_title_candidate(record.title)
+            if candidate:
+                yield candidate, 'record.title'
+            if record.title_ja:
+                candidate = _clean_title_candidate(record.title_ja)
+                if candidate:
+                    yield candidate, 'record.title_ja'
+            locale_doc = record.locale if isinstance(record.locale, Mapping) else {}
+            for lang, payload in locale_doc.items():
+                if isinstance(payload, Mapping):
+                    candidate = _clean_title_candidate(payload.get('title'))
+                    if candidate:
+                        yield candidate, f'record.locale.{lang}'
+
+    for candidate, source in _iter_payload_candidates():
+        return candidate, source
+    for candidate, source in _iter_record_candidates():
+        return candidate, source
+    group_candidate = _title_from_group_key(group_key)
+    if group_candidate:
+        return group_candidate, 'group_key'
+    return None, None
 
 
 def _strip_inline_comments(value: str, *, allow_without_whitespace: bool = False) -> str:
@@ -3268,7 +3386,18 @@ class SongScanner:
                     type(redis_client).__name__,
                 )
         self._redis: Optional["Redis"] = validated_redis
-        if self._redis is None and leader_lock is None:
+        single_node_env = os.getenv('SCANNER_SINGLE_NODE')
+        if single_node_env is not None:
+            try:
+                self._single_node_mode = _parse_bool_env(single_node_env)
+            except AttributeError:
+                self._single_node_mode = bool(single_node_env)
+        else:
+            redis_host_env = os.getenv('TAIKO_WEB_REDIS_HOST') or os.getenv('REDIS_HOST')
+            self._single_node_mode = bool(redis_host_env) is False and validated_redis is None and leader_lock is None
+        if self._single_node_mode:
+            LOGGER.info('Scanner operating in single-node mode (desktop fallback)')
+        if self._redis is None and leader_lock is None and not self._single_node_mode:
             LOGGER.info(
                 'Song watcher disabled: Redis leader lock unavailable (pid=%d)',
                 os.getpid(),
@@ -4060,6 +4189,39 @@ class SongScanner:
         except Exception:  # pragma: no cover - diagnostics must not crash the scanner
             LOGGER.debug('Failed to record invalid group key issue for %s', key)
 
+    def _ensure_song_title(
+        self,
+        document: Dict[str, object],
+        records: Sequence[TjaImportRecord],
+        key: Optional[str],
+    ) -> bool:
+        existing = document.get('title')
+        if isinstance(existing, str) and existing.strip():
+            return False
+        resolved, source = _resolve_song_title(document, records, key)
+        if not resolved:
+            raise ValueError(f'song payload missing title for group {key}')
+        document['title'] = resolved
+        document['title_lc'] = resolved.casefold()
+        title_lang = document.get('title_lang')
+        if isinstance(title_lang, dict):
+            if not any(_clean_title_candidate(value) for value in title_lang.values()):
+                title_lang['en'] = resolved
+        else:
+            document['title_lang'] = {'en': resolved}
+        self._metrics.increment('recovered_titles_total')
+        LOGGER.warning(
+            'Recovered missing song title: key=%s source=%s title=%s',
+            key,
+            source or 'unknown',
+            resolved,
+        )
+        for record in records:
+            if not isinstance(record.title, str) or not record.title.strip():
+                record.title = resolved
+                record.normalized_title = _normalise_title_key(resolved)
+        return True
+
     def _unsafe_upsert_song_document(
         self,
         key: str,
@@ -4069,6 +4231,16 @@ class SongScanner:
         dirty_groups: Set[str],
         summary: Dict[str, int],
     ) -> Optional[int]:
+        try:
+            recovered = self._ensure_song_title(document, records, key)
+        except ValueError:
+            LOGGER.error('Song document missing title after recovery attempts: key=%s', key, exc_info=True)
+            summary['errors'] += 1
+            return None
+        else:
+            if recovered:
+                summary.setdefault('recovered_titles_total', 0)
+                summary['recovered_titles_total'] += 1
         if not isinstance(key, str) or not key:
             self._metrics.increment('invalid_group_key_total')
             self._record_invalid_group_key(records, key)
@@ -5437,6 +5609,8 @@ class SongScanner:
         try:
             with self._scan_lock:
                 summary = self._scan_impl(full=full)
+                if isinstance(summary, dict):
+                    summary.setdefault('single_node', self._single_node_mode)
         finally:
             elapsed = time.perf_counter() - start_perf
             if elapsed < 0:
@@ -5466,23 +5640,44 @@ class SongScanner:
                 with contextlib.suppress(Exception):
                     target.removeHandler(counter_handler)
 
+            metrics_snapshot: Dict[str, int] = {}
+            if isinstance(summary, dict):
+                metrics_snapshot = self._metrics.snapshot()
+                if metrics_snapshot:
+                    summary.setdefault('metrics', {}).update(metrics_snapshot)
+                    if 'recovered_titles_total' in metrics_snapshot:
+                        summary['recovered_titles_total'] = metrics_snapshot['recovered_titles_total']
+
             if SCAN_LOG_SUMMARY:
                 try:
+                    recovered_titles = _coerce_int(summary.get('recovered_titles_total')) or 0
+                    errors_value = int(max(active_summary.get('errors', 0), error_count))
+                    songs_before = _coerce_int(summary.get('songs_count_before')) or 0
+                    songs_after = _coerce_int(summary.get('songs_count_after')) or 0
                     SUMMARY_LOGGER.info(
-                        "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d elapsed=%.3fs",
+                        "Song scan summary: mode=%s leader=%s single_node=%s fast_path=%s reason=%s "
+                        "found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d "
+                        "recovered_titles=%d songs_before=%d songs_after=%d duration=%.3fs "
+                        "checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d",
                         mode_str,
+                        bool(active_summary.get('leader')),
+                        bool(active_summary.get('single_node', self._single_node_mode)),
+                        bool(active_summary.get('fast_path')),
+                        active_summary.get('reason', 'unknown'),
                         int(active_summary.get('found', 0)),
                         int(active_summary.get('inserted', 0)),
                         int(active_summary.get('updated', 0)),
                         int(active_summary.get('disabled', 0)),
-                        int(max(active_summary.get('errors', 0), error_count)),
+                        errors_value,
                         int(active_summary.get('skipped', 0)),
+                        recovered_titles,
+                        songs_before,
+                        songs_after,
                         final_duration,
                         checksum_str,
                         str(active_summary.get('fs_checksum', '-')),
                         str(active_summary.get('manifest_checksum', '-')),
                         int(active_summary.get('files_count', 0)),
-                        final_duration,
                     )
                 except Exception as exc:  # pragma: no cover - defensive logging path
                     SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
@@ -5493,10 +5688,8 @@ class SongScanner:
                     active_stack.close()
             self._active_refresher_stack = None
 
-            if isinstance(summary, dict):
-                metrics_snapshot = self._metrics.snapshot()
-                if metrics_snapshot:
-                    summary.setdefault('metrics', {}).update(metrics_snapshot)
+            if isinstance(summary, dict) and metrics_snapshot:
+                summary.setdefault('metrics', {}).update(metrics_snapshot)
 
             self._active_summary = None
 
@@ -5513,6 +5706,7 @@ class SongScanner:
             'skipped': 0,
         }
         _apply_empty_summary_defaults(summary)
+        summary['single_node'] = self._single_node_mode
         self._active_summary = summary
         performed_scan = False
         refresher_stack = contextlib.ExitStack()
@@ -6365,6 +6559,8 @@ class SongScanner:
         return fallback
 
     def has_leader_lock(self) -> bool:
+        if self._single_node_mode:
+            return True
         lock = self._resolve_leader_lock()
         if lock is None:
             if self._leader_lock_token is not None:
@@ -6400,6 +6596,13 @@ class SongScanner:
         attempts: int = 5,
         retry_delay: float = 1.0,
     ) -> bool:
+        if self._single_node_mode:
+            self._leader_lock_token = 'single-node'
+            self._leader_lock_ephemeral = True
+            if summary is not None:
+                summary['leader'] = True
+                summary['single_node'] = True
+            return True
         lock = self._resolve_leader_lock()
         ttl_value = self._leader_lock_ttl or LEADER_LOCK_TTL_SECONDS
         if start_monotonic is None:
@@ -6586,16 +6789,39 @@ class SongScanner:
     def _log_scan_outcome(self, summary: Dict[str, object], *, fast_path: bool, reason: str) -> None:
         leader = self.has_leader_lock()
         summary['leader'] = bool(leader)
+        summary['single_node'] = self._single_node_mode
         summary['fast_path'] = fast_path
         summary['reason'] = reason
         files_count_value = _coerce_int(summary.get('files_count')) or 0
         manifest_documents_value = _coerce_int(summary.get('manifest_documents')) or 0
+        recovered_titles = _coerce_int(summary.get('recovered_titles_total')) or 0
+        songs_before = _coerce_int(summary.get('songs_count_before')) or 0
+        songs_after = _coerce_int(summary.get('songs_count_after')) or 0
+        duration_seconds = summary.get('duration_seconds')
+        try:
+            duration_value = float(duration_seconds) if duration_seconds is not None else 0.0
+        except (TypeError, ValueError):
+            duration_value = 0.0
         SUMMARY_LOGGER.info(
-            'scan: pid=%d fast_path=%s leader=%s reason=%s files_count=%d manifest_documents=%d',
+            'Song scan summary: pid=%d leader=%s single_node=%s fast_path=%s reason=%s '
+            'found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d '
+            'recovered_titles=%d songs_before=%d songs_after=%d duration=%.3fs '
+            'files_count=%d manifest_documents=%d',
             os.getpid(),
-            fast_path,
             leader,
+            self._single_node_mode,
+            fast_path,
             reason,
+            _coerce_int(summary.get('found')) or 0,
+            _coerce_int(summary.get('inserted')) or 0,
+            _coerce_int(summary.get('updated')) or 0,
+            _coerce_int(summary.get('disabled')) or 0,
+            _coerce_int(summary.get('errors')) or 0,
+            _coerce_int(summary.get('skipped')) or 0,
+            recovered_titles,
+            songs_before,
+            songs_after,
+            duration_value,
             files_count_value,
             manifest_documents_value,
         )
@@ -7074,6 +7300,7 @@ class _ScanMetrics:
             'tja_skipped_no_course_total': 0,
             'tja_skipped_unknown_course_total': 0,
             'tja_valid_total': 0,
+            'recovered_titles_total': 0,
         }
         self._last_logged = 0.0
 
