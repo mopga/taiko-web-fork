@@ -2783,7 +2783,7 @@ def route_api_dan_chart():
 @app.cache.cached(timeout=15)
 def route_api_categories():
     if RUN_PROFILE == 'desktop':
-        categories = _collect_desktop_categories()
+        categories = list(_collect_desktop_categories())
         return jsonify(categories)
 
     unavailable = _desktop_mongo_unavailable_response(api=True)
