@@ -54,7 +54,7 @@ from redis import Redis
 if TYPE_CHECKING:
     from pymongo import MongoClient
 
-from songs_scanner import SongScanner, empty_scan_summary
+from songs_scanner import DEFAULT_CATEGORY_TITLE, SongScanner, empty_scan_summary
 from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
@@ -314,6 +314,10 @@ def _desktop_mongo_unavailable_response(*, api: bool) -> Optional[Response]:
         return None
     if not flask.has_request_context():
         return None
+    request_path = getattr(request, 'path', '') or ''
+    normalized_path = request_path.rstrip('/') or '/'
+    if normalized_path.endswith('/api/modes') or normalized_path.endswith('/api/categories'):
+        return None
     LOGGER.debug(
         'desktop profile requested mongo-backed feature path=%s api=%s',
         request.path,
@@ -550,6 +554,206 @@ def _require_song_store() -> SongStoreInterface:
 
 def _get_manifest_store() -> Optional[ManifestStoreInterface]:
     return MANIFEST_STORE
+
+
+def _normalize_category_title(value: object) -> str:
+    if isinstance(value, str):
+        token = value.strip()
+        if token:
+            return token
+    return ''
+
+
+def _coerce_category_id(value: object) -> Optional[int]:
+    if isinstance(value, bool):  # guard against True/False being treated as 1/0
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        try:
+            return int(token)
+        except ValueError:
+            return None
+    return None
+
+
+def _merge_category_documents(target: dict, source: Mapping[str, object]) -> None:
+    source_id = _coerce_category_id(source.get('id') or source.get('category_id'))
+    if source_id is not None and _coerce_category_id(target.get('id')) is None:
+        target['id'] = source_id
+
+    title = _normalize_category_title(source.get('title') or source.get('category') or source.get('name'))
+    if title and not _normalize_category_title(target.get('title')):
+        target['title'] = title
+
+    aliases = source.get('aliases')
+    if aliases and not target.get('aliases') and isinstance(aliases, list):
+        target['aliases'] = aliases
+
+    title_lang = source.get('title_lang') or source.get('titleLang')
+    if title_lang and not target.get('title_lang') and isinstance(title_lang, Mapping):
+        target['title_lang'] = title_lang
+
+    song_skin = source.get('song_skin') or source.get('songSkin')
+    if song_skin and not target.get('song_skin') and isinstance(song_skin, Mapping):
+        target['song_skin'] = song_skin
+
+    items = source.get('items')
+    if items and not target.get('items') and isinstance(items, list):
+        target['items'] = items
+
+
+def _collect_desktop_categories() -> list[dict[str, object]]:
+    store = _get_song_store()
+    if store is None:
+        return [
+            {'id': 0, 'title': DEFAULT_CATEGORY_TITLE, 'song_skin': None},
+        ]
+
+    manifest_categories: dict[str, str] = {}
+    manifest_store = _get_manifest_store()
+    if manifest_store is not None:
+        manifest_projection = {'_id': 1, 'category': 1}
+        try:
+            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}}, projection=manifest_projection)
+        except TypeError:
+            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}}, manifest_projection)
+        except Exception:
+            app.logger.debug('Failed to enumerate manifest categories', exc_info=True)
+            cursor = []
+        for manifest_doc in cursor:
+            if not isinstance(manifest_doc, Mapping):
+                continue
+            manifest_id = manifest_doc.get('_id')
+            if not isinstance(manifest_id, str) or not manifest_id:
+                continue
+            manifest_title = _normalize_category_title(manifest_doc.get('category'))
+            if manifest_title:
+                manifest_categories[manifest_id] = manifest_title
+
+    projection = {
+        'category_id': 1,
+        'category': 1,
+        'title': 1,
+        'name': 1,
+        'song_skin': 1,
+        'songSkin': 1,
+        'aliases': 1,
+        'title_lang': 1,
+        'titleLang': 1,
+        'items': 1,
+        'id': 1,
+        'meta': 1,
+        'scanner_stable_id': 1,
+        'song_id': 1,
+    }
+
+    try:
+        cursor = store.find({}, projection=projection)
+    except TypeError:
+        cursor = store.find({}, projection)
+    except Exception:
+        app.logger.debug('Failed to enumerate categories from song store', exc_info=True)
+        cursor = []
+
+    categories: dict[tuple[object, str], dict[str, object]] = {}
+
+    for raw_doc in cursor:
+        if not isinstance(raw_doc, Mapping):
+            continue
+        metadata = raw_doc.get('meta') if isinstance(raw_doc.get('meta'), Mapping) else {}
+        stable_id = raw_doc.get('scanner_stable_id')
+        if not isinstance(stable_id, str) or not stable_id:
+            fallback = raw_doc.get('id') or raw_doc.get('song_id')
+            stable_id = fallback if isinstance(fallback, str) else ''
+        category_title = _normalize_category_title(
+            raw_doc.get('category')
+            or metadata.get('category')
+            or metadata.get('category_title')
+            or (manifest_categories.get(stable_id) if stable_id else '')
+            or raw_doc.get('title')
+            or raw_doc.get('name')
+        )
+        if not category_title:
+            continue
+        category_id = _coerce_category_id(
+            raw_doc.get('category_id')
+            or metadata.get('category_id')
+            or raw_doc.get('id')
+        )
+        key: tuple[object, str]
+        if category_id is not None:
+            key = ('id', category_id)
+        else:
+            key = ('title', category_title.casefold())
+
+        existing = categories.get(key)
+        if existing is None:
+            base_entry: dict[str, object] = {
+                'id': category_id if category_id is not None else None,
+                'title': category_title,
+            }
+            song_skin = raw_doc.get('song_skin') or raw_doc.get('songSkin')
+            if isinstance(song_skin, Mapping):
+                base_entry['song_skin'] = song_skin
+            else:
+                base_entry['song_skin'] = None
+            aliases = raw_doc.get('aliases')
+            if isinstance(aliases, list):
+                base_entry['aliases'] = aliases
+            title_lang = raw_doc.get('title_lang') or raw_doc.get('titleLang')
+            if isinstance(title_lang, Mapping):
+                base_entry['title_lang'] = title_lang
+            items = raw_doc.get('items')
+            if isinstance(items, list):
+                base_entry['items'] = items
+            categories[key] = base_entry
+        else:
+            _merge_category_documents(existing, raw_doc)
+            if isinstance(metadata, Mapping):
+                _merge_category_documents(existing, metadata)
+
+    for manifest_title in manifest_categories.values():
+        normalized_title = _normalize_category_title(manifest_title)
+        if not normalized_title:
+            continue
+        key = ('title', normalized_title.casefold())
+        if key not in categories:
+            categories[key] = {
+                'id': None,
+                'title': manifest_title,
+                'song_skin': None,
+            }
+
+    if not categories:
+        return [
+            {'id': 0, 'title': DEFAULT_CATEGORY_TITLE, 'song_skin': None},
+        ]
+
+    have_default = any(
+        isinstance(entry.get('id'), int) and entry.get('id') == 0
+        or _normalize_category_title(entry.get('title')) == DEFAULT_CATEGORY_TITLE
+        for entry in categories.values()
+    )
+    if not have_default:
+        categories[('id', 0)] = {
+            'id': 0,
+            'title': DEFAULT_CATEGORY_TITLE,
+            'song_skin': None,
+        }
+
+    ordered = sorted(
+        categories.values(),
+        key=lambda entry: (
+            0 if isinstance(entry.get('id'), int) else 1,
+            entry.get('id') if isinstance(entry.get('id'), int) else entry.get('title', '').casefold(),
+        ),
+    )
+
+    return ordered
 
 
 def _load_manifest_meta() -> Optional[dict]:
@@ -2372,9 +2576,6 @@ def route_api_song_details() -> 'flask.Response':
 
 @app.route(basedir + 'api/modes')
 def route_api_modes():
-    unavailable = _desktop_mongo_unavailable_response(api=True)
-    if unavailable is not None:
-        return unavailable
     if not is_modes_manifest_enabled():
         return jsonify({'status': 'disabled'})
 
@@ -2384,11 +2585,17 @@ def route_api_modes():
     if cached_payload and expires_at > now:
         return jsonify(cached_payload)
 
-    try:
-        categories_cursor = db.categories.find({}, {'_id': False})
-        categories = list(categories_cursor)
-    except Exception:
-        categories = []
+    if RUN_PROFILE == 'desktop':
+        categories = _collect_desktop_categories()
+    else:
+        unavailable = _desktop_mongo_unavailable_response(api=True)
+        if unavailable is not None:
+            return unavailable
+        try:
+            categories_cursor = db.categories.find({}, {'_id': False})
+            categories = list(categories_cursor)
+        except Exception:
+            categories = []
 
     manifest = build_modes_manifest(categories, cache_ttl=DEFAULT_CACHE_TTL)
     ttl_value = manifest.get('cache_ttl', DEFAULT_CACHE_TTL)
@@ -2575,10 +2782,14 @@ def route_api_dan_chart():
 @app.route(basedir + 'api/categories')
 @app.cache.cached(timeout=15)
 def route_api_categories():
+    if RUN_PROFILE == 'desktop':
+        categories = _collect_desktop_categories()
+        return jsonify(categories)
+
     unavailable = _desktop_mongo_unavailable_response(api=True)
     if unavailable is not None:
         return unavailable
-    categories = list(db.categories.find({},{'_id': False}))
+    categories = list(db.categories.find({}, {'_id': False}))
     return jsonify(categories)
 
 

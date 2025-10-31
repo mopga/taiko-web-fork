@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -55,7 +55,9 @@ ipcMain.handle('desktop:quit', async () => {
   app.quit();
 });
 
-ipcMain.handle('desktop:chooseSongsDir', async () => {
+ipcMain.handle('desktop:chooseSongsDir', () => chooseSongsDirectory());
+
+async function chooseSongsDirectory() {
   try {
     const info = ensureDataDirectory();
     emitStatus();
@@ -78,9 +80,78 @@ ipcMain.handle('desktop:chooseSongsDir', async () => {
     updateStatus('Не удалось обновить папку песен.', { errorMessage: message });
     return { canceled: false, error: message };
   }
-});
+}
+
+function setupApplicationMenu() {
+  const template = [];
+
+  if (process.platform === 'darwin') {
+    template.push({
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    });
+  }
+
+  template.push({
+    label: 'File',
+    submenu: [
+      {
+        label: 'Выбрать папку с песнями…',
+        accelerator: 'CmdOrCtrl+O',
+        click: () => {
+          chooseSongsDirectory().catch(() => {
+            // errors handled inside chooseSongsDirectory via status updates
+          });
+        },
+      },
+      { type: 'separator' },
+      process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' },
+    ],
+  });
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
+function resolveWindowIcon() {
+  if (process.platform !== 'win32') {
+    return undefined;
+  }
+
+  const candidates = [
+    path.join(__dirname, '..', '..', 'assets', 'launcher', 'app.ico'),
+  ];
+
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, 'assets', 'launcher', 'app.ico'));
+    candidates.push(path.join(process.resourcesPath, 'app.ico'));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (error) {
+      // ignore
+    }
+  }
+
+  return undefined;
+}
 
 app.whenReady().then(() => {
+  setupApplicationMenu();
   createMainWindow();
   startBackendFlow();
 });
@@ -127,7 +198,7 @@ function createMainWindow() {
     return mainWindow;
   }
 
-  const window = new BrowserWindow({
+  const windowOptions = {
     width: 1280,
     height: 720,
     show: false,
@@ -138,7 +209,14 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-  });
+  };
+
+  const iconPath = resolveWindowIcon();
+  if (iconPath) {
+    windowOptions.icon = iconPath;
+  }
+
+  const window = new BrowserWindow(windowOptions);
 
   window.once('ready-to-show', () => {
     window.show();
@@ -287,13 +365,18 @@ function spawnBackend(executable, workingDir, dataDir, port) {
     DATA_DIR: dataDir,
   };
 
-  const args = ['--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir];
+  const args = ['--host', '127.0.0.1', '--port', String(port)];
+  const captureLogs = process.env.ELECTRON_DEV === '1';
   const child = spawn(executable, args, {
     cwd: workingDir,
     windowsHide: true,
-    stdio: 'ignore',
+    stdio: captureLogs ? ['ignore', 'pipe', 'pipe'] : 'ignore',
     env,
   });
+
+  if (captureLogs) {
+    setupBackendLogging(child);
+  }
 
   child.unref();
 
@@ -322,6 +405,41 @@ function spawnBackend(executable, workingDir, dataDir, port) {
   });
 
   return child;
+}
+
+function setupBackendLogging(child) {
+  try {
+    const logsDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:]/g, '-');
+    const logPath = path.join(logsDir, `backend-${timestamp}.log`);
+    const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+
+    const forward = (chunk) => {
+      if (!logStream.destroyed) {
+        logStream.write(chunk);
+      }
+    };
+
+    if (child.stdout) {
+      child.stdout.on('data', forward);
+    }
+
+    if (child.stderr) {
+      child.stderr.on('data', forward);
+    }
+
+    const finalize = () => {
+      if (!logStream.destroyed) {
+        logStream.end();
+      }
+    };
+
+    child.once('close', finalize);
+    child.once('exit', finalize);
+  } catch (error) {
+    // ignore logging issues to avoid breaking the app in dev mode
+  }
 }
 
 async function waitForHealthz(url, timeoutMs) {
