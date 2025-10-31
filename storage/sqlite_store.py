@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 
 LOGGER = logging.getLogger(__name__)
@@ -122,6 +123,86 @@ def _apply_update_ops(document: dict[str, Any], update: Mapping[str, Any]) -> bo
         document.update(update)
         modified = True
     return modified
+
+
+def _normalise_title_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("_", " ").replace("-", " ")).strip()
+
+
+def _clean_title_value(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalised = _normalise_title_whitespace(value)
+    if not normalised:
+        return None
+    return normalised
+
+
+def _title_from_group_key(group_key: object) -> Optional[str]:
+    if not isinstance(group_key, str) or not group_key.strip():
+        return None
+    parts = [part.strip() for part in group_key.split(":") if part.strip()]
+    if not parts:
+        return None
+    if parts[0] == "missing" and len(parts) >= 3:
+        candidate = parts[-2]
+    else:
+        candidate = parts[-1]
+    return _clean_title_value(candidate)
+
+
+def _recover_song_title(song: Mapping[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    for field in ('title', 'title_en', 'title_ru', 'title_ja', 'title_kana', 'titleJa'):
+        candidate = _clean_title_value(song.get(field))
+        if candidate:
+            return candidate, field
+    titles_mapping = song.get('titles')
+    if isinstance(titles_mapping, Mapping):
+        for lang in ('en', 'ru', 'ja', 'kana'):
+            candidate = _clean_title_value(titles_mapping.get(lang))
+            if candidate:
+                return candidate, f'titles.{lang}'
+    title_lang = song.get('title_lang')
+    if isinstance(title_lang, Mapping):
+        for lang, value in title_lang.items():
+            candidate = _clean_title_value(value)
+            if candidate:
+                return candidate, f'title_lang.{lang}'
+    locale_doc = song.get('locale')
+    if isinstance(locale_doc, Mapping):
+        for lang, payload in locale_doc.items():
+            if isinstance(payload, Mapping):
+                candidate = _clean_title_value(payload.get('title'))
+                if candidate:
+                    return candidate, f'locale.{lang}'
+    charts = song.get('charts')
+    if isinstance(charts, Sequence):
+        for chart in charts:
+            if not isinstance(chart, Mapping):
+                continue
+            candidate = _clean_title_value(chart.get('title'))
+            if candidate:
+                return candidate, 'charts.title'
+            meta = chart.get('meta')
+            if isinstance(meta, Mapping):
+                candidate = _clean_title_value(meta.get('title'))
+                if candidate:
+                    return candidate, 'charts.meta.title'
+            chart_data = chart.get('chart_data')
+            if isinstance(chart_data, Mapping):
+                candidate = _clean_title_value(chart_data.get('title'))
+                if candidate:
+                    return candidate, 'charts.chart_data.title'
+                meta_payload = chart_data.get('meta')
+                if isinstance(meta_payload, Mapping):
+                    candidate = _clean_title_value(meta_payload.get('title'))
+                    if candidate:
+                        return candidate, 'charts.chart_data.meta.title'
+    group_key = song.get('group_key')
+    candidate = _title_from_group_key(group_key)
+    if candidate:
+        return candidate, 'group_key'
+    return None, None
 
 
 class SQLiteDatabase:
@@ -676,8 +757,15 @@ class SQLiteSongStore:
         if not song_id:
             raise ValueError("song payload missing song_id")
         title = song.get("title")
-        if not isinstance(title, str):
-            raise ValueError("song payload missing title")
+        if not isinstance(title, str) or not title.strip():
+            recovered_title, source = _recover_song_title(song)
+            if recovered_title:
+                LOGGER.warning(
+                    "Recovered missing song title for song_id=%s via %s", song_id, source or "fallback"
+                )
+                title = recovered_title
+            else:
+                raise ValueError("song payload missing title")
         title_reading = song.get("title_reading")
         artist = song.get("artist")
         genre = song.get("genre")
