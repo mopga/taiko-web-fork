@@ -18,7 +18,7 @@ import unicodedata
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Optional, Sequence, cast
 from urllib.parse import unquote, urlparse
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # -- カスタム --
 from datetime import datetime, timedelta
@@ -556,6 +556,58 @@ def _get_manifest_store() -> Optional[ManifestStoreInterface]:
     return MANIFEST_STORE
 
 
+def _load_song_document_for_identifier(
+    identifier: str,
+    *,
+    projection: Optional[Mapping[str, Any]] = None,
+    song_store: Optional[SongStoreInterface] = None,
+) -> Optional[Mapping[str, Any]]:
+    store = song_store or _require_song_store()
+    document: Optional[Mapping[str, Any]] = None
+    get_by_id = getattr(store, 'get_by_id', None)
+    if callable(get_by_id):
+        try:
+            document = get_by_id(identifier)
+        except Exception:
+            app.logger.debug(
+                'song lookup via get_by_id failed id=%s store=%s',
+                identifier,
+                type(store).__name__,
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
+            document = None
+        if document:
+            return dict(document)
+
+    lookup_keys = ('song_id', 'scanner_stable_id')
+    for key in lookup_keys:
+        filter_doc = {key: identifier}
+        try:
+            document = store.find_one(filter_doc, projection=projection)
+        except Exception:
+            app.logger.debug(
+                'song lookup via find_one failed filter=%s store=%s',
+                filter_doc,
+                type(store).__name__,
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
+            document = None
+        if document:
+            return dict(document)
+    return None
+
+
+def _normalize_document_identifier(value: object) -> Optional[str]:
+    if isinstance(value, str):
+        token = value.strip()
+        return token or None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        text = str(int(value)) if isinstance(value, (int, float)) else str(value)
+        token = text.strip()
+        return token or None
+    return None
+
+
 def _normalize_category_title(value: object) -> str:
     if isinstance(value, str):
         token = value.strip()
@@ -1017,6 +1069,8 @@ def _normalize_catalog_source_token(value: object) -> Optional[str]:
         "fs": "filesystem",
         "file": "filesystem",
         "file_system": "filesystem",
+        "sqlite": "sqlite",
+        "sql": "sqlite",
     }
     return mapping.get(token)
 
@@ -1083,9 +1137,7 @@ def _resolve_catalog_source(*, run_profile: str, config_module: object) -> str:
     if legacy_config is not None:
         return "mongo" if bool(legacy_config) else "filesystem"
     if run_profile == "desktop":
-        if _has_valid_mongo_dsn(config_module=config_module):
-            return "mongo"
-        return "filesystem"
+        return "sqlite"
     return "mongo"
 
 
@@ -1175,7 +1227,11 @@ def create_app():
         static_folder=STATIC_DIR,
         static_url_path="/static",
     )
-    app_instance.logger.info("run_profile=%s", RUN_PROFILE)
+    app_instance.logger.info(
+        "run_profile=%s catalog_source=%s",
+        RUN_PROFILE,
+        CATALOG_SOURCE,
+    )
     try:
         frontend_dir_resolved = FRONTEND_DIR.resolve()
     except Exception:
@@ -1517,7 +1573,10 @@ def create_app():
 
     try:
         routes_snapshot = [getattr(rule, 'rule', str(rule)) for rule in app_instance.url_map.iter_rules()]
-        app_instance.logger.info('Routes: %s', routes_snapshot)
+        if RUN_PROFILE == 'desktop' and CATALOG_SOURCE == 'sqlite':
+            app_instance.logger.info('Routes: %s, api_songs=enabled(sqlite)', routes_snapshot)
+        else:
+            app_instance.logger.info('Routes: %s', routes_snapshot)
         app_instance.logger.info('Routes count: %s', len(routes_snapshot))
     except Exception as exc:  # pragma: no cover - diagnostic helper
         app_instance.logger.warning('Failed to list routes: %s', exc)
@@ -2196,15 +2255,14 @@ def _serialize_catalog_entry(
                 return None
         return None
 
-    stable_id = _normalize_identifier(_first('scanner_stable_id'))
-    if not stable_id:
-        fallback = _normalize_identifier(_first('id')) or _normalize_identifier(_first('song_id'))
-        if fallback:
-            stable_id = fallback
-        else:
-            return None
+    primary_id = _normalize_identifier(_first('song_id'))
+    if not primary_id:
+        primary_id = _normalize_identifier(_first('scanner_stable_id'))
+    if not primary_id:
+        app.logger.error('Failed to serialize song entry without identifier sources=%s', sources)
+        raise RuntimeError('song entry missing identifier')
 
-    title_value = _first('title', stable_id)
+    title_value = _first('title', primary_id)
     subtitle_value = _first('subtitle', '')
     category_value = _first('category', '')
     category_id_value = _first('category_id', 0)
@@ -2237,7 +2295,7 @@ def _serialize_catalog_entry(
         filtered_paths = {}
 
     item: dict[str, Any] = {
-        'id': stable_id,
+        'id': primary_id,
         'title': title_value if isinstance(title_value, str) else str(title_value),
         'subtitle': subtitle_value if isinstance(subtitle_value, str) else '',
         'category': category_value if isinstance(category_value, str) else '',
@@ -2311,7 +2369,14 @@ def _load_mongo_catalog_entries(
     for entry in raw_payload:
         stable_id = entry.get('scanner_stable_id')
         manifest_entry = manifest_map.get(stable_id) if isinstance(stable_id, str) else None
-        item = _serialize_catalog_entry(entry, manifest_entry=manifest_entry)
+        try:
+            item = _serialize_catalog_entry(entry, manifest_entry=manifest_entry)
+        except RuntimeError:
+            app.logger.exception(
+                'Failed to serialize mongo song entry id=%s',
+                entry.get('song_id') or entry.get('scanner_stable_id') or '<unknown>',
+            )
+            raise
         if item is not None:
             payload.append(item)
     return payload
@@ -2350,7 +2415,7 @@ def _load_filesystem_catalog_entries(
     try:
         cursor = store.find({}, projection=projection)
     except Exception:
-        app.logger.exception('Failed to load filesystem songs catalog')
+        app.logger.exception('Failed to load sqlite songs catalog')
         return []
 
     docs: list[dict[str, Any]] = []
@@ -2416,7 +2481,14 @@ def _load_filesystem_catalog_entries(
 
     payload: list[dict[str, Any]] = []
     for doc, manifest_entry in slice_pairs:
-        item = _serialize_catalog_entry(doc, manifest_entry=manifest_entry)
+        try:
+            item = _serialize_catalog_entry(doc, manifest_entry=manifest_entry)
+        except RuntimeError:
+            app.logger.exception(
+                'Failed to serialize sqlite song entry id=%s',
+                doc.get('song_id') or doc.get('scanner_stable_id') or '<unknown>',
+            )
+            raise
         if item is not None:
             payload.append(item)
     return payload
@@ -2468,7 +2540,8 @@ def route_api_songs():
     else:
         search_value = ''
 
-    if CATALOG_SOURCE == 'filesystem':
+    use_sqlite_catalog = RUN_PROFILE == 'desktop' or CATALOG_SOURCE in {'filesystem', 'sqlite'}
+    if use_sqlite_catalog:
         try:
             payload = _load_filesystem_catalog_entries(
                 limit=limit_value,
@@ -2476,19 +2549,29 @@ def route_api_songs():
                 category_value=category_value,
                 search_value=search_value,
             )
+        except RuntimeError:
+            app.logger.exception('sqlite catalog serialization error')
+            abort(500)
         except Exception as exc:
-            app.logger.warning('filesystem catalog error: %s', exc, exc_info=app.logger.isEnabledFor(logging.DEBUG))
+            app.logger.warning('sqlite catalog error: %s', exc, exc_info=app.logger.isEnabledFor(logging.DEBUG))
             payload = []
-    else:
+    elif CATALOG_SOURCE == 'mongo':
         unavailable = _desktop_mongo_unavailable_response(api=True)
         if unavailable is not None:
             return unavailable
-        payload = _load_mongo_catalog_entries(
-            limit=limit_value,
-            skip=skip_value,
-            category_value=category_value,
-            search_value=search_value,
-        )
+        try:
+            payload = _load_mongo_catalog_entries(
+                limit=limit_value,
+                skip=skip_value,
+                category_value=category_value,
+                search_value=search_value,
+            )
+        except RuntimeError:
+            app.logger.exception('mongo catalog serialization error')
+            abort(500)
+    else:
+        app.logger.warning('Unknown catalog_source=%s for /api/songs', CATALOG_SOURCE)
+        payload = []
 
     normalized_payload: list[Any]
     if payload is None:
@@ -2548,7 +2631,7 @@ def route_api_song_detail(song_id: str):
         projection['charts.chart_data'] = False
 
     try:
-        song_doc = _require_song_store().find_one({'scanner_stable_id': stable_id}, projection)
+        song_doc = _load_song_document_for_identifier(stable_id, projection=projection)
     except Exception:
         app.logger.exception('Failed to load song detail for %s', stable_id)
         abort(500)
@@ -2581,8 +2664,11 @@ def route_api_song_detail(song_id: str):
     manifest_entry = manifest_map.get(stable_id)
 
     include_notes = not meta_only
-    payload = _serialize_song_detail(song_doc, include_notes=include_notes, manifest_entry=manifest_entry)
-    payload['id'] = stable_id
+    try:
+        payload = _serialize_song_detail(song_doc, include_notes=include_notes, manifest_entry=manifest_entry)
+    except RuntimeError:
+        app.logger.exception('Failed to serialize song detail for %s', stable_id)
+        abort(500)
 
     etag_source = None
     if isinstance(payload.get('sha1'), str) and payload['sha1']:
@@ -2671,21 +2757,33 @@ def route_api_song_details() -> 'flask.Response':
                     chart_doc.pop('chart_data', None)
 
     found_docs: dict[str, dict] = {}
+    manifest_lookup_ids: list[str] = []
     for doc in docs:
-        stable = doc.get('scanner_stable_id') or doc.get('id')
-        if not isinstance(stable, str) or not stable:
+        if not isinstance(doc, dict):
             continue
-        found_docs[stable] = doc
+        primary_identifier = _normalize_document_identifier(doc.get('song_id'))
+        if primary_identifier:
+            found_docs[primary_identifier] = doc
+        stable_identifier = _normalize_document_identifier(doc.get('scanner_stable_id') or doc.get('id'))
+        if stable_identifier:
+            if stable_identifier not in found_docs:
+                found_docs[stable_identifier] = doc
+            manifest_lookup_ids.append(stable_identifier)
 
-    manifest_map = _load_manifest_entries_for_ids(ordered_ids)
+    manifest_map = _load_manifest_entries_for_ids(manifest_lookup_ids)
 
     results: list[dict] = []
     for stable_id in ordered_ids:
         song_doc = found_docs.get(stable_id)
         if not isinstance(song_doc, dict):
             continue
-        payload = _serialize_song_detail(song_doc, include_notes=include_notes, manifest_entry=manifest_map.get(stable_id))
-        payload['id'] = stable_id
+        manifest_key = _normalize_document_identifier(song_doc.get('scanner_stable_id') or song_doc.get('id'))
+        manifest_entry = manifest_map.get(manifest_key) if manifest_key else None
+        try:
+            payload = _serialize_song_detail(song_doc, include_notes=include_notes, manifest_entry=manifest_entry)
+        except RuntimeError:
+            app.logger.exception('Failed to serialize song detail in batch for %s', stable_id)
+            abort(500)
         results.append(payload)
 
     return jsonify(results)
@@ -3446,6 +3544,258 @@ else:
     DESKTOP_SONGS_DIR = songs_dir()
     DESKTOP_SONGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    def _desktop_normalize_identifier(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            text = str(value).strip()
+            return text or None
+        return None
+
+    def _desktop_fetch_song_document(
+        identifier: str,
+        *,
+        song_store: Optional[SongStoreInterface] = None,
+        projection: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[Mapping[str, Any]]:
+        store = song_store or _require_song_store()
+        return _load_song_document_for_identifier(
+            identifier,
+            projection=projection,
+            song_store=store,
+        )
+
+    def _desktop_load_manifest_entry(
+        song_doc: Mapping[str, Any],
+        *,
+        manifest_store: Optional[ManifestStoreInterface] = None,
+    ) -> Optional[Mapping[str, Any]]:
+        store = manifest_store if manifest_store is not None else _get_manifest_store()
+        if store is None:
+            return None
+        stable_identifier = _desktop_normalize_identifier(song_doc.get("scanner_stable_id"))
+        if not stable_identifier:
+            return None
+        try:
+            entry = store.get(stable_identifier)
+        except Exception:
+            app.logger.debug(
+                "desktop manifest lookup failed id=%s", stable_identifier, exc_info=app.logger.isEnabledFor(logging.DEBUG)
+            )
+            return None
+        return dict(entry) if isinstance(entry, Mapping) else None
+
+    def _desktop_normalize_posix_path(value: object) -> Optional[PurePosixPath]:
+        if isinstance(value, PurePosixPath):
+            return value
+        if isinstance(value, str):
+            token = value.strip().replace("\\", "/")
+            if not token:
+                return None
+            try:
+                return PurePosixPath(token)
+            except ValueError:
+                return None
+        return None
+
+    def _desktop_extract_relative_path_from_url(value: object) -> Optional[PurePosixPath]:
+        if not isinstance(value, str):
+            return None
+        token = value.strip()
+        if not token:
+            return None
+        parsed = urlparse(token)
+        path_candidate = parsed.path if parsed.scheme or parsed.netloc else token
+        normalized = _desktop_normalize_posix_path(path_candidate)
+        if normalized is None:
+            return None
+        parts = list(normalized.parts)
+        if not parts:
+            return None
+        if parts and parts[0] == "/":
+            parts = parts[1:]
+        if not parts:
+            return None
+        if "songs" in parts:
+            try:
+                index = parts.index("songs")
+            except ValueError:
+                index = -1
+            if index >= 0:
+                parts = parts[index + 1 :]
+        if not parts:
+            return None
+        return PurePosixPath(*parts)
+
+    def _desktop_find_first_tja_in_directory(
+        songs_root: Path, relative_dir: PurePosixPath
+    ) -> Optional[PurePosixPath]:
+        try:
+            target = (songs_root / relative_dir.as_posix()).resolve()
+        except Exception:
+            return None
+        try:
+            target.relative_to(songs_root)
+        except ValueError:
+            return None
+        if not target.is_dir():
+            return None
+        try:
+            entries = [child for child in target.iterdir() if child.is_file() and child.suffix.lower() == ".tja"]
+        except FileNotFoundError:
+            return None
+        if not entries:
+            return None
+        main_candidates = [entry for entry in entries if entry.name.lower() == "main.tja"]
+        if main_candidates:
+            selected = min(main_candidates, key=lambda item: item.name.lower())
+        else:
+            selected = min(entries, key=lambda item: item.name.lower())
+        try:
+            relative_path = selected.relative_to(songs_root)
+        except ValueError:
+            return None
+        return PurePosixPath(relative_path.as_posix())
+
+    def _desktop_resolve_main_tja_relative_path(
+        song_doc: Mapping[str, Any],
+        manifest_entry: Optional[Mapping[str, Any]],
+        songs_root: Path,
+    ) -> PurePosixPath:
+        candidate_files: list[PurePosixPath] = []
+        candidate_dirs: list[PurePosixPath] = []
+
+        def _register_file_candidate(value: object) -> None:
+            normalized = _desktop_normalize_posix_path(value)
+            if normalized is None:
+                return
+            if normalized not in candidate_files:
+                candidate_files.append(normalized)
+            parent = normalized.parent if normalized.parent != PurePosixPath("") else PurePosixPath(".")
+            if parent not in candidate_dirs:
+                candidate_dirs.append(parent)
+
+        def _register_dir_candidate(value: object) -> None:
+            normalized = _desktop_extract_relative_path_from_url(value)
+            if normalized is None:
+                return
+            directory = normalized if normalized != PurePosixPath("") else PurePosixPath(".")
+            if directory not in candidate_dirs:
+                candidate_dirs.append(directory)
+
+        def _register_identifier_directory(value: object) -> None:
+            identifier = _desktop_normalize_identifier(value)
+            if not identifier:
+                return
+            directory = PurePosixPath(identifier)
+            if directory not in candidate_dirs:
+                candidate_dirs.append(directory)
+            default_main = directory / "main.tja"
+            if default_main not in candidate_files:
+                candidate_files.append(default_main)
+
+        if isinstance(manifest_entry, Mapping):
+            _register_file_candidate(manifest_entry.get("file_path"))
+            paths_map = manifest_entry.get("paths") if isinstance(manifest_entry.get("paths"), Mapping) else None
+            if paths_map:
+                _register_file_candidate(paths_map.get("tja_url"))
+                _register_dir_candidate(paths_map.get("dir_url"))
+
+        paths_doc = song_doc.get("paths") if isinstance(song_doc.get("paths"), Mapping) else None
+        if paths_doc:
+            _register_file_candidate(paths_doc.get("tja_url"))
+            _register_dir_candidate(paths_doc.get("dir_url"))
+
+        _register_identifier_directory(song_doc.get("song_id"))
+        _register_identifier_directory(song_doc.get("scanner_stable_id"))
+
+        for candidate in candidate_files:
+            try:
+                absolute = (songs_root / candidate.as_posix()).resolve()
+            except Exception:
+                continue
+            try:
+                absolute.relative_to(songs_root)
+            except ValueError:
+                continue
+            if absolute.is_file():
+                return candidate
+
+        visited_dirs: set[PurePosixPath] = set()
+        for directory in candidate_dirs:
+            if directory in visited_dirs:
+                continue
+            visited_dirs.add(directory)
+            relative = _desktop_find_first_tja_in_directory(songs_root, directory)
+            if relative is not None:
+                return relative
+
+        raise FileNotFoundError("main TJA file not found for song")
+
+    def resolve_main_tja_path(
+        song_identifier: str,
+        *,
+        song_store: Optional[SongStoreInterface] = None,
+        manifest_store: Optional[ManifestStoreInterface] = None,
+        songs_dir: Optional[Path] = None,
+    ) -> Path:
+        normalized_id = _desktop_normalize_identifier(song_identifier)
+        if not normalized_id:
+            raise FileNotFoundError("song identifier is missing")
+        store = song_store or _require_song_store()
+        songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
+        document = _desktop_fetch_song_document(normalized_id, song_store=store)
+        if document is None:
+            raise FileNotFoundError("song not found")
+        manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
+        relative = _desktop_resolve_main_tja_relative_path(document, manifest_entry, songs_root)
+        absolute = (songs_root / relative.as_posix()).resolve()
+        try:
+            absolute.relative_to(songs_root)
+        except ValueError as exc:
+            raise FileNotFoundError("resolved path escapes songs directory") from exc
+        if not absolute.is_file():
+            raise FileNotFoundError("main TJA file missing")
+        return absolute
+
+    def resolve_song_file_path(
+        song_identifier: str,
+        requested_name: str,
+        *,
+        song_store: Optional[SongStoreInterface] = None,
+        manifest_store: Optional[ManifestStoreInterface] = None,
+        songs_dir: Optional[Path] = None,
+    ) -> Path:
+        normalized_id = _desktop_normalize_identifier(song_identifier)
+        if not normalized_id:
+            raise FileNotFoundError("song identifier is missing")
+        name_token = requested_name.strip()
+        if not name_token:
+            raise FileNotFoundError("requested asset name is missing")
+        store = song_store or _require_song_store()
+        songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
+        document = _desktop_fetch_song_document(normalized_id, song_store=store)
+        if document is None:
+            raise FileNotFoundError("song not found")
+        manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
+        relative_main = _desktop_resolve_main_tja_relative_path(document, manifest_entry, songs_root)
+        if name_token.lower() == "main.tja":
+            relative = relative_main
+        else:
+            component = _desktop_normalize_posix_path(name_token)
+            if component is None or component.is_absolute():
+                raise FileNotFoundError("invalid asset path")
+            relative = relative_main.parent.joinpath(component)
+        absolute = (songs_root / relative.as_posix()).resolve()
+        try:
+            absolute.relative_to(songs_root)
+        except ValueError as exc:
+            raise FileNotFoundError("resolved path escapes songs directory") from exc
+        if not absolute.is_file():
+            raise FileNotFoundError("requested asset missing")
+        return absolute
+
     @app.route("/")
     def desktop_root_loader():
         return send_from_directory(str(DESKTOP_VIEWS_DIR), "loader.html")
@@ -3482,19 +3832,16 @@ else:
         raw_song_id = parts[0].strip()
         if not raw_song_id:
             abort(404)
-        try:
-            song_doc = _require_song_store().get_by_id(raw_song_id)
-        except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to resolve song for static request id=%s", raw_song_id)
-            abort(500)
-        if not isinstance(song_doc, Mapping):
-            abort(404)
         if len(parts) < 2 or not parts[1].strip():
             abort(404)
-        return cache_wrap(
-            send_from_directory(str(DESKTOP_SONGS_DIR), filename),
-            604800,
-        )
+        try:
+            asset_path = resolve_song_file_path(raw_song_id, parts[1])
+        except FileNotFoundError:
+            abort(404)
+        except Exception:  # pragma: no cover - defensive logging
+            app.logger.exception("Failed to resolve song asset id=%s name=%s", raw_song_id, parts[1])
+            abort(500)
+        return cache_wrap(flask.send_file(asset_path), 604800)
 
 
 @app.route(basedir + "manifest.json")
@@ -3722,13 +4069,18 @@ def _serialize_song_detail(song_doc: dict, *, include_notes: bool, manifest_entr
                 return None
         return None
 
-    stable_identifier = _normalize_identifier(song_doc.get('scanner_stable_id'))
-    if not stable_identifier:
-        stable_identifier = _normalize_identifier(song_doc.get('id'))
+    primary_identifier = _normalize_identifier(song_doc.get('song_id'))
+    if not primary_identifier:
+        primary_identifier = _normalize_identifier(song_doc.get('scanner_stable_id'))
+    if not primary_identifier:
+        app.logger.error('Song detail serialization missing identifier document=%s', song_doc)
+        raise RuntimeError('song detail missing identifier')
+
+    legacy_identifier = _normalize_identifier(song_doc.get('id'))
 
     payload = {
-        'id': stable_identifier or '',
-        'legacy_id': song_doc.get('id'),
+        'id': primary_identifier,
+        'legacy_id': legacy_identifier,
         'title': song_doc.get('title'),
         'titleJa': song_doc.get('titleJa'),
         'subtitle': song_doc.get('subtitle'),

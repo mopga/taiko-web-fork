@@ -618,24 +618,39 @@ class SQLiteSongStore:
         )
 
         processed = 0
-        returned_ids: list[int] = []
-        for chunk_index, chunk_start in enumerate(
-            range(0, total_rows, UPSERT_CHUNK_SIZE), start=1
-        ):
-            chunk_rows = prepared_rows[chunk_start : chunk_start + UPSERT_CHUNK_SIZE]
-            chunk_begin = time.perf_counter()
-            chunk_ids = self._execute_upsert_chunk(query, chunk_rows)
-            returned_ids.extend(chunk_ids)
-            processed += len(chunk_rows)
-            chunk_duration_ms = (time.perf_counter() - chunk_begin) * 1000
-            LOGGER.info(
-                "SQLiteSongStore upsert_many chunk=%d rows=%d duration_ms=%.2f processed=%d/%d",
-                chunk_index,
-                len(chunk_rows),
-                chunk_duration_ms,
-                processed,
-                total_rows,
-            )
+
+        def _execute_chunks(cursor: sqlite3.Cursor) -> list[int]:
+            nonlocal processed
+            identifiers: list[int] = []
+            for chunk_index, chunk_start in enumerate(
+                range(0, total_rows, UPSERT_CHUNK_SIZE), start=1
+            ):
+                chunk_rows = prepared_rows[chunk_start : chunk_start + UPSERT_CHUNK_SIZE]
+                chunk_begin = time.perf_counter()
+                chunk_identifiers: list[int] = []
+                for params in chunk_rows:
+                    cursor.execute(query, params)
+                    returning_row = cursor.fetchone()
+                    identifier = self._resolve_upsert_identifier(cursor, returning_row, params)
+                    chunk_identifiers.append(identifier)
+                identifiers.extend(chunk_identifiers)
+                processed += len(chunk_rows)
+                chunk_duration_ms = (time.perf_counter() - chunk_begin) * 1000
+                LOGGER.info(
+                    "SQLiteSongStore upsert_many chunk=%d rows=%d duration_ms=%.2f processed=%d/%d",
+                    chunk_index,
+                    len(chunk_rows),
+                    chunk_duration_ms,
+                    processed,
+                    total_rows,
+                )
+            return identifiers
+
+        try:
+            returned_ids = self._db.execute_in_transaction(_execute_chunks)
+        except Exception:
+            LOGGER.exception("SQLiteSongStore upsert_many failed")
+            raise
 
         duration_ms = (time.perf_counter() - start) * 1000
         LOGGER.info(
@@ -644,24 +659,6 @@ class SQLiteSongStore:
             duration_ms,
         )
         return returned_ids
-
-    def _execute_upsert_chunk(
-        self, query: str, chunk_rows: Sequence[tuple[Any, ...]]
-    ) -> list[int]:
-        def _callback(cursor: sqlite3.Cursor) -> list[int]:
-            chunk_identifiers: list[int] = []
-            for params in chunk_rows:
-                cursor.execute(query, params)
-                returning_row = cursor.fetchone()
-                identifier = self._resolve_upsert_identifier(cursor, returning_row, params)
-                chunk_identifiers.append(identifier)
-            return chunk_identifiers
-
-        try:
-            return self._db.execute_in_transaction(_callback)
-        except Exception:
-            LOGGER.exception("SQLiteSongStore upsert_many chunk failed")
-            raise
 
     def _resolve_upsert_identifier(
         self,
@@ -976,6 +973,8 @@ class SQLiteSongStore:
         self, song: Mapping[str, Any], filter_doc: Mapping[str, Any] | None
     ) -> tuple[Any, ...]:
         filter_scanner = self._extract_filter_value(filter_doc, "scanner_stable_id")
+        if filter_scanner is None:
+            filter_scanner = self._extract_filter_value(filter_doc, "_id")
         payload_scanner = self._normalize_string(song.get("scanner_stable_id"))
         stable_id = filter_scanner or payload_scanner
         if not isinstance(stable_id, str) or not stable_id:
@@ -983,7 +982,13 @@ class SQLiteSongStore:
 
         filter_group = self._extract_filter_value(filter_doc, "group_key")
         payload_group = self._normalize_string(song.get("group_key"))
-        group_key = filter_group or payload_group
+        group_key = filter_group
+        if not group_key and filter_scanner:
+            group_key = self._lookup_existing_group_key(filter_scanner)
+        if not group_key:
+            group_key = payload_group
+        if not group_key and stable_id:
+            group_key = f"group::{stable_id}"
         if not isinstance(group_key, str) or not group_key:
             raise ValueError("song payload missing group_key")
 
@@ -1107,6 +1112,38 @@ class SQLiteSongStore:
                 return self._normalize_string(candidate.get("$eq"))
             return None
         return self._normalize_string(candidate)
+
+    def _lookup_existing_group_key(self, scanner_stable_id: str) -> Optional[str]:
+        try:
+            cursor = self._db.execute(
+                "SELECT group_key FROM songs WHERE scanner_stable_id = ? LIMIT 1",
+                (scanner_stable_id,),
+            )
+        except Exception:
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug(
+                    "SQLiteSongStore lookup for existing group_key failed scanner_stable_id=%s",
+                    scanner_stable_id,
+                    exc_info=True,
+                )
+            return None
+        row = cursor.fetchone()
+        if not row:
+            return None
+        if isinstance(row, sqlite3.Row):
+            try:
+                value = row["group_key"]
+            except (KeyError, IndexError):
+                try:
+                    value = row[0]
+                except (IndexError, TypeError):
+                    value = None
+        else:
+            try:
+                value = row[0]
+            except (IndexError, TypeError):
+                value = None
+        return self._normalize_string(value)
 
     def _maybe_log_key_mismatch(
         self,
@@ -1378,6 +1415,7 @@ class SQLiteManifestStore:
 
     def __init__(self, database: SQLiteDatabase):
         self._db = database
+        self._update_one_info_logged = False
 
     # Mongo compatibility surface -------------------------------------------------
 
@@ -1456,10 +1494,15 @@ class SQLiteManifestStore:
             handler = getattr(operation, "_sqlite_apply", None)
             if callable(handler):
                 handler(self)
-            else:
-                LOGGER.warning(
-                    "Unsupported manifest bulk operation: %s", type(operation).__name__
-                )
+                continue
+            if self._apply_manifest_update_one(operation):
+                if not self._update_one_info_logged:
+                    LOGGER.info('SQLiteManifestStore enabling UpdateOne bulk compatibility')
+                    self._update_one_info_logged = True
+                continue
+            LOGGER.warning(
+                "Unsupported manifest bulk operation: %s", type(operation).__name__
+            )
 
     def create_index(self, *args: Any, **kwargs: Any) -> None:
         LOGGER.debug("SQLiteManifestStore.create_index noop args=%s kwargs=%s", args, kwargs)
@@ -1534,6 +1577,98 @@ class SQLiteManifestStore:
             else:
                 if value != expected:
                     return False
+        return True
+
+    def _apply_manifest_update_one(self, operation: Any) -> bool:
+        filter_doc = getattr(operation, 'filter', None)
+        if filter_doc is None:
+            filter_doc = getattr(operation, '_filter', None)
+        update_doc = getattr(operation, 'update', None)
+        if update_doc is None:
+            update_doc = getattr(operation, '_doc', None)
+        upsert_flag = getattr(operation, 'upsert', None)
+        if upsert_flag is None:
+            upsert_flag = getattr(operation, '_upsert', None)
+        if upsert_flag is None and isinstance(getattr(operation, 'kwargs', None), Mapping):
+            upsert_flag = operation.kwargs.get('upsert')  # type: ignore[union-attr]
+        if upsert_flag is None and isinstance(getattr(operation, 'args', None), Sequence):
+            args = getattr(operation, 'args')
+            if len(args) >= 3:
+                upsert_flag = args[2]
+        upsert = bool(upsert_flag)
+
+        if isinstance(filter_doc, Sequence) and not isinstance(filter_doc, Mapping):
+            try:
+                filter_doc = filter_doc[0]
+            except Exception:
+                filter_doc = None
+        if not isinstance(filter_doc, Mapping):
+            return False
+
+        if isinstance(update_doc, Sequence) and not isinstance(update_doc, Mapping):
+            try:
+                update_doc = update_doc[0]
+            except Exception:
+                update_doc = None
+        if not isinstance(update_doc, Mapping):
+            return False
+
+        set_payload = update_doc.get('$set') if isinstance(update_doc.get('$set'), Mapping) else None
+        if set_payload is None:
+            return False
+
+        identifier_raw = filter_doc.get('_id')
+        identifier: Optional[str]
+        if isinstance(identifier_raw, str):
+            identifier = identifier_raw.strip() or None
+        elif isinstance(identifier_raw, (int, float)) and not isinstance(identifier_raw, bool):
+            try:
+                identifier = str(int(identifier_raw)).strip()
+            except (TypeError, ValueError):
+                identifier = None
+        else:
+            identifier = None
+        if not identifier:
+            LOGGER.error('Manifest UpdateOne missing _id filter=%s', filter_doc)
+            return False
+
+        existing = self.get(identifier)
+        if existing is None and not upsert:
+            return True
+
+        base: dict[str, Any] = {}
+        if isinstance(existing, Mapping):
+            base.update(existing)
+        for key, value in set_payload.items():
+            base[key] = value
+
+        stored_value = dict(base)
+        stored_value.pop('_id', None)
+
+        updated_at_value = set_payload.get('updated_at')
+        updated_at = None
+        if isinstance(updated_at_value, (int, float)) and not isinstance(updated_at_value, bool):
+            try:
+                updated_at = int(updated_at_value)
+            except (TypeError, ValueError):
+                updated_at = None
+        if updated_at is None:
+            updated_at = int(time.time() * 1000)
+
+        payload_json = _serialize_json(stored_value) or "{}"
+        query = (
+            """
+            INSERT INTO manifest(key, value_json, updated_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json=excluded.value_json,
+                updated_at=excluded.updated_at
+            """
+        )
+
+        with self._db.connection:
+            self._db.execute(query, (identifier, payload_json, updated_at))
+
         return True
 
     def _manifest_id_from_filter(self, filter: Mapping[str, Any]) -> Optional[str]:

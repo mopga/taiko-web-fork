@@ -357,13 +357,13 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(len(payload), len(songs_docs))
         self.assertEqual({item['id'] for item in payload}, {'song-1', 'song-2'})
 
-    def test_api_songs_filesystem_empty_returns_empty_list(self):
+    def test_api_songs_sqlite_empty_returns_empty_list(self):
         manifest_entries: list[dict] = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'fs-empty', 'count': 0}
         songs_docs: list[dict] = []
         manifest_store = _ManifestCollection(manifest_entries, manifest_meta)
         songs_store = _SongsCollection(songs_docs)
-        with mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'filesystem'), \
+        with mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'sqlite'), \
              mock.patch.object(taiko_app, '_get_manifest_store', return_value=manifest_store), \
              mock.patch.object(taiko_app, '_get_song_store', return_value=songs_store):
             response = self.client.get('/api/songs')
