@@ -198,6 +198,71 @@ try {
     throw "No songs found in /api/songs after wait"
   }
 
+  $modesJson = $null
+  $deadline = (Get-Date).AddSeconds(30)
+  do {
+    try {
+      $modesResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/modes" -TimeoutSec 5
+      if ($modesResp.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
+      try {
+        $modesJson = $modesResp.Content | ConvertFrom-Json -ErrorAction Stop
+      } catch {
+        $modesJson = $null
+      }
+    } catch {
+      $modesJson = $null
+    }
+    if ($null -eq $modesJson) { Start-Sleep -Milliseconds 500 }
+  } while (($null -eq $modesJson) -and (Get-Date) -lt $deadline)
+
+  if ($null -eq $modesJson) {
+    throw "Failed to load /api/modes"
+  }
+  $statusValue = $modesJson.status
+  if (-not (@('ok','disabled') -contains $statusValue)) {
+    throw "Unexpected /api/modes status: $($modesJson | ConvertTo-Json -Compress)"
+  }
+  if ($statusValue -eq 'ok') {
+    $modesList = $modesJson.modes
+    if ($null -eq $modesList -or -not ($modesList -is [System.Collections.IEnumerable])) {
+      throw "Invalid /api/modes payload: missing modes array"
+    }
+  }
+
+  $categoriesJson = $null
+  $deadline = (Get-Date).AddSeconds(30)
+  do {
+    try {
+      $categoriesResp = Invoke-WebRequest -UseBasicParsing "$baseUrl/api/categories" -TimeoutSec 5
+      if ($categoriesResp.StatusCode -ne 200) { Start-Sleep -Milliseconds 500; continue }
+      try {
+        $categoriesJson = $categoriesResp.Content | ConvertFrom-Json -ErrorAction Stop
+      } catch {
+        $categoriesJson = $null
+      }
+    } catch {
+      $categoriesJson = $null
+    }
+    if ($null -eq $categoriesJson) { Start-Sleep -Milliseconds 500 }
+  } while (($null -eq $categoriesJson) -and (Get-Date) -lt $deadline)
+
+  if ($null -eq $categoriesJson) {
+    throw "Failed to load /api/categories"
+  }
+  $isArray = $categoriesJson -is [System.Array]
+  if (-not $isArray) {
+    $isEnumerable = $categoriesJson -is [System.Collections.IEnumerable]
+    $isObject = $categoriesJson -is [pscustomobject]
+    if ($isObject) {
+      $hasItems = $categoriesJson | Get-Member -Name items -ErrorAction SilentlyContinue
+      if ($null -eq $hasItems) {
+        throw "Unexpected /api/categories object payload"
+      }
+    } elseif (-not $isEnumerable) {
+      throw "Unexpected /api/categories payload type"
+    }
+  }
+
   Write-Host ("Smoke OK: /api/songs count={0}" -f $songCount)
 }
 catch {

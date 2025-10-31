@@ -1,6 +1,7 @@
 import importlib
 import logging
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -193,6 +194,75 @@ def test_desktop_admin_routes_guarded(tmp_path, monkeypatch):
     response = client.get("/admin/songs")
     assert response.status_code == 503
     assert b"desktop profile" in response.data.lower()
+
+
+def test_desktop_api_modes_endpoint(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    client = app_module.app.test_client()
+    response = client.get("/api/modes")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert isinstance(payload, dict)
+    status_value = payload.get("status")
+    assert status_value in {"ok", "disabled"}
+    if status_value == "ok":
+        assert isinstance(payload.get("modes"), list)
+
+
+def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "song-001",
+                "title": "Tower Intro",
+                "category_id": 7,
+                "category": "Taiko Towers",
+                "meta": {"category": "Taiko Towers", "category_id": 7},
+                "updated_at": now,
+                "created_at": now,
+            },
+            {
+                "song_id": "song-002",
+                "title": "Dan Challenge",
+                "category_id": 9,
+                "category": "Dan Dojo",
+                "meta": {"category": "Dan Dojo", "category_id": 9},
+                "updated_at": now,
+                "created_at": now,
+            },
+        ]
+    )
+
+    client = app_module.app.test_client()
+    categories_response = client.get("/api/categories")
+    assert categories_response.status_code == 200
+    categories_payload = categories_response.get_json()
+    assert isinstance(categories_payload, list)
+    titles = {item.get("title") for item in categories_payload if isinstance(item, dict)}
+    assert "Taiko Towers" in titles
+    assert "Dan Dojo" in titles
+
+    modes_response = client.get("/api/modes")
+    assert modes_response.status_code == 200
+    manifest = modes_response.get_json()
+    assert isinstance(manifest, dict)
+    assert manifest.get("status") == "ok"
+    modes_payload = manifest.get("modes") or []
+    assert any(
+        mode.get("key") == "tower" and "Taiko Towers" in (mode.get("categories") or [])
+        for mode in modes_payload
+        if isinstance(mode, dict)
+    )
+    assert any(
+        mode.get("key") == "dandojo" and "Dan Dojo" in (mode.get("categories") or [])
+        for mode in modes_payload
+        if isinstance(mode, dict)
+    )
 
 
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):
