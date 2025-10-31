@@ -893,6 +893,49 @@ def _coerce_int(value: object) -> Optional[int]:
     return None
 
 
+def _normalize_timestamp_value(value: object, *, unit: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) and not isinstance(value, int):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(round(value))
+    if isinstance(value, datetime):
+        candidate = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        multiplier = 1000 if unit == "milliseconds" else 1
+        return int(round(candidate.timestamp() * multiplier))
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        iso_candidate = token
+        if iso_candidate.endswith("Z"):
+            iso_candidate = f"{iso_candidate[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(iso_candidate)
+        except ValueError:
+            try:
+                numeric = float(token)
+            except ValueError:
+                return None
+            return int(round(numeric))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        multiplier = 1000 if unit == "milliseconds" else 1
+        return int(round(parsed.timestamp() * multiplier))
+    return None
+
+
+def _timestamp_ms(value: object) -> Optional[int]:
+    return _normalize_timestamp_value(value, unit="milliseconds")
+
+
+def _timestamp_seconds(value: object) -> Optional[int]:
+    return _normalize_timestamp_value(value, unit="seconds")
+
+
 class TTLRefresher(contextlib.AbstractContextManager["TTLRefresher"]):
     """Background TTL refresher for ``LeaderLock`` implementations."""
 
@@ -3717,6 +3760,18 @@ class SongScanner:
                 LOGGER.debug('Failed to ensure unique index for import issues collection')
         self._watchdog_supported = Observer is not None and FileSystemEventHandler is not None
         self._metrics = _ScanMetrics()
+        song_store_callback = getattr(self._song_store, 'set_title_recovered_callback', None)
+        if callable(song_store_callback):
+            def _storage_title_recovered(song_id: str, source: Optional[str]) -> None:
+                self._metrics.increment('recovered_titles_total')
+                if isinstance(self._active_summary, dict):
+                    current = _coerce_int(self._active_summary.get('recovered_titles_total')) or 0
+                    self._active_summary['recovered_titles_total'] = current + 1
+
+            try:
+                song_store_callback(_storage_title_recovered)
+            except Exception:  # pragma: no cover - registration best effort
+                LOGGER.debug('Failed to register storage title recovery callback', exc_info=True)
         self._seed_legacy_scanner_ids()
 
     def _build_chart_records(
@@ -4265,8 +4320,10 @@ class SongScanner:
             summary['errors'] += 1
             return None
 
-        now_utc = datetime.now(UTC)
-        base_document['updated_at'] = now_utc
+        now_ms = _timestamp_ms(datetime.now(UTC))
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        base_document['updated_at'] = now_ms
 
         insert_only_fields = {'title', 'group_key', 'scanner_stable_id'}
         mutable_fields = {'charts', 'summary', 'tags', 'last_scanned_at', 'metadata'}
@@ -4276,7 +4333,7 @@ class SongScanner:
             for field in insert_only_fields
             if field in base_document
         }
-        insert_document['created_at'] = now_utc
+        insert_document['created_at'] = now_ms
 
         mutable_conflicts = mutable_fields.intersection(insert_document.keys())
         if mutable_conflicts:
@@ -5168,7 +5225,7 @@ class SongScanner:
             'file_path': file_path,
             'mtime': file_mtime,
             'sha1': sha1_combined,
-            'parse_failed_at': parse_failed_at,
+            'parse_failed_at': _timestamp_seconds(parse_failed_at),
         }
 
         return manifest_entry
@@ -5217,7 +5274,9 @@ class SongScanner:
         store = self._manifest_store
         if store is None:
             return None
-        now = datetime.now(UTC)
+        now_ms = _timestamp_ms(datetime.now(UTC))
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
         existing_ids: Set[str] = set()
         try:
             cursor = store.find({'_id': {'$ne': '__meta__'}}, {'_id': 1})
@@ -5241,7 +5300,7 @@ class SongScanner:
         for entry_id, entry in entries.items():
             payload = dict(entry)
             payload['_id'] = entry_id
-            payload['updated_at'] = now
+            payload['updated_at'] = now_ms
             if 'title_lc' not in payload and isinstance(payload.get('title'), str):
                 payload['title_lc'] = payload['title'].casefold()
             operations.append(UpdateOne({'_id': entry_id}, {'$set': payload}, upsert=True))
@@ -5284,7 +5343,7 @@ class SongScanner:
                     {
                         '$set': {
                             'checksum': checksum,
-                            'updated_at': now,
+                            'updated_at': now_ms,
                             'count': len(entries),
                             'manifest_checksum': checksum,
                             'manifestChecksum': checksum,
@@ -6249,7 +6308,7 @@ class SongScanner:
                             'tja_mtime_ns': tja_mtime_ns,
                             'tja_size': tja_size,
                             'tja_sha1': failure_sha1,
-                            'parse_failed_at': datetime.now(UTC),
+                            'parse_failed_at': _timestamp_seconds(datetime.now(UTC)),
                         }
                         if last_ok_sha1:
                             failure_payload['last_ok_sha1'] = last_ok_sha1
@@ -6267,7 +6326,7 @@ class SongScanner:
                     'tja_mtime_ns': tja_mtime_ns,
                     'tja_size': tja_size,
                     'tja_sha1': failure_sha1,
-                    'parse_failed_at': datetime.now(UTC),
+                    'parse_failed_at': _timestamp_seconds(datetime.now(UTC)),
                 }
                 if last_ok_sha1:
                     failure_payload['last_ok_sha1'] = last_ok_sha1
@@ -6301,7 +6360,7 @@ class SongScanner:
                 'audio_mtime_ns': record.audio_mtime_ns,
                 'audio_size': record.audio_size,
                 'fingerprint': fingerprint or record.fingerprint,
-                'parse_failed_at': None if was_dirty else parse_failed_at,
+                'parse_failed_at': _timestamp_seconds(None if was_dirty else parse_failed_at),
                 'last_ok_sha1': file_sha1 if was_dirty else (last_ok_sha1 or file_sha1),
             }
 
@@ -6788,12 +6847,15 @@ class SongScanner:
         collection = self._meta_collection
         if collection is None:
             return
+        updated_at_ms = _timestamp_ms(datetime.now(UTC))
+        if updated_at_ms is None:
+            updated_at_ms = int(time.time() * 1000)
         payload = {
             'checksum': checksum,
             'manifest_checksum': checksum,
             'files_count': files_count,
             'manifest_documents': manifest_documents,
-            'updated_at': datetime.now(UTC),
+            'updated_at': updated_at_ms,
             'fs_checksum': checksum,
         }
         if fs_index:
@@ -6995,7 +7057,9 @@ class SongScanner:
         operations: List[
             Tuple[Mapping[str, object], Mapping[str, object], Mapping[str, object]]
         ] = []
-        now = datetime.now(UTC)
+        now_ms = _timestamp_ms(datetime.now(UTC))
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
 
         def _flush_operations() -> None:
             nonlocal operations, inserted, updated, errors
@@ -7143,9 +7207,9 @@ class SongScanner:
                 'duration_ms': int(entry.get('duration_ms') or 0),
                 'titleNormalized': _normalise_title_key(title_value) if title_value else '',
                 'scanner_manifest_snapshot': sanitized_entry,
-                'scanner_rehydrated_at': now,
+                'scanner_rehydrated_at': now_ms,
                 'scanner_rehydrated_placeholder': True,
-                'updated_at': now,
+                'updated_at': now_ms,
             }
             charts_on_insert: List[object] = []
             raw_charts = entry.get('charts')

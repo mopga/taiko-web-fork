@@ -1,6 +1,9 @@
+import logging
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -289,3 +292,70 @@ def test_hot_restart(tmp_path: Path) -> None:
         assert item["song_id"] == "hot"
     finally:
         storage_again.close()
+
+
+def test_prepare_song_row_normalizes_datetime(sqlite_storage: SQLiteStorage) -> None:
+    store = sqlite_storage.song_store
+    updated_dt = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    created_iso = "2023-12-31T23:59:59+00:00"
+    row = store._prepare_song_row(  # type: ignore[attr-defined]
+        {
+            "song_id": "dt",
+            "title": "Date Song",
+            "updated_at": updated_dt,
+            "created_at": created_iso,
+        }
+    )
+    expected_updated = int(round(updated_dt.timestamp() * 1000))
+    expected_created = int(round(datetime.fromisoformat(created_iso).timestamp() * 1000))
+    assert row[-2] == expected_updated
+    assert row[-1] == expected_created
+
+
+def test_prepare_song_row_coerces_float(sqlite_storage: SQLiteStorage) -> None:
+    store = sqlite_storage.song_store
+    row = store._prepare_song_row(  # type: ignore[attr-defined]
+        {
+            "song_id": "float",
+            "title": "Float Song",
+            "updated_at": 1000.4,
+            "created_at": 2000.9,
+        }
+    )
+    assert row[-2] == 1000
+    assert row[-1] == 2001
+
+
+def test_prepare_song_row_handles_invalid_timestamp(
+    sqlite_storage: SQLiteStorage, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = sqlite_storage.song_store
+    caplog.set_level(logging.WARNING)
+    row = store._prepare_song_row(  # type: ignore[attr-defined]
+        {
+            "song_id": "invalid",
+            "title": "Invalid",
+            "updated_at": {"bad": True},
+        }
+    )
+    assert row[-2] == 0
+    assert row[-1] == 0
+    assert any("Unable to normalise song field updated_at" in record.message for record in caplog.records)
+
+
+def test_title_recovery_callback_invoked(sqlite_storage: SQLiteStorage) -> None:
+    store = sqlite_storage.song_store
+    recovered: list[tuple[str, Optional[str]]] = []
+
+    def _callback(song_id: str, source: Optional[str]) -> None:
+        recovered.append((song_id, source))
+
+    store.set_title_recovered_callback(_callback)  # type: ignore[attr-defined]
+    payload = {
+        "song_id": "missing",
+        "title": " ",
+        "title_en": "Recovered Title",
+        "updated_at": datetime(2024, 1, 2, tzinfo=UTC),
+    }
+    store.upsert_many([payload])
+    assert recovered == [("missing", "title_en")]

@@ -9,8 +9,9 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 
 LOGGER = logging.getLogger(__name__)
@@ -80,6 +81,41 @@ def _deserialize_json(payload: Optional[str]) -> Any:
     except json.JSONDecodeError:
         LOGGER.warning("Failed to decode JSON payload", exc_info=True)
         return None
+
+
+def _normalize_timestamp_value(value: Any, *, unit: str) -> tuple[Optional[int], bool]:
+    if value is None:
+        return None, False
+    if isinstance(value, bool) and not isinstance(value, int):
+        return int(value), True
+    if isinstance(value, int):
+        return value, False
+    if isinstance(value, float):
+        return int(round(value)), True
+    if isinstance(value, datetime):
+        candidate = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        multiplier = 1000 if unit == "milliseconds" else 1
+        return int(round(candidate.timestamp() * multiplier)), True
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None, True
+        iso_candidate = token
+        if iso_candidate.endswith("Z"):
+            iso_candidate = f"{iso_candidate[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(iso_candidate)
+        except ValueError:
+            try:
+                numeric = float(token)
+            except ValueError:
+                return None, True
+            return int(round(numeric)), True
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        multiplier = 1000 if unit == "milliseconds" else 1
+        return int(round(parsed.timestamp() * multiplier)), True
+    return None, True
 
 
 def _apply_update_ops(document: dict[str, Any], update: Mapping[str, Any]) -> bool:
@@ -404,6 +440,14 @@ class SQLiteSongStore:
 
     def __init__(self, database: SQLiteDatabase):
         self._db = database
+        self._title_recovered_callback: Callable[[str, Optional[str]], None] | None = None
+        self._normalization_warned_fields: set[str] = set()
+        self._normalization_failure_warned_fields: set[str] = set()
+
+    def set_title_recovered_callback(
+        self, callback: Callable[[str, Optional[str]], None] | None
+    ) -> None:
+        self._title_recovered_callback = callback
 
     @property
     def path(self) -> Path:
@@ -763,6 +807,13 @@ class SQLiteSongStore:
                 LOGGER.warning(
                     "Recovered missing song title for song_id=%s via %s", song_id, source or "fallback"
                 )
+                if self._title_recovered_callback is not None:
+                    try:
+                        self._title_recovered_callback(song_id, source)
+                    except Exception:  # pragma: no cover - callbacks must not break storage
+                        LOGGER.debug(
+                            "Title recovery callback failed for song_id=%s", song_id, exc_info=True
+                        )
                 title = recovered_title
             else:
                 raise ValueError("song payload missing title")
@@ -775,8 +826,10 @@ class SQLiteSongStore:
         difficulties = song.get("difficulties") or {}
         tags = song.get("tags")
         meta = song.get("meta")
-        updated_at = int(song.get("updated_at", 0))
-        created_at = int(song.get("created_at", updated_at))
+        updated_at = self._coerce_timestamp_field("updated_at", song.get("updated_at"), "milliseconds", 0)
+        created_at = self._coerce_timestamp_field(
+            "created_at", song.get("created_at"), "milliseconds", updated_at
+        )
         return (
             song_id,
             title,
@@ -791,6 +844,35 @@ class SQLiteSongStore:
             _serialize_json(meta),
             updated_at,
             created_at,
+        )
+
+    def _coerce_timestamp_field(
+        self, field: str, value: Any, unit: str, fallback: int
+    ) -> int:
+        if value is None:
+            return fallback
+        normalized, converted = _normalize_timestamp_value(value, unit=unit)
+        if normalized is None:
+            self._log_normalization_failure(field, value)
+            return fallback
+        if converted:
+            self._log_normalization_event(field, value)
+        return normalized
+
+    def _log_normalization_event(self, field: str, value: Any) -> None:
+        if field in self._normalization_warned_fields:
+            return
+        self._normalization_warned_fields.add(field)
+        LOGGER.warning(
+            "Normalizing song field %s from %s", field, type(value).__name__
+        )
+
+    def _log_normalization_failure(self, field: str, value: Any) -> None:
+        if field in self._normalization_failure_warned_fields:
+            return
+        self._normalization_failure_warned_fields.add(field)
+        LOGGER.warning(
+            "Unable to normalise song field %s type=%s; using fallback", field, type(value).__name__
         )
 
     def _row_to_song(self, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
