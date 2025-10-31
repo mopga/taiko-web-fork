@@ -28,7 +28,9 @@ $env:RUN_PROFILE = "desktop"
 $env:PROFILE = "desktop"
 
 $repoRoot = (Get-Location)
-$env:DATA_DIR = Join-Path $repoRoot "_data"
+if ([string]::IsNullOrWhiteSpace($env:DATA_DIR)) {
+  $env:DATA_DIR = Join-Path $repoRoot "_data"
+}
 New-Item -ItemType Directory -Force -Path $env:DATA_DIR | Out-Null
 
 $backendRoot = Join-Path $repoRoot "standalone/dist/backend/taiko-web-backend"
@@ -40,8 +42,11 @@ if (-not (Test-Path -LiteralPath $exe)) {
 $absExe = (Resolve-Path -LiteralPath $exe).Path
 $absRoot = Split-Path -Parent $absExe
 
-$port = if ($env:APP_PORT) { $env:APP_PORT } else { (Get-Random -Minimum 20000 -Maximum 40000).ToString() }
-$env:APP_PORT = $port
+$portCandidate = $null
+if (-not [string]::IsNullOrWhiteSpace($env:PORT)) { $portCandidate = $env:PORT }
+elseif (-not [string]::IsNullOrWhiteSpace($env:APP_PORT)) { $portCandidate = $env:APP_PORT }
+else { $portCandidate = (Get-Random -Minimum 20000 -Maximum 40000).ToString() }
+$port = $portCandidate
 $env:PORT = $port
 $baseUrl = "http://127.0.0.1:$port"
 

@@ -1,0 +1,89 @@
+:root {
+  color-scheme: dark;
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  background: #000;
+  color: #fff;
+}
+
+body {
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.splash {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-image: url('../assets/launcher/title-screen.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.splash__overlay {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 2.5rem 3.5rem;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.68);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.splash__mascot {
+  width: 160px;
+  height: 160px;
+  object-fit: contain;
+}
+
+.splash__status {
+  font-size: 1.4rem;
+  text-align: center;
+  font-weight: 600;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.splash__progress {
+  width: 260px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+
+.splash__progress-bar {
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, #ffe066, #ff8c42, #ff3c38);
+  border-radius: inherit;
+  animation: splash-progress 1.2s ease-in-out infinite;
+}
+
+@keyframes splash-progress {
+  0% {
+    transform: translateX(-120%);
+  }
+  50% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}

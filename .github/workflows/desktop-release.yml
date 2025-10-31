@@ -59,12 +59,16 @@ jobs:
           }
 
       - name: Smoke backend (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           SMOKE_REQUIRE_SONGS: "0"
+          DATA_DIR: "${{ runner.temp }}\\taiko-data"
+          PORT: "8000"
         run: pwsh -File scripts/smoke_run_windows.ps1
 
       - name: Setup Node (electron)
+        if: runner.os == 'Windows'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -72,45 +76,52 @@ jobs:
           cache-dependency-path: standalone/electron/package-lock.json
 
       - name: Install Electron deps
+        if: runner.os == 'Windows'
         working-directory: standalone/electron
         run: npm ci
 
-      - name: Build Electron
+      - name: Build Electron (win-unpacked)
+        if: runner.os == 'Windows'
         working-directory: standalone/electron
-        run: npm run build
+        run: npm run dist:win
 
       - name: Verify Electron build
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $dist = 'standalone/electron/dist/win-unpacked'
           if (-not (Test-Path $dist)) { throw "Electron win-unpacked missing at $dist" }
-          Get-ChildItem -Path $dist | Out-String | Write-Host
+          $exe = Join-Path $dist 'Taiko Web.exe'
+          if (-not (Test-Path $exe)) { throw "Missing Taiko Web.exe at $exe" }
+          Get-ChildItem -Recurse -File $dist | Select-Object -First 20 | Out-String | Write-Host
 
-      - name: Determine installer version
-        id: version
+      - name: Read desktop version
+        if: runner.os == 'Windows'
+        id: app-version
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF
-          if ($version -and $version.StartsWith('refs/tags/')) {
-            $version = $version.Substring(10)
-          } else {
-            $version = (Get-Date -Format 'yyyy.MM.dd-HHmmss')
-          }
-          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $packageJson = Get-Content standalone/electron/package.json | ConvertFrom-Json
+          "version=$($packageJson.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Install Inno Setup
+        if: runner.os == 'Windows'
         run: choco install innosetup -y
 
       - name: Build installer
-        run: '"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" /DMyAppVersion="${{ steps.version.outputs.value }}" standalone\\packaging\\windows\\installer.iss'
+        if: runner.os == 'Windows'
+        env:
+          APP_VERSION: ${{ steps.app-version.outputs.version }}
+        run: '"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" tools\\installer\\app.iss'
 
       - name: Upload installer
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: backend-installer
           path: out\*.exe
 
       - name: Upload electron bundle
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: electron-win-unpacked
@@ -118,7 +129,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload smoke logs
-        if: always()
+        if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: smoke-logs-windows

@@ -1,7 +1,20 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('taiko', {
-  openSongsFolder: () => ipcRenderer.invoke('open-songs-folder'),
-  toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen'),
-  quitApp: () => ipcRenderer.invoke('graceful-quit'),
+function onStatusUpdate(callback) {
+  if (typeof callback !== 'function') {
+    return () => undefined;
+  }
+  const channel = 'desktop:status';
+  const listener = (_event, payload) => {
+    callback(payload);
+  };
+  ipcRenderer.on(channel, listener);
+  return () => {
+    ipcRenderer.removeListener(channel, listener);
+  };
+}
+
+contextBridge.exposeInMainWorld('desktop', {
+  onStatus: onStatusUpdate,
+  requestQuit: () => ipcRenderer.invoke('desktop:quit'),
 });
