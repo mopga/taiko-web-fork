@@ -50,6 +50,7 @@ from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from redis import Redis
+from werkzeug.utils import safe_join
 
 if TYPE_CHECKING:
     from pymongo import MongoClient
@@ -3824,24 +3825,42 @@ else:
             3600,
         )
 
-    @app.route("/songs/<path:filename>")
-    def desktop_song_files(filename: str):
-        if not isinstance(filename, str) or not filename:
+    @app.route("/songs/<path:subpath>")
+    def desktop_song_files(subpath: str):
+        if not isinstance(subpath, str) or not subpath.strip():
             abort(404)
-        parts = filename.split("/", 1)
-        raw_song_id = parts[0].strip()
-        if not raw_song_id:
-            abort(404)
-        if len(parts) < 2 or not parts[1].strip():
-            abort(404)
+
         try:
-            asset_path = resolve_song_file_path(raw_song_id, parts[1])
+            candidate = safe_join(str(DESKTOP_SONGS_DIR), subpath)
+        except Exception:
+            candidate = None
+
+        if not candidate:
+            abort(404)
+
+        try:
+            songs_root = DESKTOP_SONGS_DIR.resolve()
+        except Exception:  # pragma: no cover - defensive logging
+            app.logger.exception("Failed to resolve songs root %s", DESKTOP_SONGS_DIR)
+            abort(500)
+
+        try:
+            resolved = Path(candidate).resolve()
         except FileNotFoundError:
             abort(404)
         except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to resolve song asset id=%s name=%s", raw_song_id, parts[1])
+            app.logger.exception("Failed to resolve song asset path %s", candidate)
             abort(500)
-        return cache_wrap(flask.send_file(asset_path), 604800)
+
+        try:
+            resolved.relative_to(songs_root)
+        except ValueError:
+            abort(404)
+
+        if not resolved.is_file():
+            abort(404)
+
+        return cache_wrap(flask.send_file(resolved), 604800)
 
 
 @app.route(basedir + "manifest.json")
