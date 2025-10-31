@@ -17,6 +17,31 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequenc
 LOGGER = logging.getLogger(__name__)
 
 
+_DATABASE_LIST_LOGGED: set[str] = set()
+
+
+def _log_database_list(database: "SQLiteDatabase", *, label: str) -> None:
+    key = f"{label}:{id(database)}"
+    if key in _DATABASE_LIST_LOGGED:
+        return
+    _DATABASE_LIST_LOGGED.add(key)
+    try:
+        entries = database.database_list()
+    except Exception:  # pragma: no cover - logging must not break startup
+        LOGGER.debug("Failed to fetch database_list for %s", label, exc_info=True)
+        return
+    formatted_entries = []
+    for entry in entries:
+        name = entry.get("name")
+        file_path = entry.get("file")
+        formatted_entries.append(f"{name}={file_path}")
+    LOGGER.info(
+        "SQLite%s PRAGMA database_list %s",
+        label,
+        ", ".join(formatted_entries) if formatted_entries else "<empty>",
+    )
+
+
 SCHEMA_VERSION = 2
 
 UPSERT_CHUNK_SIZE = 500
@@ -266,6 +291,7 @@ class SQLiteDatabase:
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._pragmas = self._apply_pragmas()
+        self._supports_returning = self._detect_returning_support()
         self._schema_version = self._ensure_schema()
         self._log_startup()
 
@@ -281,6 +307,10 @@ class SQLiteDatabase:
     def schema_version(self) -> int:
         return self._schema_version
 
+    @property
+    def supports_returning(self) -> bool:
+        return self._supports_returning
+
     def execute(self, sql: str, parameters: Sequence[Any] | None = None):
         params = parameters or ()
         with self._lock:
@@ -293,6 +323,34 @@ class SQLiteDatabase:
     def cursor(self) -> sqlite3.Cursor:
         with self._lock:
             return self._connection.cursor()
+
+    def database_list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            cursor = self._connection.cursor()
+            try:
+                cursor.execute("PRAGMA database_list")
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                try:
+                    seq = row["seq"]
+                    name = row["name"]
+                    file_path = row["file"]
+                except (KeyError, IndexError):
+                    seq, name, file_path = row[0], row[1], row[2]
+            else:
+                seq, name, file_path = row
+            result.append(
+                {
+                    "seq": seq,
+                    "name": name,
+                    "file": file_path,
+                }
+            )
+        return result
 
     def _apply_pragmas(self) -> dict[str, Any]:
         pragma_statements = {
@@ -522,6 +580,13 @@ class SQLiteDatabase:
             finally:
                 cursor.close()
 
+    def _detect_returning_support(self) -> bool:
+        try:
+            version_info = getattr(sqlite3, "sqlite_version_info", (0, 0, 0))
+            return tuple(int(part) for part in version_info[:3]) >= (3, 35, 0)
+        except Exception:  # pragma: no cover - extremely defensive
+            return False
+
 
 class SQLiteInsertOneResult:
     """Lightweight result object returned from ``insert_one``."""
@@ -551,6 +616,7 @@ class SQLiteSongStore:
 
     def __init__(self, database: SQLiteDatabase):
         self._db = database
+        self._supports_returning = database.supports_returning
         self._title_recovered_callback: Callable[[str, Optional[str]], None] | None = None
         self._normalization_warned_fields: set[str] = set()
         self._normalization_failure_warned_fields: set[str] = set()
@@ -591,6 +657,7 @@ class SQLiteSongStore:
             total_rows,
             UPSERT_CHUNK_SIZE,
         )
+        returning_clause = " RETURNING id" if self._supports_returning else ""
         query = (
             """
             INSERT INTO songs(
@@ -613,8 +680,8 @@ class SQLiteSongStore:
                 meta_json=excluded.meta_json,
                 updated_at=excluded.updated_at,
                 created_at=excluded.created_at
-            RETURNING id
             """
+            + returning_clause
         )
 
         processed = 0
@@ -630,7 +697,7 @@ class SQLiteSongStore:
                 chunk_identifiers: list[int] = []
                 for params in chunk_rows:
                     cursor.execute(query, params)
-                    returning_row = cursor.fetchone()
+                    returning_row = cursor.fetchone() if self._supports_returning else None
                     identifier = self._resolve_upsert_identifier(cursor, returning_row, params)
                     chunk_identifiers.append(identifier)
                 identifiers.extend(chunk_identifiers)
@@ -678,6 +745,11 @@ class SQLiteSongStore:
         fallback = cursor.fetchone()
         if fallback and fallback[0] is not None:
             return int(fallback[0])
+        LOGGER.critical(
+            "SQLiteSongStore read-after-write failed scanner_stable_id=%s group_key=%s",
+            stable_id,
+            group_key,
+        )
         raise RuntimeError(
             "Failed to resolve song identifier after upsert for scanner_stable_id=%s group_key=%s"
             % (stable_id, group_key)
@@ -1617,17 +1689,9 @@ class SQLiteManifestStore:
         if set_payload is None:
             return False
 
-        identifier_raw = filter_doc.get('_id')
-        identifier: Optional[str]
-        if isinstance(identifier_raw, str):
-            identifier = identifier_raw.strip() or None
-        elif isinstance(identifier_raw, (int, float)) and not isinstance(identifier_raw, bool):
-            try:
-                identifier = str(int(identifier_raw)).strip()
-            except (TypeError, ValueError):
-                identifier = None
-        else:
-            identifier = None
+        identifier = self._manifest_id_from_filter(filter_doc)
+        if not identifier and isinstance(filter_doc, Mapping):
+            identifier = self._manifest_id_from_filter({'_id': filter_doc.get('id')})
         if not identifier:
             LOGGER.error('Manifest UpdateOne missing _id filter=%s', filter_doc)
             return False
@@ -1635,6 +1699,10 @@ class SQLiteManifestStore:
         existing = self.get(identifier)
         if existing is None and not upsert:
             return True
+
+        if not self._update_one_info_logged:
+            LOGGER.info('SQLiteManifestStore enabling UpdateOne compatibility')
+            self._update_one_info_logged = True
 
         base: dict[str, Any] = {}
         if isinstance(existing, Mapping):
@@ -1672,12 +1740,27 @@ class SQLiteManifestStore:
         return True
 
     def _manifest_id_from_filter(self, filter: Mapping[str, Any]) -> Optional[str]:
-        identifier = filter.get("_id")
-        if isinstance(identifier, str):
-            return identifier
-        if isinstance(identifier, Mapping):
-            if "$eq" in identifier and isinstance(identifier["$eq"], str):
-                return identifier["$eq"]
+        raw_identifier = filter.get("_id")
+        normalized = self._normalize_identifier(raw_identifier)
+        if normalized:
+            return normalized
+        if isinstance(raw_identifier, Mapping):
+            if "$eq" in raw_identifier:
+                return self._normalize_identifier(raw_identifier["$eq"])
+        if "id" in filter:
+            return self._normalize_identifier(filter.get("id"))
+        return None
+
+    def _normalize_identifier(self, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                token = str(int(value)).strip()
+            except (TypeError, ValueError):
+                return None
+            return token or None
         return None
 
 
@@ -1688,6 +1771,8 @@ class SQLiteStorage:
         self._database = SQLiteDatabase(db_path)
         self.song_store = SQLiteSongStore(self._database)
         self.manifest_store = SQLiteManifestStore(self._database)
+        _log_database_list(self._database, label="SongStore")
+        _log_database_list(self._database, label="ManifestStore")
 
     @property
     def schema_version(self) -> int:

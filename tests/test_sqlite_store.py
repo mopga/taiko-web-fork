@@ -151,6 +151,30 @@ def test_upsert_uses_filter_song_id(sqlite_storage: SQLiteStorage) -> None:
     assert stored["group_key"] == "group::stable-1"
 
 
+def test_upsert_many_without_returning(sqlite_storage: SQLiteStorage) -> None:
+    store = sqlite_storage.song_store
+    store._supports_returning = False  # force fallback path
+    first = store.upsert_many([
+        _make_song("fallback-1", updated_at=100, created_at=100),
+    ])
+    assert first and all(identifier > 0 for identifier in first)
+
+    store.upsert_many([
+        {
+            "song_id": "fallback-1",
+            "scanner_stable_id": "fallback-1",
+            "group_key": "group::fallback-1",
+            "title": "Updated",
+            "updated_at": 200,
+            "created_at": 100,
+        }
+    ])
+
+    stored = store.find_one({"song_id": "fallback-1"})
+    assert stored is not None
+    assert stored["title"] == "Updated"
+
+
 def test_filters_and_sorting(sqlite_storage: SQLiteStorage) -> None:
     sqlite_storage.song_store.upsert_many(
         [
@@ -348,6 +372,12 @@ def test_manifest_bulk_update_one_supported(sqlite_storage: SQLiteStorage) -> No
 
     stored = manifest_store.get("entry")
     assert stored == {"value": 2, "updated_at": 1000}
+
+
+def test_manifest_update_one_accepts_id_alias(sqlite_storage: SQLiteStorage) -> None:
+    manifest_store = sqlite_storage.manifest_store
+    manifest_store.update_one({"id": "alias"}, {"$set": {"value": 42}}, upsert=True)
+    assert manifest_store.get("alias") == {"value": 42}
 
 
 def test_perf_smoke(sqlite_storage: SQLiteStorage) -> None:

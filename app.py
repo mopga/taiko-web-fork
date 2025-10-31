@@ -3647,11 +3647,7 @@ else:
             return None
         if not entries:
             return None
-        main_candidates = [entry for entry in entries if entry.name.lower() == "main.tja"]
-        if main_candidates:
-            selected = min(main_candidates, key=lambda item: item.name.lower())
-        else:
-            selected = min(entries, key=lambda item: item.name.lower())
+        selected = min(entries, key=lambda item: item.name)
         try:
             relative_path = selected.relative_to(songs_root)
         except ValueError:
