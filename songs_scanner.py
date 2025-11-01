@@ -4543,18 +4543,19 @@ class SongScanner:
         else:
             try:
                 result_doc = song_store.find_one({'song_id': stable_song_id})
-                if not result_doc:
-                    result_doc = song_store.find_one(stable_group_filter)
-                if not result_doc:
-                    result_doc = song_store.find_one({'scanner_stable_id': stable_song_id})
             except Exception:  # pragma: no cover - tolerate lookup issues
+                LOGGER.exception(
+                    "Song document lookup failed after upsert song_id=%s key=%s",
+                    stable_song_id,
+                    key,
+                )
                 result_doc = None
 
         if not isinstance(result_doc, dict):
-            LOGGER.info(
-                "Song document not immediately readable after upsert key=%s stable_id=%s",
-                key,
+            LOGGER.error(
+                "Song document not readable after upsert song_id=%s key=%s",
                 stable_song_id,
+                key,
             )
             return None
 

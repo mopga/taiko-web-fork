@@ -4159,15 +4159,13 @@ else:
         guessed, _ = mimetypes.guess_type(f"dummy{suffix}")
         return guessed
 
-    @app.route("/songs/<song_identifier>/<path:filename>")
-    def desktop_song_files(song_identifier: str, filename: str):
-        if not isinstance(song_identifier, str) or not isinstance(filename, str):
+    @app.route("/songs/<song_identifier>/<path:requested>")
+    def desktop_song_files(song_identifier: str, requested: str):
+        if not isinstance(song_identifier, str) or not isinstance(requested, str):
             abort(404)
 
-        requested_segments = [segment for segment in filename.split("/") if segment]
-        if not requested_segments:
+        if not requested:
             abort(404)
-        requested = "/".join(requested_segments)
 
         normalized_identifier = _desktop_normalize_identifier(song_identifier)
         if not normalized_identifier:
