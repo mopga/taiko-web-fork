@@ -2232,7 +2232,7 @@ def route_api_preview():
 
 
 def _serialize_catalog_entry(
-    entry: Mapping[str, Any], *, manifest_entry: Optional[Mapping[str, Any]] = None
+    entry: Mapping[str, Any], *, manifest_entry: Optional[Mapping[str, Any]] = None, include_virtual_fields: bool = False
 ) -> Optional[dict[str, Any]]:
     sources: list[Mapping[str, Any]] = []
     if isinstance(entry, Mapping):
@@ -2295,10 +2295,17 @@ def _serialize_catalog_entry(
     base_dir_url = f"/songs/{primary_id}/"
     url_value = f"{base_dir_url}main.tja"
 
-    normalized_paths: dict[str, Any] = {}
+    sanitized_paths: dict[str, Any] = {}
     if isinstance(paths_value, Mapping):
         for key, value in paths_value.items():
-            if key in {'tja_url', 'audio_url', 'dir_url'} and isinstance(value, str):
+            if isinstance(key, str) and isinstance(value, str):
+                sanitized_paths[key] = value
+
+    normalized_paths: dict[str, Any] = {}
+    if include_virtual_fields:
+        for key in {'tja_url', 'audio_url', 'dir_url'}:
+            value = sanitized_paths.get(key)
+            if isinstance(value, str):
                 normalized_paths[key] = value
 
     wave_name = None
@@ -2307,12 +2314,13 @@ def _serialize_catalog_entry(
         if isinstance(wave_candidate, str) and wave_candidate.strip():
             wave_name = wave_candidate.strip()
 
-    normalized_paths.pop('audio_url', None)
-    if wave_name:
-        normalized_paths['audio_url'] = f"{base_dir_url}{wave_name}"
+    if include_virtual_fields:
+        normalized_paths.pop('audio_url', None)
+        if wave_name:
+            normalized_paths['audio_url'] = f"{base_dir_url}{wave_name}"
 
-    normalized_paths['tja_url'] = url_value
-    normalized_paths['dir_url'] = base_dir_url
+        normalized_paths['tja_url'] = url_value
+        normalized_paths['dir_url'] = base_dir_url
 
     if isinstance(title_lang_value, Mapping):
         normalized_title_lang = dict(title_lang_value)
@@ -2323,6 +2331,8 @@ def _serialize_catalog_entry(
         normalized_subtitle_lang = dict(subtitle_lang_value)
     else:
         normalized_subtitle_lang = {}
+
+    paths_payload = normalized_paths if include_virtual_fields else sanitized_paths
 
     item: dict[str, Any] = {
         'id': primary_id,
@@ -2335,12 +2345,22 @@ def _serialize_catalog_entry(
         'duration_ms': duration_ms,
         'preview_available': preview_available,
         'source_type': source_type_value if isinstance(source_type_value, str) and source_type_value else 'tja',
-        'paths': normalized_paths,
+        'paths': paths_payload,
         'is_playable': bool(playable_flag),
         'difficulties': _normalize_difficulties(combined_entry, assume_valid=CATALOG_ASSUME_VALID),
-        'music_type': combined_entry.get('music_type'),
-        'url': url_value,
     }
+
+    if include_virtual_fields:
+        item['url'] = url_value
+        item['paths'] = paths_payload
+        item['music_type'] = combined_entry.get('music_type')
+    else:
+        item.pop('title_lang', None)
+        item.pop('subtitle_lang', None)
+
+    if not include_virtual_fields and 'music_type' in item:
+        item.pop('music_type', None)
+
     return item
 
 
@@ -2524,7 +2544,11 @@ def _load_filesystem_catalog_entries(
     payload: list[dict[str, Any]] = []
     for doc, manifest_entry in slice_pairs:
         try:
-            item = _serialize_catalog_entry(doc, manifest_entry=manifest_entry)
+            item = _serialize_catalog_entry(
+                doc,
+                manifest_entry=manifest_entry,
+                include_virtual_fields=True,
+            )
         except RuntimeError:
             app.logger.exception(
                 'Failed to serialize sqlite song entry id=%s',
