@@ -621,6 +621,14 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     audio_payload = b"\x11\x22"
     audio_path.write_bytes(audio_payload)
 
+    tja_contents = tja_path.read_text(encoding="utf-8")
+    wave_name = None
+    for line in tja_contents.splitlines():
+        if line.upper().startswith("WAVE:"):
+            wave_name = line.split(":", 1)[1].strip()
+            break
+    assert wave_name
+
     scanner = SongScanner(
         db=_DummyDB(),
         songs_dir=songs_dir,
@@ -638,6 +646,9 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     assert stored_doc is not None
     song_identifier = stored_doc.get('song_id')
     assert isinstance(song_identifier, str)
+    dir_path_value = stored_doc.get('dir_path')
+    assert dir_path_value == str(pack_dir.resolve())
+    assert stored_doc.get('tja_filename') == tja_path.name
 
     client = app_module.app.test_client()
     response = client.get(f"/songs/{song_identifier}/main.tja")
@@ -660,16 +671,49 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     payload = api_response.get_json()
     assert isinstance(payload, list)
     assert payload
+    entry_by_id = None
     for entry in payload:
         assert isinstance(entry, dict)
         entry_id = entry.get('id')
         assert isinstance(entry_id, str) and entry_id.strip()
+        if entry_id == song_identifier:
+            entry_by_id = entry
         song_response = client.get(f"/songs/{entry_id}/main.tja")
         assert song_response.status_code == 200
+    first_entry = payload[0]
+    assert isinstance(first_entry.get('id'), str)
+    assert isinstance(first_entry.get('url'), str)
+    assert first_entry['url'].startswith('/songs/')
+    assert first_entry['url'].endswith('/main.tja')
+    assert isinstance(first_entry.get('category'), str)
+    assert isinstance(first_entry.get('category_id'), int)
+    assert entry_by_id is not None
+    assert entry_by_id['id'] == song_identifier
+    entry_url = entry_by_id.get('url')
+    assert isinstance(entry_url, str) and entry_url == f"/songs/{song_identifier}/main.tja"
+    assert isinstance(entry_by_id.get('category'), str)
+    assert isinstance(entry_by_id.get('category_id'), int)
+    paths_value = entry_by_id.get('paths')
+    assert isinstance(paths_value, dict)
+    assert set(paths_value).issubset({'tja_url', 'audio_url', 'dir_url'})
+    assert paths_value.get('tja_url') == entry_url
+    assert paths_value.get('dir_url') == f"/songs/{song_identifier}/"
+    if 'audio_url' in paths_value:
+        assert paths_value['audio_url'] == f"/songs/{song_identifier}/{wave_name}"
 
     summary_second = scanner.scan(full=True)
     assert summary_second.get('errors', 0) == 0
     assert summary_second.get('updated', 0) >= 1
+
+    wave_response = client.get(f"/songs/{song_identifier}/{wave_name}")
+    assert wave_response.status_code == 200
+    assert wave_response.data == audio_payload
+
+    categories_response = client.get("/api/categories")
+    assert categories_response.status_code == 200
+    categories_payload = categories_response.get_json()
+    assert isinstance(categories_payload, list)
+    assert len(categories_payload) > 0
 
 
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):

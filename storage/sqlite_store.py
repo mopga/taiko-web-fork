@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequenc
 LOGGER = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 UPSERT_CHUNK_SIZE = 500
 
@@ -362,26 +362,36 @@ class SQLiteDatabase:
                 version = SCHEMA_VERSION
             else:
                 version = int(row[0])
-                if version < 2:
-                    LOGGER.info(
-                        "Migrating SQLite schema from v%s to v2", version
-                    )
-                    self._migrate_schema_v1_to_v2(cursor)
-                    cursor.execute(
-                        "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
-                        (2,),
-                    )
-                    version = 2
-                if version < 3:
-                    LOGGER.info(
-                        "Migrating SQLite schema from v%s to v3", version
-                    )
-                    self._migrate_schema_v2_to_v3(cursor)
-                    cursor.execute(
-                        "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
-                        (SCHEMA_VERSION,),
-                    )
-                    version = SCHEMA_VERSION
+            if version < 2:
+                LOGGER.info(
+                    "Migrating SQLite schema from v%s to v2", version
+                )
+                self._migrate_schema_v1_to_v2(cursor)
+                cursor.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
+                    (2,),
+                )
+                version = 2
+            if version < 3:
+                LOGGER.info(
+                    "Migrating SQLite schema from v%s to v3", version
+                )
+                self._migrate_schema_v2_to_v3(cursor)
+                cursor.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
+                    (3,),
+                )
+                version = 3
+            if version < SCHEMA_VERSION:
+                LOGGER.info(
+                    "Migrating SQLite schema from v%s to v%d", version, SCHEMA_VERSION
+                )
+                self._migrate_schema_v3_to_v4(cursor)
+                cursor.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
+                    (SCHEMA_VERSION,),
+                )
+                version = SCHEMA_VERSION
             cursor.close()
         return version
 
@@ -405,6 +415,8 @@ class SQLiteDatabase:
                 meta_json TEXT,
                 tja_path TEXT,
                 assets_json TEXT,
+                dir_path TEXT,
+                tja_filename TEXT,
                 updated_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
@@ -465,6 +477,8 @@ class SQLiteDatabase:
                 meta_json,
                 tja_path,
                 assets_json,
+                dir_path,
+                tja_filename,
                 updated_at,
                 created_at
             )
@@ -484,6 +498,8 @@ class SQLiteDatabase:
                 meta_json,
                 NULL AS tja_path,
                 NULL AS assets_json,
+                NULL AS dir_path,
+                NULL AS tja_filename,
                 updated_at,
                 created_at
             FROM songs_v1;
@@ -501,12 +517,28 @@ class SQLiteDatabase:
         )
 
     def _migrate_schema_v2_to_v3(self, cursor: sqlite3.Cursor) -> None:
-        cursor.executescript(
-            """
-            ALTER TABLE songs ADD COLUMN tja_path TEXT;
-            ALTER TABLE songs ADD COLUMN assets_json TEXT;
-            """
-        )
+        try:
+            cursor.executescript(
+                """
+                ALTER TABLE songs ADD COLUMN tja_path TEXT;
+                ALTER TABLE songs ADD COLUMN assets_json TEXT;
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+    def _migrate_schema_v3_to_v4(self, cursor: sqlite3.Cursor) -> None:
+        try:
+            cursor.executescript(
+                """
+                ALTER TABLE songs ADD COLUMN dir_path TEXT;
+                ALTER TABLE songs ADD COLUMN tja_filename TEXT;
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
     def _log_startup(self) -> None:
         LOGGER.info(
@@ -621,9 +653,10 @@ class SQLiteSongStore:
             """
             INSERT INTO songs(
                 scanner_stable_id, group_key, song_id, title, title_reading, artist, genre, bpm, duration_ms,
-                is_playable, difficulties_json, tags_json, meta_json, tja_path, assets_json, updated_at, created_at
+                is_playable, difficulties_json, tags_json, meta_json, tja_path, assets_json, dir_path, tja_filename,
+                updated_at, created_at
             ) VALUES(
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(scanner_stable_id, group_key) DO UPDATE SET
                 song_id=excluded.song_id,
@@ -639,6 +672,8 @@ class SQLiteSongStore:
                 meta_json=excluded.meta_json,
                 tja_path=excluded.tja_path,
                 assets_json=excluded.assets_json,
+                dir_path=excluded.dir_path,
+                tja_filename=excluded.tja_filename,
                 updated_at=excluded.updated_at,
                 created_at=excluded.created_at
             RETURNING id
@@ -1078,6 +1113,8 @@ class SQLiteSongStore:
             candidate = sanitized_assets.get("tja_main")
             if isinstance(candidate, str):
                 tja_path_value = self._normalize_asset_value(candidate)
+        dir_path_value = self._normalize_asset_value(song.get("dir_path"))
+        tja_filename_value = self._normalize_asset_value(song.get("tja_filename"))
         updated_at = self._coerce_timestamp_field("updated_at", song.get("updated_at"), "milliseconds", 0)
         created_at = self._coerce_timestamp_field(
             "created_at", song.get("created_at"), "milliseconds", updated_at
@@ -1098,6 +1135,8 @@ class SQLiteSongStore:
             _serialize_json(meta),
             tja_path_value,
             _serialize_json(sanitized_assets) if sanitized_assets else None,
+            dir_path_value,
+            tja_filename_value,
             updated_at,
             created_at,
         )
