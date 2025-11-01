@@ -891,6 +891,12 @@ class SQLiteSongStore:
         row = cursor.fetchone()
         return self._row_to_song(row) if row else None
 
+    def find_by_id(self, song_id: str) -> Optional[Mapping[str, Any]]:
+        """Retrieve a song document by identifier, mirroring Mongo semantics."""
+
+        document = self.get_by_id(song_id)
+        return dict(document) if document is not None else None
+
     def query(
         self,
         filter: SongFilter | None,

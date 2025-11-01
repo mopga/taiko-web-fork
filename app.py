@@ -3834,36 +3834,61 @@ else:
             abort(404)
 
         try:
-            candidate = safe_join(str(DESKTOP_SONGS_DIR), subpath)
-        except Exception:
-            candidate = None
-
-        if not candidate:
-            abort(404)
-
-        try:
             songs_root = DESKTOP_SONGS_DIR.resolve()
         except Exception:  # pragma: no cover - defensive logging
             app.logger.exception("Failed to resolve songs root %s", DESKTOP_SONGS_DIR)
             abort(500)
 
         try:
-            resolved = Path(candidate).resolve()
-        except FileNotFoundError:
+            candidate = safe_join(str(DESKTOP_SONGS_DIR), subpath)
+        except Exception:
+            candidate = None
+
+        resolved: Optional[Path] = None
+        if candidate:
+            try:
+                direct_candidate = Path(candidate).resolve()
+            except FileNotFoundError:
+                direct_candidate = None
+            except Exception:  # pragma: no cover - defensive logging
+                app.logger.exception("Failed to resolve song asset path %s", candidate)
+                abort(500)
+            if direct_candidate is not None:
+                try:
+                    direct_candidate.relative_to(songs_root)
+                except ValueError:
+                    direct_candidate = None
+                if direct_candidate is not None and direct_candidate.is_file():
+                    resolved = direct_candidate
+        if resolved is not None:
+            return cache_wrap(flask.send_file(resolved), 604800)
+
+        parts = subpath.split("/", 1)
+        if len(parts) != 2:
             abort(404)
-        except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to resolve song asset path %s", candidate)
-            abort(500)
+        song_identifier, asset_name = (part.strip() for part in parts)
+        if not song_identifier or not asset_name:
+            abort(404)
 
         try:
-            resolved.relative_to(songs_root)
-        except ValueError:
+            fallback_path = resolve_song_file_path(song_identifier, asset_name)
+        except FileNotFoundError:
+            app.logger.debug(
+                "desktop songs fallback missing asset id=%s name=%s",
+                song_identifier,
+                asset_name,
+            )
+            abort(404)
+        except Exception:
+            app.logger.debug(
+                "desktop songs fallback errored id=%s name=%s",
+                song_identifier,
+                asset_name,
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
             abort(404)
 
-        if not resolved.is_file():
-            abort(404)
-
-        return cache_wrap(flask.send_file(resolved), 604800)
+        return cache_wrap(flask.send_file(fallback_path), 604800)
 
 
 @app.route(basedir + "manifest.json")

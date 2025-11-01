@@ -131,6 +131,62 @@ def test_desktop_song_route_serves_and_restricts(tmp_path, monkeypatch):
     assert traversal_response.status_code == 404
 
 
+def test_desktop_song_route_id_fallback(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    songs_dir = tmp_path / "songs"
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+    manifest_store = app_module.MANIFEST_STORE
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "custom-id",
+                "scanner_stable_id": "stable-custom",
+                "group_key": "group::custom",
+                "title": "Custom Song",
+                "tja_path": "CustomPack/main.tja",
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+
+    if manifest_store is not None:
+        manifest_store.put(
+            "stable-custom",
+            {
+                "file_path": "CustomPack/main.tja",
+                "paths": {
+                    "tja_url": "/songs/CustomPack/main.tja",
+                    "dir_url": "/songs/CustomPack/",
+                },
+            },
+        )
+
+    pack_dir = songs_dir / "CustomPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    main_path = pack_dir / "main.tja"
+    main_path.write_text("#TITLE Custom", encoding="utf-8")
+    cover_path = pack_dir / "jacket.png"
+    cover_payload = b"PNG"
+    cover_path.write_bytes(cover_payload)
+
+    client = app_module.app.test_client()
+
+    main_response = client.get("/songs/custom-id/main.tja")
+    assert main_response.status_code == 200
+    assert main_response.data == main_path.read_bytes()
+
+    cover_response = client.get("/songs/custom-id/jacket.png")
+    assert cover_response.status_code == 200
+    assert cover_response.data == cover_payload
+
+    missing_response = client.get("/songs/custom-id/missing.bin")
+    assert missing_response.status_code == 404
+
+
 def test_web_profile_unchanged(tmp_path, monkeypatch):
     songs_dir = tmp_path / "songs"
     songs_dir.mkdir()
