@@ -20,7 +20,7 @@ from fractions import Fraction
 from datetime import UTC, datetime
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from queue import Empty, Full, Queue
 from typing import (
     TYPE_CHECKING,
@@ -4270,7 +4270,9 @@ class SongScanner:
         else:
             document['title_lang'] = {'en': resolved}
         self._metrics.increment('recovered_titles_total')
-        LOGGER.warning(
+        log_level = logging.DEBUG if source == 'title_lang.ja' else logging.INFO
+        LOGGER.log(
+            log_level,
             'Recovered missing song title: key=%s source=%s title=%s',
             key,
             source or 'unknown',
@@ -4536,16 +4538,18 @@ class SongScanner:
                         else:
                             final_mode = 'insert'
                             mode_detail = 'stable-group'
-            if result_doc_override is not None:
-                result_doc = result_doc_override
-            else:
-                try:
+        if result_doc_override is not None:
+            result_doc = result_doc_override
+        else:
+            try:
+                result_doc = song_store.find_one(stable_group_filter)
+                if not result_doc:
                     result_doc = song_store.find_one({'scanner_stable_id': stable_song_id})
-                except Exception:  # pragma: no cover - tolerate lookup issues
-                    result_doc = None
+            except Exception:  # pragma: no cover - tolerate lookup issues
+                result_doc = None
 
         if not isinstance(result_doc, dict):
-            LOGGER.warning("Failed to load song document for %s after upsert", key)
+            LOGGER.error("Failed to load song document for %s after upsert", key)
             summary['errors'] += 1
             return None
 
@@ -5062,6 +5066,27 @@ class SongScanner:
             document['audioHash'] = audio_hash
         if source_song_id is not None:
             document['scanner_source_song_id'] = source_song_id
+
+        if self._single_node_mode:
+            main_relative_path = primary_path if isinstance(primary_path, str) else None
+            assets_payload: Dict[str, object] = {}
+            assets_files: Dict[str, str] = {}
+            if main_relative_path:
+                document['tja_path'] = main_relative_path
+                main_name = PurePosixPath(main_relative_path).name
+                assets_files[main_name] = main_relative_path
+                assets_payload['tja_main'] = main_relative_path
+            wave_name = base.wave.strip() if isinstance(base.wave, str) else None
+            if wave_name:
+                assets_payload['wave'] = wave_name
+            audio_relative = base.audio_path if isinstance(base.audio_path, str) else None
+            if audio_relative:
+                audio_name = PurePosixPath(audio_relative).name
+                assets_files[audio_name] = audio_relative
+            if assets_files:
+                assets_payload['files'] = assets_files
+            if assets_payload:
+                document['assets'] = assets_payload
 
         if CATALOG_ASSUME_VALID:
             paths_dict = document.get('paths') if isinstance(document.get('paths'), dict) else {}

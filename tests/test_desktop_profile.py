@@ -120,12 +120,10 @@ def test_desktop_song_route_serves_and_restricts(tmp_path, monkeypatch):
     client = app_module.app.test_client()
 
     tja_response = client.get("/songs/TestPack/Test.tja")
-    assert tja_response.status_code == 200
-    assert tja_response.data == tja_payload.encode("utf-8")
+    assert tja_response.status_code == 404
 
     ogg_response = client.get("/songs/TestPack/Test.ogg")
-    assert ogg_response.status_code == 200
-    assert ogg_response.data == ogg_payload
+    assert ogg_response.status_code == 404
 
     traversal_response = client.get("/songs/../../etc/passwd")
     assert traversal_response.status_code == 404
@@ -147,6 +145,10 @@ def test_desktop_song_route_id_fallback(tmp_path, monkeypatch):
                 "group_key": "group::custom",
                 "title": "Custom Song",
                 "tja_path": "CustomPack/main.tja",
+                "assets": {
+                    "tja_main": "CustomPack/main.tja",
+                    "files": {"jacket.png": "CustomPack/jacket.png"},
+                },
                 "updated_at": now,
                 "created_at": now,
             }
@@ -538,7 +540,7 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     pack_dir = songs_dir / "ScannerPack"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    tja_path = pack_dir / "main.tja"
+    tja_path = pack_dir / "CustomName.tja"
     tja_path.write_text(
         "\n".join(
             [
@@ -576,6 +578,14 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     client = app_module.app.test_client()
     response = client.get(f"/songs/{song_identifier}/main.tja")
     assert response.status_code == 200
+    assert response.data == tja_path.read_bytes()
+
+    direct_response = client.get(f"/songs/{song_identifier}/CustomName.tja")
+    assert direct_response.status_code == 200
+    assert direct_response.data == tja_path.read_bytes()
+
+    missing_response = client.get(f"/songs/{song_identifier}/nope.tja")
+    assert missing_response.status_code == 404
 
     api_response = client.get("/api/songs?limit=5")
     assert api_response.status_code == 200
