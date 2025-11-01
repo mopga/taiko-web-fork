@@ -12,6 +12,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from storage.sqlite_store import (
     DifficultyFilter,
     Page,
+    SCHEMA_VERSION,
     SongFilter,
     SortField,
     SQLiteSongUpsertItem,
@@ -90,7 +91,7 @@ def sqlite_storage(tmp_path: Path) -> SQLiteStorage:
 
 
 def test_schema_initialization(sqlite_storage: SQLiteStorage) -> None:
-    assert sqlite_storage.schema_version == 2
+    assert sqlite_storage.schema_version == SCHEMA_VERSION
     assert sqlite_storage.path.exists()
 
 
