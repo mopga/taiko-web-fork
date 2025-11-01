@@ -4164,7 +4164,7 @@ else:
         if not isinstance(song_identifier, str) or not isinstance(requested, str):
             abort(404)
 
-        if not requested:
+        if not song_identifier or not requested:
             abort(404)
 
         normalized_identifier = _desktop_normalize_identifier(song_identifier)
@@ -4189,7 +4189,7 @@ else:
             abort(500)
 
         mimetype = _mimetype_from_ext(resolved_path.suffix)
-        return send_file(str(resolved_path), mimetype=mimetype, max_age=3600)
+        return send_file(resolved_path, mimetype=mimetype, max_age=3600)
 
 
 @app.route(basedir + "manifest.json")
