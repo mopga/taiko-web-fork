@@ -580,7 +580,7 @@ def _load_song_document_for_identifier(
         if document:
             return dict(document)
 
-    lookup_keys = ('song_id', 'scanner_stable_id')
+    lookup_keys = ('song_id', 'group_key', 'scanner_stable_id')
     for key in lookup_keys:
         filter_doc = {key: identifier}
         try:
@@ -2307,6 +2307,7 @@ def _serialize_catalog_entry(
         if isinstance(wave_candidate, str) and wave_candidate.strip():
             wave_name = wave_candidate.strip()
 
+    normalized_paths.pop('audio_url', None)
     if wave_name:
         normalized_paths['audio_url'] = f"{base_dir_url}{wave_name}"
 
@@ -3909,101 +3910,207 @@ else:
         manifest_store: Optional[ManifestStoreInterface] = None,
         songs_dir: Optional[Path] = None,
     ) -> Path:
+        del manifest_store  # desktop asset resolution does not consult manifest overrides
+
         normalized_id = _desktop_normalize_identifier(song_identifier)
         if not normalized_id:
             raise FileNotFoundError("song identifier is missing")
+        if not isinstance(requested_name, str):
+            raise FileNotFoundError("requested asset name is missing")
         name_token = requested_name.strip()
         if not name_token:
             raise FileNotFoundError("requested asset name is missing")
-        store = song_store or _require_song_store()
-        songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
-        document = _desktop_fetch_song_document(normalized_id, song_store=store)
-        if document is None:
-            raise FileNotFoundError("song not found")
-        manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
-        mapped_absolute = _desktop_lookup_asset_absolute_path(
-            document,
-            manifest_entry,
-            name_token,
-            songs_root,
-        )
-        if mapped_absolute is not None:
-            return mapped_absolute
 
-        main_absolute = _desktop_resolve_main_tja_absolute_path(document, manifest_entry, songs_root)
-        if main_absolute is not None:
-            if name_token.lower() == "main.tja":
-                return main_absolute
-            safe_candidate = safe_join(str(main_absolute.parent), name_token)
-            if safe_candidate is None:
-                raise FileNotFoundError("invalid asset path")
-            candidate_path = Path(safe_candidate)
+        normalized_request = _desktop_normalize_posix_path(name_token)
+        if normalized_request is None:
+            raise FileNotFoundError("invalid asset path")
+        if normalized_request.is_absolute() or ".." in normalized_request.parts:
+            raise FileNotFoundError("invalid asset path")
+
+        songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
+        try:
+            songs_root_resolved = songs_root.resolve()
+        except FileNotFoundError:
+            songs_root_resolved = songs_root
+
+        store = song_store or _require_song_store()
+
+        projection: Optional[Mapping[str, Any]] = {
+            '_id': 0,
+            'song_id': 1,
+            'group_key': 1,
+            'scanner_stable_id': 1,
+            'tja_path': 1,
+            'assets': 1,
+        }
+        try:
+            document = _desktop_fetch_song_document(
+                normalized_id,
+                song_store=store,
+                projection=projection,
+            )
+        except TypeError:
+            document = _desktop_fetch_song_document(normalized_id, song_store=store)
+
+        assets_map: dict[str, Path] = {}
+        main_absolute: Optional[Path] = None
+        main_name_key: Optional[str] = None
+        base_dir: Optional[Path] = None
+
+        def _resolve_existing_path(raw_value: object, *, relative_hint: Optional[PurePosixPath] = None) -> Optional[Path]:
+            if isinstance(raw_value, Path):
+                candidate = raw_value
+            elif isinstance(raw_value, (str, os.PathLike)):
+                token = str(raw_value).strip()
+                if not token:
+                    return None
+                candidate_path = Path(token)
+                if not candidate_path.is_absolute():
+                    normalized = _desktop_normalize_posix_path(token)
+                    if normalized is None or normalized.is_absolute() or ".." in normalized.parts:
+                        return None
+                    candidate_path = songs_root_resolved / normalized.as_posix()
+            elif relative_hint is not None:
+                candidate_path = songs_root_resolved / relative_hint.as_posix()
+            else:
+                return None
             try:
                 resolved = candidate_path.resolve()
-            except Exception as exc:
-                raise FileNotFoundError("requested asset missing") from exc
+            except FileNotFoundError:
+                return None
             try:
-                resolved.relative_to(songs_root)
-            except ValueError as exc:
-                raise FileNotFoundError("resolved path escapes songs directory") from exc
+                resolved.relative_to(songs_root_resolved)
+            except ValueError:
+                return None
             if not resolved.is_file():
-                raise FileNotFoundError("requested asset missing")
+                return None
             return resolved
 
-        relative_main = _desktop_resolve_main_tja_relative_path(document, manifest_entry, songs_root)
-        assets_doc = document.get("assets") if isinstance(document.get("assets"), Mapping) else None
+        def _register_asset(key: PurePosixPath, value: Path) -> None:
+            normalized_key = key.as_posix().casefold()
+            if normalized_key not in assets_map:
+                assets_map[normalized_key] = value
 
-        def _from_mapping(mapping: Mapping[str, Any], logical_name: str) -> Optional[PurePosixPath]:
-            logical_key = logical_name.casefold()
-            for raw_key, raw_value in mapping.items():
-                if not isinstance(raw_key, str):
-                    continue
-                if raw_key.casefold() != logical_key:
-                    continue
-                normalized = _desktop_normalize_posix_path(raw_value)
-                if normalized is not None and not normalized.is_absolute():
-                    return normalized
-            return None
+        if isinstance(document, Mapping):
+            assets_doc = document.get('assets') if isinstance(document.get('assets'), Mapping) else {}
 
-        def _resolve_asset_relative() -> PurePosixPath:
-            if name_token.lower() == "main.tja":
-                return relative_main
-            relative_main_token = relative_main.as_posix().casefold()
-            if name_token.casefold() == relative_main_token:
-                return relative_main
-            if assets_doc:
-                direct = _from_mapping(assets_doc, name_token)
-                if direct is not None:
-                    return direct
-                files_map = assets_doc.get("files") if isinstance(assets_doc.get("files"), Mapping) else None
-                if files_map:
-                    mapped = _from_mapping(files_map, name_token)
-                    if mapped is not None:
-                        return mapped
-                wave_name = assets_doc.get("wave") if isinstance(assets_doc.get("wave"), str) else None
-                if wave_name and wave_name.casefold() == name_token.casefold():
-                    candidate = relative_main.parent.joinpath(PurePosixPath(wave_name))
-                    return candidate
-            component = _desktop_normalize_posix_path(name_token)
-            if component is None or component.is_absolute() or ".." in component.parts:
-                raise FileNotFoundError("invalid asset path")
-            if component == relative_main:
-                return component
-            parent = component.parent
-            if parent in {PurePosixPath("."), PurePosixPath("")}:
-                base_dir = relative_main.parent if relative_main.parent != PurePosixPath("") else PurePosixPath(".")
-                return base_dir.joinpath(component)
-            return component
+            tja_path_value = document.get('tja_path')
+            if isinstance(tja_path_value, str):
+                normalized_tja = _desktop_normalize_posix_path(tja_path_value)
+            else:
+                normalized_tja = None
 
-        relative = _resolve_asset_relative()
-        absolute = (songs_root / relative.as_posix()).resolve()
-        try:
-            absolute.relative_to(songs_root)
-        except ValueError as exc:
-            raise FileNotFoundError("resolved path escapes songs directory") from exc
-        if not absolute.is_file():
+            main_candidate = None
+            if isinstance(assets_doc, Mapping):
+                main_candidate = assets_doc.get('tja_main')
+            if main_candidate is None:
+                main_candidate = tja_path_value
+            main_absolute = _resolve_existing_path(main_candidate, relative_hint=normalized_tja)
+            if main_absolute is None and normalized_tja is not None:
+                tentative = songs_root_resolved / normalized_tja.as_posix()
+                try:
+                    tentative_resolved = tentative.resolve()
+                    tentative_resolved.relative_to(songs_root_resolved)
+                except (FileNotFoundError, ValueError):
+                    tentative_resolved = None
+                else:
+                    if tentative_resolved.is_file():
+                        main_absolute = tentative_resolved
+
+            if main_absolute is not None:
+                base_dir = main_absolute.parent
+                main_name_key = main_absolute.name
+                _register_asset(PurePosixPath('main.tja'), main_absolute)
+                _register_asset(PurePosixPath(main_absolute.name), main_absolute)
+            elif normalized_tja is not None:
+                base_dir = songs_root_resolved / normalized_tja.parent.as_posix()
+            else:
+                base_dir = songs_root_resolved / normalized_id
+
+            files_doc = assets_doc.get('files') if isinstance(assets_doc, Mapping) else None
+            if isinstance(files_doc, Mapping):
+                for raw_key, raw_path in files_doc.items():
+                    normalized_key_path = _desktop_normalize_posix_path(raw_key)
+                    if (
+                        normalized_key_path is None
+                        or normalized_key_path.is_absolute()
+                        or ".." in normalized_key_path.parts
+                    ):
+                        continue
+                    resolved_path = _resolve_existing_path(raw_path, relative_hint=normalized_key_path)
+                    if resolved_path is None and base_dir is not None:
+                        try:
+                            tentative = (base_dir / normalized_key_path.as_posix()).resolve()
+                            tentative.relative_to(songs_root_resolved)
+                        except (FileNotFoundError, ValueError):
+                            continue
+                        if not tentative.is_file():
+                            continue
+                        resolved_path = tentative
+                    if resolved_path is None:
+                        continue
+                    _register_asset(normalized_key_path, resolved_path)
+
+            wave_name = None
+            if isinstance(assets_doc, Mapping):
+                wave_candidate = assets_doc.get('wave')
+                if isinstance(wave_candidate, str) and wave_candidate.strip():
+                    wave_name = wave_candidate.strip()
+            if wave_name and base_dir is not None:
+                normalized_wave = _desktop_normalize_posix_path(wave_name)
+                if (
+                    normalized_wave is not None
+                    and not normalized_wave.is_absolute()
+                    and ".." not in normalized_wave.parts
+                ):
+                    resolved_wave = _resolve_existing_path(normalized_wave.as_posix(), relative_hint=normalized_wave)
+                    if resolved_wave is None:
+                        try:
+                            tentative_wave = (base_dir / normalized_wave.as_posix()).resolve()
+                            tentative_wave.relative_to(songs_root_resolved)
+                        except (FileNotFoundError, ValueError):
+                            tentative_wave = None
+                        else:
+                            if tentative_wave.is_file():
+                                resolved_wave = tentative_wave
+                    if resolved_wave is not None:
+                        _register_asset(normalized_wave, resolved_wave)
+
+        if base_dir is None:
+            base_dir = songs_root_resolved / normalized_id
+
+        normalized_key = normalized_request.as_posix().casefold()
+        candidate_path = assets_map.get(normalized_key)
+
+        if candidate_path is None and main_name_key:
+            if normalized_key == main_name_key.casefold():
+                candidate_path = main_absolute
+
+        if candidate_path is None and base_dir is not None:
+            try:
+                tentative = (base_dir / normalized_request.as_posix()).resolve()
+                tentative.relative_to(songs_root_resolved)
+            except (FileNotFoundError, ValueError):
+                tentative = None
+            else:
+                if tentative.is_file():
+                    candidate_path = tentative
+
+        if candidate_path is None:
+            fallback_dir = songs_root_resolved / normalized_id
+            try:
+                fallback_path = (fallback_dir / normalized_request.as_posix()).resolve()
+                fallback_path.relative_to(songs_root_resolved)
+            except (FileNotFoundError, ValueError):
+                fallback_path = None
+            else:
+                if fallback_path.is_file():
+                    candidate_path = fallback_path
+
+        if candidate_path is None:
             raise FileNotFoundError("requested asset missing")
-        return absolute
+
+        return candidate_path
 
     @app.route("/")
     def desktop_root_loader():
@@ -4050,86 +4157,49 @@ else:
         if not song_identifier or not requested_filename:
             abort(404)
 
-        asset_name = requested_filename
         normalized_identifier = _desktop_normalize_identifier(song_identifier)
         if not normalized_identifier:
             abort(404)
 
-        if requested_filename.lower() == "main.tja":
-            main_override: Optional[str] = None
-
-            def _sanitize_candidate(value: object) -> Optional[str]:
-                normalized = _desktop_normalize_posix_path(value)
-                if normalized is None:
-                    return None
-                if normalized.is_absolute() or ".." in normalized.parts:
-                    return None
-                return normalized.as_posix()
-
-            try:
-                song_store = _require_song_store()
-                song_document = _desktop_fetch_song_document(
-                    normalized_identifier,
-                    song_store=song_store,
-                )
-            except FileNotFoundError:
-                song_document = None
-            except Exception:
-                app.logger.exception(
-                    "desktop song metadata lookup failed id=%s",
-                    song_identifier,
-                )
-                abort(500)
-
-            if song_document is not None:
-                manifest_entry = _desktop_load_manifest_entry(
-                    song_document,
-                    manifest_store=MANIFEST_STORE,
-                )
-                if manifest_entry:
-                    main_override = (
-                        _sanitize_candidate(manifest_entry.get("tja_path"))
-                        or _sanitize_candidate(manifest_entry.get("file_path"))
-                    )
-                    if main_override is None:
-                        assets_manifest = manifest_entry.get("assets")
-                        if isinstance(assets_manifest, Mapping):
-                            main_override = (
-                                _sanitize_candidate(assets_manifest.get("tja_main"))
-                                or _sanitize_candidate(
-                                    (assets_manifest.get("files", {}) if isinstance(assets_manifest.get("files"), Mapping) else {}).get("tja_main")
-                                )
-                            )
-
-                if main_override is None:
-                    main_override = _sanitize_candidate(song_document.get("tja_path"))
-                if main_override is None:
-                    assets_doc = song_document.get("assets")
-                    if isinstance(assets_doc, Mapping):
-                        main_override = _sanitize_candidate(assets_doc.get("tja_main"))
-                        if main_override is None:
-                            files_doc = assets_doc.get("files")
-                            if isinstance(files_doc, Mapping):
-                                main_override = _sanitize_candidate(files_doc.get("tja_main"))
-
         try:
-            resolved_path = resolve_song_file_path(song_identifier, asset_name)
+            resolved_path = resolve_song_file_path(normalized_identifier, requested_filename)
         except FileNotFoundError:
-            app.logger.debug(
-                "desktop song asset missing id=%s name=%s",
-                song_identifier,
-                asset_name,
-            )
-            abort(404)
+            fallback_path = Path(candidate)
+            try:
+                resolved = fallback_path.resolve()
+            except FileNotFoundError:
+                abort(404)
+            try:
+                resolved.relative_to(DESKTOP_SONGS_DIR.resolve())
+            except ValueError:
+                abort(404)
+            if not resolved.is_file():
+                abort(404)
+            resolved_path = resolved
         except Exception:
             app.logger.exception(
                 "desktop song asset resolution failed id=%s name=%s",
                 song_identifier,
-                asset_name,
+                requested_filename,
             )
             abort(500)
 
-        return cache_wrap(flask.send_file(resolved_path), 604800)
+        suffix = resolved_path.suffix.lower()
+        mimetype: Optional[str]
+        if suffix == ".tja":
+            mimetype = "text/plain; charset=utf-8"
+        elif suffix == ".ogg":
+            mimetype = "audio/ogg"
+        elif suffix == ".mp3":
+            mimetype = "audio/mpeg"
+        else:
+            mimetype = None
+
+        try:
+            response = flask.send_file(str(resolved_path), mimetype=mimetype)
+        except FileNotFoundError:
+            abort(404)
+        return cache_wrap(response, 604800)
 
 
 @app.route(basedir + "manifest.json")

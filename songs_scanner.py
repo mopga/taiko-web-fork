@@ -5090,6 +5090,10 @@ class SongScanner:
                 main_relative_path = _normalise_relative_path(primary_path)
                 if main_relative_path:
                     document['tja_path'] = main_relative_path
+                    main_relative = PurePosixPath(main_relative_path)
+                    main_name = main_relative.name
+                    if main_name:
+                        assets_payload['tja_main_name'] = main_name
                     try:
                         absolute_main = (self._songs_root / main_relative_path).resolve()
                         absolute_main.relative_to(self._songs_root)
@@ -5097,15 +5101,16 @@ class SongScanner:
                         absolute_main = None
                     if absolute_main is not None and absolute_main.is_file():
                         assets_payload['tja_main'] = str(absolute_main)
-                        main_name = PurePosixPath(main_relative_path).name
+                        assets_files.setdefault(main_relative_path, str(absolute_main))
                         if main_name:
-                            assets_files[main_name] = str(absolute_main)
+                            assets_files.setdefault(main_name, str(absolute_main))
                     else:
                         assets_payload['tja_main'] = main_relative_path
 
-            wave_name = base.wave.strip() if isinstance(base.wave, str) else None
-            if wave_name:
-                assets_payload['wave'] = wave_name
+            wave_name_raw = base.wave.strip() if isinstance(base.wave, str) else None
+            normalized_wave = _normalise_relative_path(wave_name_raw) if wave_name_raw else None
+            if wave_name_raw:
+                assets_payload['wave'] = normalized_wave or wave_name_raw
 
             audio_relative: Optional[str] = None
             if isinstance(base.audio_path, str):
@@ -5121,9 +5126,10 @@ class SongScanner:
                     except Exception:
                         absolute_audio = None
                     if absolute_audio is not None and absolute_audio.is_file():
-                        audio_name = PurePosixPath(wave_name or normalised_audio).name
+                        assets_files.setdefault(normalised_audio, str(absolute_audio))
+                        audio_name = PurePosixPath(normalised_audio).name
                         if audio_name:
-                            assets_files[audio_name] = str(absolute_audio)
+                            assets_files.setdefault(audio_name, str(absolute_audio))
 
             if assets_files:
                 assets_payload['files'] = assets_files
