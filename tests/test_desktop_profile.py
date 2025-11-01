@@ -10,6 +10,8 @@ import pytest
 
 from cachelib.file import FileSystemCache
 
+import server.paths as server_paths
+
 from songs_scanner import SongScanner
 
 from tests.test_songs_scanner import _DummyDB
@@ -21,12 +23,20 @@ if str(ROOT_DIR) not in sys.path:
 
 def _import_desktop_app(monkeypatch, tmp_path: Path):
     songs_dir = tmp_path / "songs"
-    songs_dir.mkdir()
+    songs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _songs_dir_factory() -> Path:
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        return songs_dir
+
     monkeypatch.setenv("RUN_PROFILE", "desktop")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SCAN_ON_START", "skip")
     monkeypatch.setenv("ENABLE_SONG_WATCHER", "0")
     monkeypatch.setenv("SONGS_DIR", str(songs_dir))
+    monkeypatch.setattr(server_paths, "songs_dir", _songs_dir_factory)
+    monkeypatch.setattr(server_paths, "get_songs_dir", _songs_dir_factory)
+    monkeypatch.setattr(server_paths, "get_songs_dir_desktop", _songs_dir_factory)
     sys.modules.pop("app", None)
     for module_name in list(sys.modules.keys()):
         if module_name == "flask_session" or module_name.startswith("flask_session."):
@@ -92,6 +102,89 @@ def test_no_redis_in_desktop(tmp_path, monkeypatch, caplog):
     assert app_module.app.config.get("SESSION_TYPE") == "cachelib"
     assert app_module.app.config.get("SESSION_REDIS") is None
     assert "redis" not in caplog.text.lower()
+
+
+def test_desktop_song_route_serves_and_restricts(tmp_path, monkeypatch):
+    songs_dir = tmp_path / "songs"
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+
+    pack_dir = songs_dir / "TestPack"
+    pack_dir.mkdir()
+    tja_payload = "#TITLE Test Pack\n"
+    tja_path = pack_dir / "Test.tja"
+    tja_path.write_text(tja_payload, encoding="utf-8")
+    ogg_payload = b"OggS\x00\x02"
+    ogg_path = pack_dir / "Test.ogg"
+    ogg_path.write_bytes(ogg_payload)
+
+    client = app_module.app.test_client()
+
+    tja_response = client.get("/songs/TestPack/Test.tja")
+    assert tja_response.status_code == 200
+    assert tja_response.data == tja_payload.encode("utf-8")
+
+    ogg_response = client.get("/songs/TestPack/Test.ogg")
+    assert ogg_response.status_code == 200
+    assert ogg_response.data == ogg_payload
+
+    traversal_response = client.get("/songs/../../etc/passwd")
+    assert traversal_response.status_code == 404
+
+
+def test_desktop_song_route_id_fallback(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    songs_dir = tmp_path / "songs"
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+    manifest_store = app_module.MANIFEST_STORE
+
+    now = int(time.time())
+    song_store.upsert_many(
+        [
+            {
+                "song_id": "custom-id",
+                "scanner_stable_id": "stable-custom",
+                "group_key": "group::custom",
+                "title": "Custom Song",
+                "tja_path": "CustomPack/main.tja",
+                "updated_at": now,
+                "created_at": now,
+            }
+        ]
+    )
+
+    if manifest_store is not None:
+        manifest_store.put(
+            "stable-custom",
+            {
+                "file_path": "CustomPack/main.tja",
+                "paths": {
+                    "tja_url": "/songs/CustomPack/main.tja",
+                    "dir_url": "/songs/CustomPack/",
+                },
+            },
+        )
+
+    pack_dir = songs_dir / "CustomPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    main_path = pack_dir / "main.tja"
+    main_path.write_text("#TITLE Custom", encoding="utf-8")
+    cover_path = pack_dir / "jacket.png"
+    cover_payload = b"PNG"
+    cover_path.write_bytes(cover_payload)
+
+    client = app_module.app.test_client()
+
+    main_response = client.get("/songs/custom-id/main.tja")
+    assert main_response.status_code == 200
+    assert main_response.data == main_path.read_bytes()
+
+    cover_response = client.get("/songs/custom-id/jacket.png")
+    assert cover_response.status_code == 200
+    assert cover_response.data == cover_payload
+
+    missing_response = client.get("/songs/custom-id/missing.bin")
+    assert missing_response.status_code == 404
 
 
 def test_web_profile_unchanged(tmp_path, monkeypatch):

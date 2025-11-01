@@ -891,6 +891,12 @@ class SQLiteSongStore:
         row = cursor.fetchone()
         return self._row_to_song(row) if row else None
 
+    def find_by_id(self, song_id: str) -> Optional[Mapping[str, Any]]:
+        """Retrieve a song document by identifier, mirroring Mongo semantics."""
+
+        document = self.get_by_id(song_id)
+        return dict(document) if document is not None else None
+
     def query(
         self,
         filter: SongFilter | None,
@@ -1500,7 +1506,7 @@ class SQLiteManifestStore:
                     LOGGER.info('SQLiteManifestStore enabling UpdateOne bulk compatibility')
                     self._update_one_info_logged = True
                 continue
-            LOGGER.warning(
+            LOGGER.debug(
                 "Unsupported manifest bulk operation: %s", type(operation).__name__
             )
 
@@ -1617,17 +1623,7 @@ class SQLiteManifestStore:
         if set_payload is None:
             return False
 
-        identifier_raw = filter_doc.get('_id')
-        identifier: Optional[str]
-        if isinstance(identifier_raw, str):
-            identifier = identifier_raw.strip() or None
-        elif isinstance(identifier_raw, (int, float)) and not isinstance(identifier_raw, bool):
-            try:
-                identifier = str(int(identifier_raw)).strip()
-            except (TypeError, ValueError):
-                identifier = None
-        else:
-            identifier = None
+        identifier = self._manifest_id_from_filter(filter_doc)
         if not identifier:
             LOGGER.error('Manifest UpdateOne missing _id filter=%s', filter_doc)
             return False
@@ -1672,12 +1668,25 @@ class SQLiteManifestStore:
         return True
 
     def _manifest_id_from_filter(self, filter: Mapping[str, Any]) -> Optional[str]:
-        identifier = filter.get("_id")
-        if isinstance(identifier, str):
-            return identifier
-        if isinstance(identifier, Mapping):
-            if "$eq" in identifier and isinstance(identifier["$eq"], str):
-                return identifier["$eq"]
+        def _normalise(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                token = value.strip()
+                return token or None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    token = str(int(value)).strip()
+                except (TypeError, ValueError):
+                    token = str(value).strip()
+                return token or None
+            return None
+
+        for key in ("_id", "id"):
+            candidate = filter.get(key)
+            if isinstance(candidate, Mapping) and "$eq" in candidate:
+                candidate = candidate.get("$eq")
+            identifier = _normalise(candidate)
+            if identifier:
+                return identifier
         return None
 
 

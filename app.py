@@ -50,6 +50,7 @@ from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from redis import Redis
+from werkzeug.utils import safe_join
 
 if TYPE_CHECKING:
     from pymongo import MongoClient
@@ -1496,6 +1497,9 @@ def create_app():
         if songs_dir_value is None:
             songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
     SONGS_DIR_PATH = Path(songs_dir_value).expanduser().resolve()
+    app_instance.logger.info('profile=%s', RUN_PROFILE)
+    if RUN_PROFILE == 'desktop':
+        app_instance.logger.info('desktop.songs_dir=%s', SONGS_DIR_PATH)
     app_instance.logger.info(
         'profile=%s catalog_source=%s songs_dir=%s',
         RUN_PROFILE,
@@ -3824,24 +3828,67 @@ else:
             3600,
         )
 
-    @app.route("/songs/<path:filename>")
-    def desktop_song_files(filename: str):
-        if not isinstance(filename, str) or not filename:
+    @app.route("/songs/<path:subpath>")
+    def desktop_song_files(subpath: str):
+        if not isinstance(subpath, str) or not subpath.strip():
             abort(404)
-        parts = filename.split("/", 1)
-        raw_song_id = parts[0].strip()
-        if not raw_song_id:
-            abort(404)
-        if len(parts) < 2 or not parts[1].strip():
-            abort(404)
+
         try:
-            asset_path = resolve_song_file_path(raw_song_id, parts[1])
-        except FileNotFoundError:
-            abort(404)
+            songs_root = DESKTOP_SONGS_DIR.resolve()
         except Exception:  # pragma: no cover - defensive logging
-            app.logger.exception("Failed to resolve song asset id=%s name=%s", raw_song_id, parts[1])
+            app.logger.exception("Failed to resolve songs root %s", DESKTOP_SONGS_DIR)
             abort(500)
-        return cache_wrap(flask.send_file(asset_path), 604800)
+
+        try:
+            candidate = safe_join(str(DESKTOP_SONGS_DIR), subpath)
+        except Exception:
+            candidate = None
+
+        resolved: Optional[Path] = None
+        if candidate:
+            try:
+                direct_candidate = Path(candidate).resolve()
+            except FileNotFoundError:
+                direct_candidate = None
+            except Exception:  # pragma: no cover - defensive logging
+                app.logger.exception("Failed to resolve song asset path %s", candidate)
+                abort(500)
+            if direct_candidate is not None:
+                try:
+                    direct_candidate.relative_to(songs_root)
+                except ValueError:
+                    direct_candidate = None
+                if direct_candidate is not None and direct_candidate.is_file():
+                    resolved = direct_candidate
+        if resolved is not None:
+            return cache_wrap(flask.send_file(resolved), 604800)
+
+        parts = subpath.split("/", 1)
+        if len(parts) != 2:
+            abort(404)
+        song_identifier, asset_name = (part.strip() for part in parts)
+        if not song_identifier or not asset_name:
+            abort(404)
+
+        try:
+            fallback_path = resolve_song_file_path(song_identifier, asset_name)
+        except FileNotFoundError:
+            app.logger.debug(
+                "desktop songs fallback missing asset id=%s name=%s",
+                song_identifier,
+                asset_name,
+            )
+            abort(404)
+        except Exception:
+            app.logger.debug(
+                "desktop songs fallback errored id=%s name=%s",
+                song_identifier,
+                asset_name,
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
+            abort(404)
+
+        return cache_wrap(flask.send_file(fallback_path), 604800)
 
 
 @app.route(basedir + "manifest.json")
