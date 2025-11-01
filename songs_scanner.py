@@ -43,6 +43,12 @@ from pymongo.database import Database
 from storage.interfaces import LeaderLock, ManifestStore, SongStore
 
 from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
+from desktop_categories import (
+    CANON_DESKTOP_BY_SLUG,
+    derive_category_from_path,
+    resolve_category as resolve_desktop_category,
+    slug_from_alias as desktop_slug_from_alias,
+)
 
 try:  # pragma: no cover - pymongo always available in production
     from pymongo import ReplaceOne, ReturnDocument, UpdateOne
@@ -2010,98 +2016,6 @@ def _derive_genre_from_path(relative_tja: Path, category_title: str) -> str:
     return cleaned_category or DEFAULT_CATEGORY_TITLE
 
 
-@dataclass(frozen=True)
-class _DesktopCategoryDefinition:
-    category_id: Optional[int]
-    title: str
-    slug: str
-    aliases: Tuple[str, ...]
-
-
-_DESKTOP_CATEGORY_DEFINITIONS: Tuple[_DesktopCategoryDefinition, ...] = (
-    _DesktopCategoryDefinition(1, "Pop", "pop", ("pop", "pops", "j pop", "j-pop", "jpop")),
-    _DesktopCategoryDefinition(2, "Anime", "anime", ("anime",)),
-    _DesktopCategoryDefinition(3, "VOCALOID™ Music", "vocaloid", (
-        "vocaloid music",
-        "vocaloidtm music",
-        "vocaloid",
-        "vocaloid™ music",
-    )),
-    _DesktopCategoryDefinition(4, "Children & Folk", "children", (
-        "children",
-        "children folk",
-        "children and folk",
-        "children & folk",
-        "folk",
-    )),
-    _DesktopCategoryDefinition(5, "Variety", "variety", ("variety",)),
-    _DesktopCategoryDefinition(6, "Classical", "classical", ("classical", "classic")),
-    _DesktopCategoryDefinition(7, "Game Music", "game", ("game", "game music", "games")),
-    _DesktopCategoryDefinition(8, "NAMCO Original", "namco", ("namco", "namco original")),
-    _DesktopCategoryDefinition(9, "Dan Dojo", "dandojo", ("dan dojo", "dandojo", "dojo", "dan")),
-    _DesktopCategoryDefinition(10, "Taiko Towers", "tower", ("taiko tower", "taiko towers", "tower")),
-    _DesktopCategoryDefinition(0, DEFAULT_CATEGORY_TITLE, "unsorted", ("unsorted", "general")),
-)
-
-_CATEGORY_PREFIX_PATTERN = re.compile(r"^\d+\s*[-_.]?\s*")
-
-
-def _normalise_desktop_category_token(value: str) -> str:
-    if not value:
-        return ""
-    normalized = unicodedata.normalize("NFKC", value)
-    normalized = normalized.replace("＆", "&")
-    normalized = normalized.replace("&", " and ")
-    normalized = normalized.replace("™", " tm ")
-    normalized = _clean_metadata_value(normalized)
-    normalized = re.sub(r"\s+", " ", normalized.strip())
-    token = re.sub(r"[^0-9a-zA-Z]+", " ", normalized).strip().casefold()
-    token = re.sub(r"\s+", " ", token)
-    return token
-
-
-def _desktop_slugify(value: str) -> str:
-    token = _normalise_desktop_category_token(value)
-    return token.replace(" ", "-") if token else ""
-
-
-_DESKTOP_CATEGORY_TOKEN_MAP: Dict[str, _DesktopCategoryDefinition] = {}
-_DESKTOP_CATEGORY_ID_MAP: Dict[int, _DesktopCategoryDefinition] = {}
-for definition in _DESKTOP_CATEGORY_DEFINITIONS:
-    if definition.category_id is not None:
-        _DESKTOP_CATEGORY_ID_MAP[int(definition.category_id)] = definition
-    for alias in definition.aliases:
-        token = _normalise_desktop_category_token(alias)
-        if token:
-            _DESKTOP_CATEGORY_TOKEN_MAP[token] = definition
-
-
-def _resolve_desktop_category(category_id: int, category_title: str) -> Tuple[int, str, str]:
-    cleaned_title = unicodedata.normalize("NFKC", category_title or "")
-    cleaned_title = _CATEGORY_PREFIX_PATTERN.sub("", cleaned_title)
-    cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
-    if not cleaned_title:
-        cleaned_title = DEFAULT_CATEGORY_TITLE
-    token = _normalise_desktop_category_token(cleaned_title)
-    definition = _DESKTOP_CATEGORY_TOKEN_MAP.get(token)
-    if definition is None and category_id in _DESKTOP_CATEGORY_ID_MAP:
-        definition = _DESKTOP_CATEGORY_ID_MAP[category_id]
-    if definition is None and token:
-        for candidate_token, candidate_definition in _DESKTOP_CATEGORY_TOKEN_MAP.items():
-            if token == candidate_token:
-                definition = candidate_definition
-                break
-    if definition is None:
-        slug_value = _desktop_slugify(cleaned_title) or "unsorted"
-        resolved_id = category_id if category_id else 0
-        resolved_title = cleaned_title if cleaned_title else DEFAULT_CATEGORY_TITLE
-        if not resolved_title.strip():
-            resolved_title = DEFAULT_CATEGORY_TITLE
-            resolved_id = 0
-            slug_value = "unsorted"
-        return resolved_id, resolved_title, slug_value
-    resolved_id = definition.category_id if definition.category_id is not None else (category_id or 0)
-    return resolved_id, definition.title, definition.slug
 
 def _parse_tja_strict(
     path: Path,
@@ -5187,8 +5101,8 @@ class SongScanner:
                 slug_candidate = getattr(base, 'category_slug', None)
                 if isinstance(slug_candidate, str) and slug_candidate.strip():
                     slug_value = slug_candidate.strip()
-            if not slug_value:
-                fallback_slug = _desktop_slugify(base.category_title)
+            if not slug_value and base.category_title:
+                fallback_slug = desktop_slug_from_alias(base.category_title)
                 if fallback_slug:
                     slug_value = fallback_slug
             if slug_value:
@@ -6497,14 +6411,16 @@ class SongScanner:
                     record = self._record_from_state(record_payload)
                     if record:
                         if self._single_node_mode:
-                            resolved_id, resolved_title, resolved_slug = _resolve_desktop_category(
-                                record.category_id,
-                                record.category_title,
-                            )
-                            record.category_id = resolved_id
-                            record.category_title = resolved_title
-                            record.category_slug = resolved_slug
-                            record_category_slug = resolved_slug
+                            canonical = None
+                            if record.category_slug:
+                                canonical = CANON_DESKTOP_BY_SLUG.get(record.category_slug)
+                            if canonical is None:
+                                canonical = resolve_desktop_category(record.category_id, record.category_title)
+                            if canonical is not None:
+                                record.category_id = canonical.id
+                                record.category_title = canonical.title
+                                record.category_slug = canonical.slug
+                                record_category_slug = canonical.slug
                         file_hash = str(state_doc.get('tja_hash') or record.tja_hash)
                         sha1_value = state_doc.get('tja_sha1')
                         if isinstance(sha1_value, str) and sha1_value:
@@ -6569,11 +6485,16 @@ class SongScanner:
 
                     category_id, category_title = self._determine_category(tja_path)
                     local_category_slug: Optional[str] = None
-                    if self._single_node_mode:
-                        category_id, category_title, local_category_slug = _resolve_desktop_category(
-                            category_id,
-                            category_title,
-                        )
+                    canonical = None
+                    slug_candidate = derive_category_from_path(tja_path, self._songs_root)
+                    if slug_candidate:
+                        canonical = CANON_DESKTOP_BY_SLUG.get(slug_candidate)
+                    if canonical is None:
+                        canonical = resolve_desktop_category(category_id, category_title)
+                    if canonical is not None:
+                        category_id = canonical.id
+                        category_title = canonical.title
+                        local_category_slug = canonical.slug
                     if category_id and category_title:
                         categories[category_id] = category_title
 
@@ -6633,14 +6554,12 @@ class SongScanner:
 
             if self._single_node_mode:
                 if record_category_slug is None:
-                    resolved_id, resolved_title, resolved_slug = _resolve_desktop_category(
-                        record.category_id,
-                        record.category_title,
-                    )
-                    record.category_id = resolved_id
-                    record.category_title = resolved_title
-                    record_category_slug = resolved_slug
-                    record.category_slug = resolved_slug
+                    canonical = resolve_desktop_category(record.category_id, record.category_title)
+                    if canonical is not None:
+                        record.category_id = canonical.id
+                        record.category_title = canonical.title
+                        record_category_slug = canonical.slug
+                        record.category_slug = canonical.slug
                 if record_category_slug:
                     if record_category_slug == 'unsorted':
                         self._metrics.increment('unsorted_total')
