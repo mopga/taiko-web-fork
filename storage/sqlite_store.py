@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequenc
 LOGGER = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 UPSERT_CHUNK_SIZE = 500
 
@@ -364,9 +364,19 @@ class SQLiteDatabase:
                 version = int(row[0])
                 if version < 2:
                     LOGGER.info(
-                        "Migrating SQLite schema from v%s to v%s", version, SCHEMA_VERSION
+                        "Migrating SQLite schema from v%s to v2", version
                     )
                     self._migrate_schema_v1_to_v2(cursor)
+                    cursor.execute(
+                        "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
+                        (2,),
+                    )
+                    version = 2
+                if version < 3:
+                    LOGGER.info(
+                        "Migrating SQLite schema from v%s to v3", version
+                    )
+                    self._migrate_schema_v2_to_v3(cursor)
                     cursor.execute(
                         "INSERT INTO schema_version(version, applied_at) VALUES(?, datetime('now'))",
                         (SCHEMA_VERSION,),
@@ -393,6 +403,8 @@ class SQLiteDatabase:
                 difficulties_json TEXT NOT NULL,
                 tags_json TEXT,
                 meta_json TEXT,
+                tja_path TEXT,
+                assets_json TEXT,
                 updated_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
@@ -432,6 +444,8 @@ class SQLiteDatabase:
                 difficulties_json TEXT NOT NULL,
                 tags_json TEXT,
                 meta_json TEXT,
+                tja_path TEXT,
+                assets_json TEXT,
                 updated_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
@@ -449,6 +463,8 @@ class SQLiteDatabase:
                 difficulties_json,
                 tags_json,
                 meta_json,
+                tja_path,
+                assets_json,
                 updated_at,
                 created_at
             )
@@ -466,6 +482,8 @@ class SQLiteDatabase:
                 difficulties_json,
                 tags_json,
                 meta_json,
+                NULL AS tja_path,
+                NULL AS assets_json,
                 updated_at,
                 created_at
             FROM songs_v1;
@@ -479,6 +497,14 @@ class SQLiteDatabase:
             CREATE INDEX idx_songs_artist ON songs(artist);
             CREATE INDEX idx_songs_genre ON songs(genre);
             CREATE INDEX idx_songs_updated_at ON songs(updated_at);
+            """
+        )
+
+    def _migrate_schema_v2_to_v3(self, cursor: sqlite3.Cursor) -> None:
+        cursor.executescript(
+            """
+            ALTER TABLE songs ADD COLUMN tja_path TEXT;
+            ALTER TABLE songs ADD COLUMN assets_json TEXT;
             """
         )
 
@@ -595,9 +621,9 @@ class SQLiteSongStore:
             """
             INSERT INTO songs(
                 scanner_stable_id, group_key, song_id, title, title_reading, artist, genre, bpm, duration_ms,
-                is_playable, difficulties_json, tags_json, meta_json, updated_at, created_at
+                is_playable, difficulties_json, tags_json, meta_json, tja_path, assets_json, updated_at, created_at
             ) VALUES(
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(scanner_stable_id, group_key) DO UPDATE SET
                 song_id=excluded.song_id,
@@ -611,6 +637,8 @@ class SQLiteSongStore:
                 difficulties_json=excluded.difficulties_json,
                 tags_json=excluded.tags_json,
                 meta_json=excluded.meta_json,
+                tja_path=excluded.tja_path,
+                assets_json=excluded.assets_json,
                 updated_at=excluded.updated_at,
                 created_at=excluded.created_at
             RETURNING id
@@ -1015,7 +1043,9 @@ class SQLiteSongStore:
         if not isinstance(title, str) or not title.strip():
             recovered_title, source = _recover_song_title(song)
             if recovered_title:
-                LOGGER.warning(
+                log_level = logging.DEBUG if source == 'title_lang.ja' else logging.INFO
+                LOGGER.log(
+                    log_level,
                     "Recovered missing song title for scanner_stable_id=%s via %s",
                     stable_id,
                     source or "fallback",
@@ -1041,6 +1071,13 @@ class SQLiteSongStore:
         difficulties = song.get("difficulties") or {}
         tags = song.get("tags")
         meta = song.get("meta")
+        tja_path_value = self._normalize_asset_value(song.get("tja_path"))
+        raw_assets = song.get("assets")
+        sanitized_assets = self._sanitize_assets_payload(raw_assets) if isinstance(raw_assets, Mapping) else None
+        if not tja_path_value and sanitized_assets:
+            candidate = sanitized_assets.get("tja_main")
+            if isinstance(candidate, str):
+                tja_path_value = self._normalize_asset_value(candidate)
         updated_at = self._coerce_timestamp_field("updated_at", song.get("updated_at"), "milliseconds", 0)
         created_at = self._coerce_timestamp_field(
             "created_at", song.get("created_at"), "milliseconds", updated_at
@@ -1059,6 +1096,8 @@ class SQLiteSongStore:
             _serialize_json(difficulties) or "{}",
             _serialize_json(tags),
             _serialize_json(meta),
+            tja_path_value,
+            _serialize_json(sanitized_assets) if sanitized_assets else None,
             updated_at,
             created_at,
         )
@@ -1106,6 +1145,43 @@ class SQLiteSongStore:
             token = str(value).strip()
             return token or None
         return None
+
+    def _normalize_asset_value(self, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            return token or None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            token = str(value).strip()
+            return token or None
+        return None
+
+    def _sanitize_assets_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        sanitized: dict[str, Any] = {}
+        for raw_key, raw_value in payload.items():
+            key_token = self._normalize_string(raw_key)
+            if key_token is None:
+                key_token = self._normalize_asset_value(raw_key)
+            if not key_token:
+                continue
+            if isinstance(raw_value, Mapping):
+                nested: dict[str, str] = {}
+                for nested_key, nested_value in raw_value.items():
+                    nested_key_token = self._normalize_string(nested_key)
+                    if nested_key_token is None:
+                        nested_key_token = self._normalize_asset_value(nested_key)
+                    if not nested_key_token:
+                        continue
+                    nested_value_token = self._normalize_asset_value(nested_value)
+                    if not nested_value_token:
+                        continue
+                    nested[nested_key_token] = nested_value_token
+                if nested:
+                    sanitized[key_token] = nested
+            else:
+                value_token = self._normalize_asset_value(raw_value)
+                if value_token:
+                    sanitized[key_token] = value_token
+        return sanitized
 
     def _extract_filter_value(
         self, filter_doc: Mapping[str, Any] | None, key: str
@@ -1181,6 +1257,11 @@ class SQLiteSongStore:
         payload["difficulties"] = _deserialize_json(payload.pop("difficulties_json", None)) or {}
         payload["tags"] = _deserialize_json(payload.pop("tags_json", None))
         payload["meta"] = _deserialize_json(payload.pop("meta_json", None))
+        assets_payload = _deserialize_json(payload.pop("assets_json", None)) or {}
+        if isinstance(assets_payload, Mapping):
+            payload["assets"] = dict(assets_payload)
+        elif assets_payload:
+            payload["assets"] = assets_payload
         if "song_id" in payload and "id" not in payload:
             payload["id"] = payload["song_id"]
         return payload

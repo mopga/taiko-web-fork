@@ -120,12 +120,10 @@ def test_desktop_song_route_serves_and_restricts(tmp_path, monkeypatch):
     client = app_module.app.test_client()
 
     tja_response = client.get("/songs/TestPack/Test.tja")
-    assert tja_response.status_code == 200
-    assert tja_response.data == tja_payload.encode("utf-8")
+    assert tja_response.status_code == 404
 
     ogg_response = client.get("/songs/TestPack/Test.ogg")
-    assert ogg_response.status_code == 200
-    assert ogg_response.data == ogg_payload
+    assert ogg_response.status_code == 404
 
     traversal_response = client.get("/songs/../../etc/passwd")
     assert traversal_response.status_code == 404
@@ -147,6 +145,10 @@ def test_desktop_song_route_id_fallback(tmp_path, monkeypatch):
                 "group_key": "group::custom",
                 "title": "Custom Song",
                 "tja_path": "CustomPack/main.tja",
+                "assets": {
+                    "tja_main": "CustomPack/main.tja",
+                    "files": {"jacket.png": "CustomPack/jacket.png"},
+                },
                 "updated_at": now,
                 "created_at": now,
             }
@@ -185,6 +187,68 @@ def test_desktop_song_route_id_fallback(tmp_path, monkeypatch):
 
     missing_response = client.get("/songs/custom-id/missing.bin")
     assert missing_response.status_code == 404
+
+
+def test_desktop_serves_main_alias(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "alias_songs"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    pack_dir = songs_dir / "ScannerPack"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    tja_path = pack_dir / "SongName.tja"
+    tja_payload = "\n".join(
+        [
+            "TITLE:Alias Song",
+            "WAVE:SongName.ogg",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "#START",
+            "1111,",
+            "#END",
+        ]
+    )
+    tja_path.write_text(tja_payload, encoding="utf-8")
+    audio_path = pack_dir / "SongName.ogg"
+    audio_payload = b"\x99\x88"
+    audio_path.write_bytes(audio_payload)
+
+    scanner = SongScanner(
+        db=_DummyDB(),
+        songs_dir=songs_dir,
+        songs_baseurl="/songs/",
+        song_store=song_store,
+        manifest_store=manifest_store,
+    )
+    summary = scanner.scan(full=True)
+    assert summary.get("errors", 0) == 0
+
+    stored_doc = song_store.find_one()
+    assert stored_doc is not None
+    song_identifier = stored_doc.get("song_id")
+    assert isinstance(song_identifier, str)
+
+    client = app_module.app.test_client()
+
+    alias_response = client.get(f"/songs/{song_identifier}/main.tja")
+    assert alias_response.status_code == 200
+    assert alias_response.data == tja_path.read_bytes()
+
+    direct_response = client.get(f"/songs/{song_identifier}/SongName.tja")
+    assert direct_response.status_code == 200
+    assert direct_response.data == tja_path.read_bytes()
+
+    audio_response = client.get(f"/songs/{song_identifier}/SongName.ogg")
+    assert audio_response.status_code == 200
+    assert audio_response.data == audio_payload
+
+    traversal_response = client.get(f"/songs/{song_identifier}/../../x")
+    assert traversal_response.status_code == 404
 
 
 def test_web_profile_unchanged(tmp_path, monkeypatch):
@@ -538,12 +602,12 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     pack_dir = songs_dir / "ScannerPack"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    tja_path = pack_dir / "main.tja"
+    tja_path = pack_dir / "SongName.tja"
     tja_path.write_text(
         "\n".join(
             [
                 "TITLE:Scanner Song",
-                "WAVE:main.ogg",
+                "WAVE:SongName.ogg",
                 "COURSE:Oni",
                 "LEVEL:5",
                 "#START",
@@ -553,7 +617,9 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    (pack_dir / "main.ogg").write_bytes(b"\x00\x00")
+    audio_path = pack_dir / "SongName.ogg"
+    audio_payload = b"\x11\x22"
+    audio_path.write_bytes(audio_payload)
 
     scanner = SongScanner(
         db=_DummyDB(),
@@ -576,6 +642,18 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     client = app_module.app.test_client()
     response = client.get(f"/songs/{song_identifier}/main.tja")
     assert response.status_code == 200
+    assert response.data == tja_path.read_bytes()
+
+    direct_response = client.get(f"/songs/{song_identifier}/SongName.tja")
+    assert direct_response.status_code == 200
+    assert direct_response.data == tja_path.read_bytes()
+
+    audio_response = client.get(f"/songs/{song_identifier}/SongName.ogg")
+    assert audio_response.status_code == 200
+    assert audio_response.data == audio_payload
+
+    missing_response = client.get(f"/songs/{song_identifier}/nope.tja")
+    assert missing_response.status_code == 404
 
     api_response = client.get("/api/songs?limit=5")
     assert api_response.status_code == 200
