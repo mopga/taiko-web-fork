@@ -3933,31 +3933,106 @@ else:
             songs_root_resolved = songs_root
 
         store = song_store or _require_song_store()
+        projection = {
+            "song_id": 1,
+            "group_key": 1,
+            "scanner_stable_id": 1,
+            "tja_path": 1,
+            "assets": 1,
+            "dir_path": 1,
+            "tja_filename": 1,
+        }
         try:
-            document = _desktop_fetch_song_document(normalized_id, song_store=store)
-        except Exception:
-            raise FileNotFoundError("song not found")
+            document = _desktop_fetch_song_document(
+                normalized_id,
+                song_store=store,
+                projection=projection,
+            )
+        except Exception as exc:
+            raise FileNotFoundError("song not found") from exc
         if not isinstance(document, Mapping):
             raise FileNotFoundError("song not found")
 
-        raw_dir_value = document.get("dir_path") if isinstance(document.get("dir_path"), str) else None
-        if isinstance(raw_dir_value, str):
-            dir_token = raw_dir_value.strip()
-        else:
-            dir_token = ""
-        base_dir = Path(dir_token) if dir_token else songs_root / normalized_id
+        dir_path_value = str(document.get("dir_path") or "").strip() if isinstance(document.get("dir_path"), str) else ""
+        base_dir_candidate = Path(dir_path_value) if dir_path_value else songs_root / normalized_id
+
         try:
-            base_dir_resolved = base_dir.resolve()
-        except FileNotFoundError as exc:
-            raise FileNotFoundError("song directory missing") from exc
+            base_dir_resolved = base_dir_candidate.resolve()
+        except FileNotFoundError:
+            base_dir_resolved = base_dir_candidate
+
+        tja_relative = _desktop_normalize_posix_path(document.get("tja_path"))
+        if (
+            (not dir_path_value or not base_dir_resolved.exists())
+            and tja_relative is not None
+            and not tja_relative.is_absolute()
+            and ".." not in tja_relative.parts
+        ):
+            parent_path = tja_relative.parent
+            candidate_dir = songs_root_resolved / parent_path.as_posix()
+            try:
+                resolved_dir = candidate_dir.resolve()
+            except FileNotFoundError:
+                resolved_dir = candidate_dir
+            base_dir_resolved = resolved_dir
+
         try:
             base_dir_resolved.relative_to(songs_root_resolved)
         except ValueError as exc:
             raise FileNotFoundError("song directory outside songs root") from exc
 
+        def _try_candidate(candidate: Path) -> Optional[Path]:
+            try:
+                resolved = candidate.resolve()
+            except FileNotFoundError:
+                return None
+            try:
+                resolved.relative_to(songs_root_resolved)
+            except ValueError:
+                return None
+            if not resolved.is_file():
+                return None
+            return resolved
+
+        normalized_id_dir = songs_root_resolved / normalized_id
+
+        def _resolve_candidate_path(value: object) -> Optional[Path]:
+            if isinstance(value, Path):
+                candidates: list[Path] = [value]
+            elif isinstance(value, os.PathLike):
+                candidates = [Path(value)]
+            elif isinstance(value, str):
+                token = value.strip()
+                if not token:
+                    return None
+                candidates = [Path(token.replace("\\", "/"))]
+            else:
+                return None
+
+            seen: set[str] = set()
+            for candidate in candidates:
+                if candidate.is_absolute():
+                    candidate_order = [candidate]
+                else:
+                    candidate_order = [
+                        base_dir_resolved / candidate,
+                        normalized_id_dir / candidate,
+                        songs_root_resolved / candidate,
+                    ]
+                for item in candidate_order:
+                    key = str(item)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    resolved = _try_candidate(item)
+                    if resolved is not None:
+                        return resolved
+            return None
+
         assets_doc = document.get("assets") if isinstance(document.get("assets"), Mapping) else {}
         files_doc = assets_doc.get("files") if isinstance(assets_doc.get("files"), Mapping) else {}
-        asset_lookup: dict[str, str] = {}
+        assets_map: dict[str, Path] = {}
+
         if isinstance(files_doc, Mapping):
             for raw_key, raw_value in files_doc.items():
                 normalized_key = _desktop_normalize_posix_path(raw_key)
@@ -3967,60 +4042,78 @@ else:
                     or ".." in normalized_key.parts
                 ):
                     continue
-                value_token = str(raw_value).strip() if isinstance(raw_value, (str, os.PathLike)) else None
-                if value_token:
-                    asset_lookup.setdefault(normalized_key.as_posix().casefold(), value_token)
+                resolved_target = _resolve_candidate_path(raw_value)
+                if resolved_target is None:
+                    continue
+                key_token = normalized_key.as_posix().casefold()
+                assets_map.setdefault(key_token, resolved_target)
 
         main_filename = document.get("tja_filename") if isinstance(document.get("tja_filename"), str) else None
-        tja_main_candidate = assets_doc.get("tja_main") if isinstance(assets_doc, Mapping) else None
-        if isinstance(tja_main_candidate, str) and tja_main_candidate.strip():
-            asset_lookup.setdefault("main.tja", tja_main_candidate.strip())
+
+        tja_main_value = assets_doc.get("tja_main") if isinstance(assets_doc, Mapping) else None
+        main_target = _resolve_candidate_path(tja_main_value) if tja_main_value else None
+        if main_target is None and tja_relative is not None:
+            main_target = _resolve_candidate_path(tja_relative.as_posix())
+        if main_target is None and isinstance(main_filename, str) and main_filename.strip():
+            main_target = _resolve_candidate_path(main_filename)
+        if main_target is not None:
+            assets_map.setdefault("main.tja", main_target)
             if isinstance(main_filename, str) and main_filename.strip():
-                asset_lookup.setdefault(main_filename.strip().replace("\\", "/").casefold(), tja_main_candidate.strip())
+                alias_key = _desktop_normalize_posix_path(main_filename)
+                if (
+                    alias_key is not None
+                    and not alias_key.is_absolute()
+                    and ".." not in alias_key.parts
+                ):
+                    assets_map.setdefault(alias_key.as_posix().casefold(), main_target)
 
-        candidate_names: list[PurePosixPath] = []
-        if normalized_request.as_posix().casefold() == "main.tja" and isinstance(main_filename, str) and main_filename.strip():
-            alias_name = _desktop_normalize_posix_path(main_filename)
-            if alias_name is not None and not alias_name.is_absolute() and ".." not in alias_name.parts:
-                candidate_names.append(alias_name)
-        candidate_names.append(normalized_request)
+        wave_value = assets_doc.get("wave") if isinstance(assets_doc, Mapping) else None
+        wave_path = _resolve_candidate_path(wave_value) if wave_value else None
+        if wave_path is not None:
+            wave_key = _desktop_normalize_posix_path(wave_value)
+            if (
+                wave_key is not None
+                and not wave_key.is_absolute()
+                and ".." not in wave_key.parts
+            ):
+                assets_map.setdefault(wave_key.as_posix().casefold(), wave_path)
+                wave_name = wave_key.name.casefold()
+                if wave_name:
+                    assets_map.setdefault(wave_name, wave_path)
 
-        def _resolve_candidate(value: str) -> Optional[Path]:
-            normalized_value = value.replace("\\", "/").strip()
-            if not normalized_value:
-                return None
-            candidate_paths: list[Path] = []
-            candidate = Path(normalized_value)
-            if candidate.is_absolute():
-                candidate_paths.append(candidate)
-            else:
-                candidate_paths.append(base_dir_resolved / normalized_value)
-                candidate_paths.append(songs_root_resolved / normalized_value)
-            for candidate_path in candidate_paths:
-                try:
-                    resolved = candidate_path.resolve()
-                except FileNotFoundError:
-                    continue
-                try:
-                    resolved.relative_to(songs_root_resolved)
-                except ValueError:
-                    continue
-                if not resolved.is_file():
-                    continue
-                return resolved
-            return None
+        normalized_request_key = normalized_request.as_posix().casefold()
+        direct_match = assets_map.get(normalized_request_key)
+        if direct_match is not None:
+            return direct_match
 
-        for candidate in candidate_names:
-            normalized_key = candidate.as_posix().casefold()
-            asset_target = asset_lookup.get(normalized_key)
-            if asset_target:
-                resolved = _resolve_candidate(asset_target)
-                if resolved is not None:
-                    return resolved
-            candidate_value = candidate.as_posix()
-            direct_match = _resolve_candidate(candidate_value)
-            if direct_match is not None:
-                return direct_match
+        if normalized_request_key == "main.tja":
+            if isinstance(main_filename, str) and main_filename.strip():
+                alias_key = _desktop_normalize_posix_path(main_filename)
+                if (
+                    alias_key is not None
+                    and not alias_key.is_absolute()
+                    and ".." not in alias_key.parts
+                ):
+                    alias_match = assets_map.get(alias_key.as_posix().casefold())
+                    if alias_match is not None:
+                        return alias_match
+                    alias_candidate = _resolve_candidate_path(alias_key.as_posix())
+                    if alias_candidate is not None:
+                        return alias_candidate
+            if tja_relative is not None:
+                alias_candidate = _resolve_candidate_path(tja_relative.as_posix())
+                if alias_candidate is not None:
+                    return alias_candidate
+
+        base_candidate = base_dir_resolved / normalized_request.as_posix()
+        resolved_base_candidate = _try_candidate(base_candidate)
+        if resolved_base_candidate is not None:
+            return resolved_base_candidate
+
+        normalized_dir_candidate = normalized_id_dir / normalized_request.as_posix()
+        resolved_dir_candidate = _try_candidate(normalized_dir_candidate)
+        if resolved_dir_candidate is not None:
+            return resolved_dir_candidate
 
         raise FileNotFoundError("requested asset missing")
 
@@ -4052,12 +4145,28 @@ else:
             3600,
         )
 
-    @app.route("/songs/<song_identifier>/<path:requested>")
-    def desktop_song_files(song_identifier: str, requested: str):
-        if not isinstance(song_identifier, str) or not song_identifier.strip():
+    def _mimetype_from_ext(ext: str) -> Optional[str]:
+        suffix = ext.lower()
+        if suffix == ".tja":
+            return "text/plain; charset=utf-8"
+        if suffix == ".ogg":
+            return "audio/ogg"
+        if suffix == ".mp3":
+            return "audio/mpeg"
+        if not suffix:
+            return None
+        guessed, _ = mimetypes.guess_type(f"dummy{suffix}")
+        return guessed
+
+    @app.route("/songs/<path:filename>")
+    def desktop_song_files(filename: str):
+        if not isinstance(filename, str):
             abort(404)
-        if not isinstance(requested, str) or not requested.strip():
+        parts = [segment for segment in filename.split("/") if segment]
+        if len(parts) < 2:
             abort(404)
+        song_identifier = parts[0]
+        requested = "/".join(parts[1:])
 
         normalized_identifier = _desktop_normalize_identifier(song_identifier)
         if not normalized_identifier:
@@ -4066,6 +4175,11 @@ else:
         try:
             resolved_path = resolve_song_file_path(normalized_identifier, requested)
         except FileNotFoundError:
+            app.logger.warning(
+                "desktop song asset resolution failed id=%s name=%s",
+                song_identifier,
+                requested,
+            )
             abort(404)
         except Exception:
             app.logger.exception(
@@ -4075,22 +4189,8 @@ else:
             )
             abort(500)
 
-        suffix = resolved_path.suffix.lower()
-        mimetype: Optional[str]
-        if suffix == ".tja":
-            mimetype = "text/plain; charset=utf-8"
-        elif suffix == ".ogg":
-            mimetype = "audio/ogg"
-        elif suffix == ".mp3":
-            mimetype = "audio/mpeg"
-        else:
-            mimetype = None
-
-        try:
-            response = flask.send_file(str(resolved_path), mimetype=mimetype)
-        except FileNotFoundError:
-            abort(404)
-        return cache_wrap(response, 604800)
+        mimetype = _mimetype_from_ext(resolved_path.suffix)
+        return flask.send_file(str(resolved_path), mimetype=mimetype, max_age=3600)
 
 
 @app.route(basedir + "manifest.json")
