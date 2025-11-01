@@ -410,9 +410,11 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
     assert categories_response.status_code == 200
     categories_payload = categories_response.get_json()
     assert isinstance(categories_payload, list)
-    titles = {item.get("title") for item in categories_payload if isinstance(item, dict)}
-    assert "Taiko Towers" in titles
-    assert "Dan Dojo" in titles
+    assert categories_payload
+    assert all(isinstance(item, dict) for item in categories_payload)
+    # desktop categories API now exposes the canonical genre list only
+    assert all(item.get("title") != "Taiko Towers" for item in categories_payload)
+    assert all(item.get("title") != "Dan Dojo" for item in categories_payload)
 
     modes_response = client.get("/api/modes")
     assert modes_response.status_code == 200
@@ -420,16 +422,8 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
     assert isinstance(manifest, dict)
     assert manifest.get("status") == "ok"
     modes_payload = manifest.get("modes") or []
-    assert any(
-        mode.get("key") == "tower" and "Taiko Towers" in (mode.get("categories") or [])
-        for mode in modes_payload
-        if isinstance(mode, dict)
-    )
-    assert any(
-        mode.get("key") == "dandojo" and "Dan Dojo" in (mode.get("categories") or [])
-        for mode in modes_payload
-        if isinstance(mode, dict)
-    )
+    assert any(mode.get("key") == "tower" for mode in modes_payload if isinstance(mode, dict))
+    assert any(mode.get("key") == "dandojo" for mode in modes_payload if isinstance(mode, dict))
 
 
 def test_desktop_song_static_route_validates_song_id(tmp_path, monkeypatch):

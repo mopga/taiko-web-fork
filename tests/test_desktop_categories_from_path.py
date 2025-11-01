@@ -5,6 +5,7 @@ import pytest
 from storage.sqlite_store import SQLiteStorage
 
 from songs_scanner import SongScanner
+from desktop_categories import CANON_DESKTOP
 from tests.test_desktop_profile import _import_desktop_app
 from tests.test_songs_scanner import _DummyDB
 
@@ -44,6 +45,26 @@ def _create_desktop_scanner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         manifest_store=sqlite_storage.manifest_store,
     )
     return scanner, sqlite_storage, songs_dir
+
+
+def test_desktop_categories_empty_matches_canon(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, Path(tmp_path))
+    client = app_module.app.test_client()
+
+    response = client.get("/api/categories")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert isinstance(payload, list)
+    assert len(payload) == len(CANON_DESKTOP)
+    for index, canon in enumerate(CANON_DESKTOP):
+        entry = payload[index]
+        assert isinstance(entry, dict)
+        assert entry.get("id") == canon["id"]
+        assert entry.get("title") == canon["title"]
+        assert entry.get("aliases") == canon["aliases"]
+        assert entry.get("title_lang") == canon["title_lang"]
+        assert entry.get("song_skin") == canon["song_skin"]
+        assert entry.get("count") == 0
 
 
 @pytest.mark.parametrize(
@@ -138,9 +159,61 @@ def test_desktop_categories_endpoint_aggregates(tmp_path, monkeypatch):
     assert response.status_code == 200
     payload = response.get_json()
     assert isinstance(payload, list)
+    assert len(payload) == len(CANON_DESKTOP)
     titles = {entry.get("title") for entry in payload if isinstance(entry, dict)}
     assert {"Anime", "Children & Folk", "Classical"}.issubset(titles)
     assert "Unsorted" not in titles
     counts = {entry.get("title"): entry.get("count") for entry in payload if isinstance(entry, dict)}
     for title in ("Anime", "Children & Folk", "Classical"):
         assert counts.get(title, 0) > 0
+    for canon in CANON_DESKTOP:
+        if canon["title"] not in {"Anime", "Children & Folk", "Classical"}:
+            assert counts.get(canon["title"], 0) == 0
+
+
+def test_desktop_songs_api_category_ids_within_canon(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, Path(tmp_path))
+    songs_dir = Path(app_module.SONGS_DIR_PATH)
+
+    _write_minimal_tja(songs_dir / "01 Pop" / "Alpha", "Alpha")
+    _write_minimal_tja(songs_dir / "02 Anime" / "Beta", "Beta")
+    _write_minimal_tja(songs_dir / "06 Classical" / "Gamma", "Gamma")
+
+    db = _DummyDB()
+    db.songs = app_module.SONG_STORE
+    db.songs_manifest = app_module.MANIFEST_STORE
+
+    scanner = SongScanner(
+        db=db,
+        songs_dir=songs_dir,
+        songs_baseurl="/songs/",
+        ignore_globs=None,
+        song_store=app_module.SONG_STORE,
+        manifest_store=app_module.MANIFEST_STORE,
+    )
+    summary = scanner.scan(full=True)
+    assert summary.get("errors") == 0
+
+    client = app_module.app.test_client()
+    response = client.get("/api/songs?limit=10")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload
+    if isinstance(payload, list):
+        songs = payload
+    elif isinstance(payload, dict):
+        candidates = [
+            payload.get("items"),
+            payload.get("songs"),
+            payload.get("data"),
+        ]
+        songs = next((value for value in candidates if isinstance(value, list)), [])
+    else:
+        songs = []
+    assert songs, "expected songs payload"
+    for song in songs:
+        if not isinstance(song, dict):
+            continue
+        category_id = song.get("category_id")
+        assert isinstance(category_id, int)
+        assert 1 <= category_id <= 6

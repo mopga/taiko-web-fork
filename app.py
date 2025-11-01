@@ -55,7 +55,14 @@ from redis import Redis
 if TYPE_CHECKING:
     from pymongo import MongoClient
 
-from songs_scanner import DEFAULT_CATEGORY_TITLE, SongScanner, empty_scan_summary
+from songs_scanner import SongScanner, empty_scan_summary
+from desktop_categories import (
+    CANON_DESKTOP_BY_SLUG,
+    canonical_categories_with_counts,
+    empty_category_counts,
+    resolve_category as resolve_desktop_category,
+    slug_from_alias as desktop_slug_from_alias,
+)
 from tower_chart_selection import select_best_chart
 from tower_chart_normalization import normalize_measures_relative
 from modes_manifest import build_modes_manifest, DEFAULT_CACHE_TTL
@@ -661,47 +668,16 @@ def _merge_category_documents(target: dict, source: Mapping[str, object]) -> Non
 
 def _collect_desktop_categories() -> list[dict[str, object]]:
     store = _get_song_store()
+    counts = empty_category_counts()
     if store is None:
-        return [
-            {'id': 0, 'title': DEFAULT_CATEGORY_TITLE, 'song_skin': None},
-        ]
-
-    manifest_categories: dict[str, str] = {}
-    manifest_store = _get_manifest_store()
-    if manifest_store is not None:
-        manifest_projection = {'_id': 1, 'category': 1}
-        try:
-            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}}, projection=manifest_projection)
-        except TypeError:
-            cursor = manifest_store.find({'_id': {'$ne': '__meta__'}}, manifest_projection)
-        except Exception:
-            app.logger.debug('Failed to enumerate manifest categories', exc_info=True)
-            cursor = []
-        for manifest_doc in cursor:
-            if not isinstance(manifest_doc, Mapping):
-                continue
-            manifest_id = manifest_doc.get('_id')
-            if not isinstance(manifest_id, str) or not manifest_id:
-                continue
-            manifest_title = _normalize_category_title(manifest_doc.get('category'))
-            if manifest_title:
-                manifest_categories[manifest_id] = manifest_title
+        return canonical_categories_with_counts(counts)
 
     projection = {
         'category_id': 1,
         'category': 1,
         'title': 1,
         'name': 1,
-        'song_skin': 1,
-        'songSkin': 1,
-        'aliases': 1,
-        'title_lang': 1,
-        'titleLang': 1,
-        'items': 1,
-        'id': 1,
         'meta': 1,
-        'scanner_stable_id': 1,
-        'song_id': 1,
     }
 
     try:
@@ -712,112 +688,54 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
         app.logger.debug('Failed to enumerate categories from song store', exc_info=True)
         cursor = []
 
-    categories: dict[tuple[object, str], dict[str, object]] = {}
-    unsorted_present = False
-    unsorted_count = 0
-
     for raw_doc in cursor:
         if not isinstance(raw_doc, Mapping):
             continue
-        metadata = raw_doc.get('meta') if isinstance(raw_doc.get('meta'), Mapping) else {}
-        stable_id = raw_doc.get('scanner_stable_id')
-        if not isinstance(stable_id, str) or not stable_id:
-            fallback = raw_doc.get('id') or raw_doc.get('song_id')
-            stable_id = fallback if isinstance(fallback, str) else ''
-        category_title = _normalize_category_title(
-            raw_doc.get('category')
-            or metadata.get('category')
-            or metadata.get('category_title')
-            or (manifest_categories.get(stable_id) if stable_id else '')
-            or raw_doc.get('title')
-            or raw_doc.get('name')
-        )
-        if not category_title:
-            unsorted_present = True
-            unsorted_count += 1
-            continue
-        category_id = _coerce_category_id(
-            raw_doc.get('category_id')
-            or metadata.get('category_id')
-            or raw_doc.get('id')
-        )
-        key: tuple[object, str]
-        if category_id is not None:
-            key = ('id', category_id)
-        else:
-            key = ('title', category_title.casefold())
+        meta = raw_doc.get('meta') if isinstance(raw_doc.get('meta'), Mapping) else {}
+        slug: Optional[str] = None
 
-        existing = categories.get(key)
-        if existing is None:
-            base_entry: dict[str, object] = {
-                'id': category_id if category_id is not None else None,
-                'title': category_title,
-                'count': 0,
-            }
-            song_skin = raw_doc.get('song_skin') or raw_doc.get('songSkin')
-            if isinstance(song_skin, Mapping):
-                base_entry['song_skin'] = song_skin
-            else:
-                base_entry['song_skin'] = None
-            aliases = raw_doc.get('aliases')
-            if isinstance(aliases, list):
-                base_entry['aliases'] = aliases
-            title_lang = raw_doc.get('title_lang') or raw_doc.get('titleLang')
-            if isinstance(title_lang, Mapping):
-                base_entry['title_lang'] = title_lang
-            items = raw_doc.get('items')
-            if isinstance(items, list):
-                base_entry['items'] = items
-            categories[key] = base_entry
-        else:
-            _merge_category_documents(existing, raw_doc)
-            if isinstance(metadata, Mapping):
-                _merge_category_documents(existing, metadata)
-        entry = categories[key]
-        entry['count'] = int(entry.get('count', 0)) + 1
+        if isinstance(meta, Mapping):
+            slug_candidate = meta.get('category_slug') or meta.get('category_key')
+            if isinstance(slug_candidate, str):
+                normalized_slug = slug_candidate.strip().casefold()
+                if normalized_slug in CANON_DESKTOP_BY_SLUG:
+                    slug = normalized_slug
+            if slug is None:
+                title_candidate = meta.get('category')
+                if isinstance(title_candidate, str):
+                    alias_slug = desktop_slug_from_alias(title_candidate)
+                    if alias_slug in CANON_DESKTOP_BY_SLUG:
+                        slug = alias_slug
 
-    for manifest_title in manifest_categories.values():
-        normalized_title = _normalize_category_title(manifest_title)
-        if not normalized_title:
-            continue
-        key = ('title', normalized_title.casefold())
-        if key not in categories:
-            categories[key] = {
-                'id': None,
-                'title': manifest_title,
-                'count': 0,
-                'song_skin': None,
-            }
+        if slug is None:
+            category_id = _coerce_category_id(
+                raw_doc.get('category_id')
+                or (meta.get('category_id') if isinstance(meta, Mapping) else None)
+            )
+            title_candidate = raw_doc.get('category') or raw_doc.get('name') or raw_doc.get('title')
+            title_value = title_candidate if isinstance(title_candidate, str) else None
+            canonical = resolve_desktop_category(category_id, title_value)
+            if canonical is not None:
+                slug = canonical.slug
 
-    if not categories:
-        return [
-            {'id': 0, 'title': DEFAULT_CATEGORY_TITLE, 'song_skin': None},
-        ]
+        if slug is None:
+            title_candidate = raw_doc.get('category')
+            if isinstance(title_candidate, str):
+                alias_slug = desktop_slug_from_alias(title_candidate)
+                if alias_slug in CANON_DESKTOP_BY_SLUG:
+                    slug = alias_slug
 
-    have_default = any(
-        isinstance(entry.get('id'), int) and entry.get('id') == 0
-        or _normalize_category_title(entry.get('title')) == DEFAULT_CATEGORY_TITLE
-        for entry in categories.values()
-    )
-    if not have_default and unsorted_present:
-        categories[('id', 0)] = {
-            'id': 0,
-            'title': DEFAULT_CATEGORY_TITLE,
-            'count': unsorted_count,
-            'song_skin': None,
-        }
-    elif unsorted_present and ('id', 0) in categories:
-        categories[('id', 0)]['count'] = categories[('id', 0)].get('count', 0) + unsorted_count
+        if slug is None:
+            title_candidate = raw_doc.get('title') or raw_doc.get('name')
+            if isinstance(title_candidate, str):
+                alias_slug = desktop_slug_from_alias(title_candidate)
+                if alias_slug in CANON_DESKTOP_BY_SLUG:
+                    slug = alias_slug
 
-    ordered = sorted(
-        categories.values(),
-        key=lambda entry: (
-            0 if isinstance(entry.get('id'), int) else 1,
-            entry.get('id') if isinstance(entry.get('id'), int) else entry.get('title', '').casefold(),
-        ),
-    )
+        if slug and slug in counts:
+            counts[slug] = counts.get(slug, 0) + 1
 
-    return ordered
+    return canonical_categories_with_counts(counts)
 
 
 def _normalize_categories_payload(categories: Iterable[object]) -> list[dict[str, object]]:
@@ -2283,6 +2201,27 @@ def _serialize_catalog_entry(
     subtitle_lang_value = _first('subtitle_lang') or _first('subtitleLang')
     category_value = _first('category', '')
     category_id_value = _first('category_id', 0)
+    meta_value = entry.get('meta') if isinstance(entry.get('meta'), Mapping) else {}
+    if isinstance(meta_value, Mapping):
+        slug_candidate = meta_value.get('category_slug') or meta_value.get('category_key')
+        canonical = None
+        if isinstance(slug_candidate, str):
+            normalized_slug = slug_candidate.strip().casefold()
+            canonical = CANON_DESKTOP_BY_SLUG.get(normalized_slug)
+        if canonical is None:
+            meta_category_id = _coerce_category_id(meta_value.get('category_id'))
+            meta_category_title = meta_value.get('category') if isinstance(meta_value.get('category'), str) else None
+            canonical = resolve_desktop_category(meta_category_id, meta_category_title)
+        if canonical is not None:
+            category_value = canonical.title
+            category_id_value = canonical.id
+        else:
+            meta_category_title = meta_value.get('category')
+            if isinstance(meta_category_title, str) and not category_value:
+                category_value = meta_category_title
+            meta_category_id = _coerce_category_id(meta_value.get('category_id'))
+            if meta_category_id is not None and (not category_id_value or category_id_value <= 0):
+                category_id_value = meta_category_id
     duration_value = _first('duration_ms', 0)
     preview_available = bool(_first('preview_available', False))
     source_type_value = _first('source_type', 'tja') or 'tja'
@@ -2473,6 +2412,7 @@ def _load_filesystem_catalog_entries(
         'title_lang': 1,
         'category': 1,
         'category_id': 1,
+        'meta': 1,
         'duration_ms': 1,
         'preview_available': 1,
         'source_type': 1,
