@@ -4542,7 +4542,9 @@ class SongScanner:
             result_doc = result_doc_override
         else:
             try:
-                result_doc = song_store.find_one(stable_group_filter)
+                result_doc = song_store.find_one({'song_id': stable_song_id})
+                if not result_doc:
+                    result_doc = song_store.find_one(stable_group_filter)
                 if not result_doc:
                     result_doc = song_store.find_one({'scanner_stable_id': stable_song_id})
             except Exception:  # pragma: no cover - tolerate lookup issues
@@ -5059,6 +5061,7 @@ class SongScanner:
             'titleNormalized': base.normalized_title,
             'group_key': key,
             'genre': base.genre,
+            'song_id': stable_song_id,
             'scanner_stable_id': stable_song_id,
             'scanner_primary_course': primary_course,
             'scanner_primary_difficulty': primary_difficulty,
@@ -5087,9 +5090,18 @@ class SongScanner:
                 main_relative_path = _normalise_relative_path(primary_path)
                 if main_relative_path:
                     document['tja_path'] = main_relative_path
-                    assets_payload['tja_main'] = main_relative_path
-                    main_name = PurePosixPath(main_relative_path).name
-                    assets_files[main_name] = main_relative_path
+                    try:
+                        absolute_main = (self._songs_root / main_relative_path).resolve()
+                        absolute_main.relative_to(self._songs_root)
+                    except Exception:
+                        absolute_main = None
+                    if absolute_main is not None and absolute_main.is_file():
+                        assets_payload['tja_main'] = str(absolute_main)
+                        main_name = PurePosixPath(main_relative_path).name
+                        if main_name:
+                            assets_files[main_name] = str(absolute_main)
+                    else:
+                        assets_payload['tja_main'] = main_relative_path
 
             wave_name = base.wave.strip() if isinstance(base.wave, str) else None
             if wave_name:
@@ -5103,8 +5115,15 @@ class SongScanner:
             if audio_relative:
                 normalised_audio = _normalise_relative_path(audio_relative)
                 if normalised_audio:
-                    audio_name = PurePosixPath(normalised_audio).name
-                    assets_files[audio_name] = normalised_audio
+                    try:
+                        absolute_audio = (self._songs_root / normalised_audio).resolve()
+                        absolute_audio.relative_to(self._songs_root)
+                    except Exception:
+                        absolute_audio = None
+                    if absolute_audio is not None and absolute_audio.is_file():
+                        audio_name = PurePosixPath(wave_name or normalised_audio).name
+                        if audio_name:
+                            assets_files[audio_name] = str(absolute_audio)
 
             if assets_files:
                 assets_payload['files'] = assets_files

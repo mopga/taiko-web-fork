@@ -660,16 +660,43 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     payload = api_response.get_json()
     assert isinstance(payload, list)
     assert payload
+    entry_by_id = None
     for entry in payload:
         assert isinstance(entry, dict)
         entry_id = entry.get('id')
         assert isinstance(entry_id, str) and entry_id.strip()
+        if entry_id == song_identifier:
+            entry_by_id = entry
         song_response = client.get(f"/songs/{entry_id}/main.tja")
         assert song_response.status_code == 200
+    assert entry_by_id is not None
+    assert entry_by_id['id'] == song_identifier
+    entry_url = entry_by_id.get('url')
+    assert isinstance(entry_url, str) and entry_url == f"/songs/{song_identifier}/main.tja"
+    assert isinstance(entry_by_id.get('category'), str)
+    assert isinstance(entry_by_id.get('category_id'), int)
 
     summary_second = scanner.scan(full=True)
     assert summary_second.get('errors', 0) == 0
     assert summary_second.get('updated', 0) >= 1
+
+    tja_contents = tja_path.read_text(encoding="utf-8")
+    wave_name = None
+    for line in tja_contents.splitlines():
+        if line.upper().startswith("WAVE:"):
+            wave_name = line.split(":", 1)[1].strip()
+            break
+    assert wave_name
+
+    wave_response = client.get(f"/songs/{song_identifier}/{wave_name}")
+    assert wave_response.status_code == 200
+    assert wave_response.data == audio_payload
+
+    categories_response = client.get("/api/categories")
+    assert categories_response.status_code == 200
+    categories_payload = categories_response.get_json()
+    assert isinstance(categories_payload, list)
+    assert len(categories_payload) > 0
 
 
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):
