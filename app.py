@@ -39,6 +39,7 @@ from flask import (
     session,
     flash,
     make_response,
+    send_file,
     send_from_directory,
     Response,
     current_app,
@@ -4190,7 +4191,7 @@ else:
             abort(500)
 
         mimetype = _mimetype_from_ext(resolved_path.suffix)
-        return flask.send_file(str(resolved_path), mimetype=mimetype, max_age=3600)
+        return send_file(str(resolved_path), mimetype=mimetype, max_age=3600)
 
 
 @app.route(basedir + "manifest.json")
