@@ -646,6 +646,9 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     assert stored_doc is not None
     song_identifier = stored_doc.get('song_id')
     assert isinstance(song_identifier, str)
+    dir_path_value = stored_doc.get('dir_path')
+    assert dir_path_value == str(pack_dir.resolve())
+    assert stored_doc.get('tja_filename') == tja_path.name
 
     client = app_module.app.test_client()
     response = client.get(f"/songs/{song_identifier}/main.tja")

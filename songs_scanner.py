@@ -5085,6 +5085,10 @@ class SongScanner:
 
             assets_payload: Dict[str, object] = {}
             assets_files: Dict[str, str] = {}
+            dir_path_value: Optional[str] = None
+            main_filename_value: Optional[str] = None
+            main_relative_path: Optional[str] = None
+            absolute_main_path: Optional[Path] = None
 
             if isinstance(primary_path, str):
                 main_relative_path = _normalise_relative_path(primary_path)
@@ -5094,16 +5098,19 @@ class SongScanner:
                     main_name = main_relative.name
                     if main_name:
                         assets_payload['tja_main_name'] = main_name
+                        main_filename_value = main_name
                     try:
                         absolute_main = (self._songs_root / main_relative_path).resolve()
                         absolute_main.relative_to(self._songs_root)
                     except Exception:
                         absolute_main = None
                     if absolute_main is not None and absolute_main.is_file():
+                        absolute_main_path = absolute_main
                         assets_payload['tja_main'] = str(absolute_main)
                         assets_files.setdefault(main_relative_path, str(absolute_main))
                         if main_name:
                             assets_files.setdefault(main_name, str(absolute_main))
+                        dir_path_value = str(absolute_main.parent)
                     else:
                         assets_payload['tja_main'] = main_relative_path
 
@@ -5131,10 +5138,46 @@ class SongScanner:
                         if audio_name:
                             assets_files.setdefault(audio_name, str(absolute_audio))
 
+            if absolute_main_path is None and main_relative_path:
+                try:
+                    candidate_main = (self._songs_root / main_relative_path).resolve()
+                    candidate_main.relative_to(self._songs_root)
+                except Exception:
+                    candidate_main = None
+                else:
+                    if candidate_main.is_file():
+                        absolute_main_path = candidate_main
+                        if dir_path_value is None:
+                            dir_path_value = str(candidate_main.parent)
+                        if main_filename_value is None:
+                            main_filename_value = candidate_main.name
+
+            if dir_path_value is None and main_relative_path:
+                main_relative = PurePosixPath(main_relative_path)
+                parent_path = main_relative.parent
+                candidate_dir = self._songs_root / parent_path.as_posix()
+                try:
+                    resolved_dir = candidate_dir.resolve()
+                    resolved_dir.relative_to(self._songs_root)
+                except Exception:
+                    resolved_dir = None
+                else:
+                    dir_path_value = str(resolved_dir)
+
+            if main_filename_value is None and main_relative_path:
+                candidate_name = PurePosixPath(main_relative_path).name
+                if candidate_name:
+                    main_filename_value = candidate_name
+
             if assets_files:
                 assets_payload['files'] = assets_files
             if assets_payload:
                 document['assets'] = assets_payload
+
+            if dir_path_value:
+                document['dir_path'] = dir_path_value
+            if main_filename_value:
+                document['tja_filename'] = main_filename_value
 
         if CATALOG_ASSUME_VALID:
             paths_dict = document.get('paths') if isinstance(document.get('paths'), dict) else {}

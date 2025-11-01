@@ -50,7 +50,6 @@ from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from redis import Redis
-from werkzeug.utils import safe_join
 
 if TYPE_CHECKING:
     from pymongo import MongoClient
@@ -3934,183 +3933,96 @@ else:
             songs_root_resolved = songs_root
 
         store = song_store or _require_song_store()
-
-        projection: Optional[Mapping[str, Any]] = {
-            '_id': 0,
-            'song_id': 1,
-            'group_key': 1,
-            'scanner_stable_id': 1,
-            'tja_path': 1,
-            'assets': 1,
-        }
         try:
-            document = _desktop_fetch_song_document(
-                normalized_id,
-                song_store=store,
-                projection=projection,
-            )
-        except TypeError:
             document = _desktop_fetch_song_document(normalized_id, song_store=store)
+        except Exception:
+            raise FileNotFoundError("song not found")
+        if not isinstance(document, Mapping):
+            raise FileNotFoundError("song not found")
 
-        assets_map: dict[str, Path] = {}
-        main_absolute: Optional[Path] = None
-        main_name_key: Optional[str] = None
-        base_dir: Optional[Path] = None
+        raw_dir_value = document.get("dir_path") if isinstance(document.get("dir_path"), str) else None
+        if isinstance(raw_dir_value, str):
+            dir_token = raw_dir_value.strip()
+        else:
+            dir_token = ""
+        base_dir = Path(dir_token) if dir_token else songs_root / normalized_id
+        try:
+            base_dir_resolved = base_dir.resolve()
+        except FileNotFoundError as exc:
+            raise FileNotFoundError("song directory missing") from exc
+        try:
+            base_dir_resolved.relative_to(songs_root_resolved)
+        except ValueError as exc:
+            raise FileNotFoundError("song directory outside songs root") from exc
 
-        def _resolve_existing_path(raw_value: object, *, relative_hint: Optional[PurePosixPath] = None) -> Optional[Path]:
-            if isinstance(raw_value, Path):
-                candidate = raw_value
-            elif isinstance(raw_value, (str, os.PathLike)):
-                token = str(raw_value).strip()
-                if not token:
-                    return None
-                candidate_path = Path(token)
-                if not candidate_path.is_absolute():
-                    normalized = _desktop_normalize_posix_path(token)
-                    if normalized is None or normalized.is_absolute() or ".." in normalized.parts:
-                        return None
-                    candidate_path = songs_root_resolved / normalized.as_posix()
-            elif relative_hint is not None:
-                candidate_path = songs_root_resolved / relative_hint.as_posix()
-            else:
-                return None
-            try:
-                resolved = candidate_path.resolve()
-            except FileNotFoundError:
-                return None
-            try:
-                resolved.relative_to(songs_root_resolved)
-            except ValueError:
-                return None
-            if not resolved.is_file():
-                return None
-            return resolved
-
-        def _register_asset(key: PurePosixPath, value: Path) -> None:
-            normalized_key = key.as_posix().casefold()
-            if normalized_key not in assets_map:
-                assets_map[normalized_key] = value
-
-        if isinstance(document, Mapping):
-            assets_doc = document.get('assets') if isinstance(document.get('assets'), Mapping) else {}
-
-            tja_path_value = document.get('tja_path')
-            if isinstance(tja_path_value, str):
-                normalized_tja = _desktop_normalize_posix_path(tja_path_value)
-            else:
-                normalized_tja = None
-
-            main_candidate = None
-            if isinstance(assets_doc, Mapping):
-                main_candidate = assets_doc.get('tja_main')
-            if main_candidate is None:
-                main_candidate = tja_path_value
-            main_absolute = _resolve_existing_path(main_candidate, relative_hint=normalized_tja)
-            if main_absolute is None and normalized_tja is not None:
-                tentative = songs_root_resolved / normalized_tja.as_posix()
-                try:
-                    tentative_resolved = tentative.resolve()
-                    tentative_resolved.relative_to(songs_root_resolved)
-                except (FileNotFoundError, ValueError):
-                    tentative_resolved = None
-                else:
-                    if tentative_resolved.is_file():
-                        main_absolute = tentative_resolved
-
-            if main_absolute is not None:
-                base_dir = main_absolute.parent
-                main_name_key = main_absolute.name
-                _register_asset(PurePosixPath('main.tja'), main_absolute)
-                _register_asset(PurePosixPath(main_absolute.name), main_absolute)
-            elif normalized_tja is not None:
-                base_dir = songs_root_resolved / normalized_tja.parent.as_posix()
-            else:
-                base_dir = songs_root_resolved / normalized_id
-
-            files_doc = assets_doc.get('files') if isinstance(assets_doc, Mapping) else None
-            if isinstance(files_doc, Mapping):
-                for raw_key, raw_path in files_doc.items():
-                    normalized_key_path = _desktop_normalize_posix_path(raw_key)
-                    if (
-                        normalized_key_path is None
-                        or normalized_key_path.is_absolute()
-                        or ".." in normalized_key_path.parts
-                    ):
-                        continue
-                    resolved_path = _resolve_existing_path(raw_path, relative_hint=normalized_key_path)
-                    if resolved_path is None and base_dir is not None:
-                        try:
-                            tentative = (base_dir / normalized_key_path.as_posix()).resolve()
-                            tentative.relative_to(songs_root_resolved)
-                        except (FileNotFoundError, ValueError):
-                            continue
-                        if not tentative.is_file():
-                            continue
-                        resolved_path = tentative
-                    if resolved_path is None:
-                        continue
-                    _register_asset(normalized_key_path, resolved_path)
-
-            wave_name = None
-            if isinstance(assets_doc, Mapping):
-                wave_candidate = assets_doc.get('wave')
-                if isinstance(wave_candidate, str) and wave_candidate.strip():
-                    wave_name = wave_candidate.strip()
-            if wave_name and base_dir is not None:
-                normalized_wave = _desktop_normalize_posix_path(wave_name)
+        assets_doc = document.get("assets") if isinstance(document.get("assets"), Mapping) else {}
+        files_doc = assets_doc.get("files") if isinstance(assets_doc.get("files"), Mapping) else {}
+        asset_lookup: dict[str, str] = {}
+        if isinstance(files_doc, Mapping):
+            for raw_key, raw_value in files_doc.items():
+                normalized_key = _desktop_normalize_posix_path(raw_key)
                 if (
-                    normalized_wave is not None
-                    and not normalized_wave.is_absolute()
-                    and ".." not in normalized_wave.parts
+                    normalized_key is None
+                    or normalized_key.is_absolute()
+                    or ".." in normalized_key.parts
                 ):
-                    resolved_wave = _resolve_existing_path(normalized_wave.as_posix(), relative_hint=normalized_wave)
-                    if resolved_wave is None:
-                        try:
-                            tentative_wave = (base_dir / normalized_wave.as_posix()).resolve()
-                            tentative_wave.relative_to(songs_root_resolved)
-                        except (FileNotFoundError, ValueError):
-                            tentative_wave = None
-                        else:
-                            if tentative_wave.is_file():
-                                resolved_wave = tentative_wave
-                    if resolved_wave is not None:
-                        _register_asset(normalized_wave, resolved_wave)
+                    continue
+                value_token = str(raw_value).strip() if isinstance(raw_value, (str, os.PathLike)) else None
+                if value_token:
+                    asset_lookup.setdefault(normalized_key.as_posix().casefold(), value_token)
 
-        if base_dir is None:
-            base_dir = songs_root_resolved / normalized_id
+        main_filename = document.get("tja_filename") if isinstance(document.get("tja_filename"), str) else None
+        tja_main_candidate = assets_doc.get("tja_main") if isinstance(assets_doc, Mapping) else None
+        if isinstance(tja_main_candidate, str) and tja_main_candidate.strip():
+            asset_lookup.setdefault("main.tja", tja_main_candidate.strip())
+            if isinstance(main_filename, str) and main_filename.strip():
+                asset_lookup.setdefault(main_filename.strip().replace("\\", "/").casefold(), tja_main_candidate.strip())
 
-        normalized_key = normalized_request.as_posix().casefold()
-        candidate_path = assets_map.get(normalized_key)
+        candidate_names: list[PurePosixPath] = []
+        if normalized_request.as_posix().casefold() == "main.tja" and isinstance(main_filename, str) and main_filename.strip():
+            alias_name = _desktop_normalize_posix_path(main_filename)
+            if alias_name is not None and not alias_name.is_absolute() and ".." not in alias_name.parts:
+                candidate_names.append(alias_name)
+        candidate_names.append(normalized_request)
 
-        if candidate_path is None and main_name_key:
-            if normalized_key == main_name_key.casefold():
-                candidate_path = main_absolute
-
-        if candidate_path is None and base_dir is not None:
-            try:
-                tentative = (base_dir / normalized_request.as_posix()).resolve()
-                tentative.relative_to(songs_root_resolved)
-            except (FileNotFoundError, ValueError):
-                tentative = None
+        def _resolve_candidate(value: str) -> Optional[Path]:
+            normalized_value = value.replace("\\", "/").strip()
+            if not normalized_value:
+                return None
+            candidate_paths: list[Path] = []
+            candidate = Path(normalized_value)
+            if candidate.is_absolute():
+                candidate_paths.append(candidate)
             else:
-                if tentative.is_file():
-                    candidate_path = tentative
+                candidate_paths.append(base_dir_resolved / normalized_value)
+                candidate_paths.append(songs_root_resolved / normalized_value)
+            for candidate_path in candidate_paths:
+                try:
+                    resolved = candidate_path.resolve()
+                except FileNotFoundError:
+                    continue
+                try:
+                    resolved.relative_to(songs_root_resolved)
+                except ValueError:
+                    continue
+                if not resolved.is_file():
+                    continue
+                return resolved
+            return None
 
-        if candidate_path is None:
-            fallback_dir = songs_root_resolved / normalized_id
-            try:
-                fallback_path = (fallback_dir / normalized_request.as_posix()).resolve()
-                fallback_path.relative_to(songs_root_resolved)
-            except (FileNotFoundError, ValueError):
-                fallback_path = None
-            else:
-                if fallback_path.is_file():
-                    candidate_path = fallback_path
+        for candidate in candidate_names:
+            normalized_key = candidate.as_posix().casefold()
+            asset_target = asset_lookup.get(normalized_key)
+            if asset_target:
+                resolved = _resolve_candidate(asset_target)
+                if resolved is not None:
+                    return resolved
+            candidate_value = candidate.as_posix()
+            direct_match = _resolve_candidate(candidate_value)
+            if direct_match is not None:
+                return direct_match
 
-        if candidate_path is None:
-            raise FileNotFoundError("requested asset missing")
-
-        return candidate_path
+        raise FileNotFoundError("requested asset missing")
 
     @app.route("/")
     def desktop_root_loader():
@@ -4140,21 +4052,11 @@ else:
             3600,
         )
 
-    @app.route("/songs/<path:filename>")
-    def desktop_song_files(filename: str):
-        if not isinstance(filename, str) or not filename.strip():
+    @app.route("/songs/<song_identifier>/<path:requested>")
+    def desktop_song_files(song_identifier: str, requested: str):
+        if not isinstance(song_identifier, str) or not song_identifier.strip():
             abort(404)
-
-        candidate = safe_join(str(DESKTOP_SONGS_DIR), filename)
-        if candidate is None:
-            abort(404)
-
-        segments = [segment for segment in filename.split("/") if segment]
-        if len(segments) < 2:
-            abort(404)
-        song_identifier = segments[0]
-        requested_filename = "/".join(segments[1:])
-        if not song_identifier or not requested_filename:
+        if not isinstance(requested, str) or not requested.strip():
             abort(404)
 
         normalized_identifier = _desktop_normalize_identifier(song_identifier)
@@ -4162,25 +4064,14 @@ else:
             abort(404)
 
         try:
-            resolved_path = resolve_song_file_path(normalized_identifier, requested_filename)
+            resolved_path = resolve_song_file_path(normalized_identifier, requested)
         except FileNotFoundError:
-            fallback_path = Path(candidate)
-            try:
-                resolved = fallback_path.resolve()
-            except FileNotFoundError:
-                abort(404)
-            try:
-                resolved.relative_to(DESKTOP_SONGS_DIR.resolve())
-            except ValueError:
-                abort(404)
-            if not resolved.is_file():
-                abort(404)
-            resolved_path = resolved
+            abort(404)
         except Exception:
             app.logger.exception(
                 "desktop song asset resolution failed id=%s name=%s",
                 song_identifier,
-                requested_filename,
+                requested,
             )
             abort(500)
 
