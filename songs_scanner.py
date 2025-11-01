@@ -1121,6 +1121,8 @@ NOTE_LINE_RE = re.compile(r"^[0-9,\s\|]+$")
 DIR_NUMERIC_PREFIX_RE = re.compile(r"^\s*(\d+)\s*[-_.]?\s*(.*)$")
 LEADING_ZERO_TOKEN_RE = re.compile(r"\b0+\d+\b")
 
+
+
 SAFE_NOTE_DIRECTIVES = {"#BPMCHANGE", "#MEASURE", "#SCROLL"}
 
 HEADER_KEYS = {
@@ -1683,6 +1685,7 @@ class TjaImportRecord:
     charts: List[ChartRecord]
     import_issues: List[str]
     normalized_title: str
+    category_slug: Optional[str] = None
     pack: Optional[str] = None
 
 
@@ -2006,6 +2009,99 @@ def _derive_genre_from_path(relative_tja: Path, category_title: str) -> str:
     cleaned_category = _clean_metadata_value(category_title) if category_title else None
     return cleaned_category or DEFAULT_CATEGORY_TITLE
 
+
+@dataclass(frozen=True)
+class _DesktopCategoryDefinition:
+    category_id: Optional[int]
+    title: str
+    slug: str
+    aliases: Tuple[str, ...]
+
+
+_DESKTOP_CATEGORY_DEFINITIONS: Tuple[_DesktopCategoryDefinition, ...] = (
+    _DesktopCategoryDefinition(1, "Pop", "pop", ("pop", "pops", "j pop", "j-pop", "jpop")),
+    _DesktopCategoryDefinition(2, "Anime", "anime", ("anime",)),
+    _DesktopCategoryDefinition(3, "VOCALOID™ Music", "vocaloid", (
+        "vocaloid music",
+        "vocaloidtm music",
+        "vocaloid",
+        "vocaloid™ music",
+    )),
+    _DesktopCategoryDefinition(4, "Children & Folk", "children", (
+        "children",
+        "children folk",
+        "children and folk",
+        "children & folk",
+        "folk",
+    )),
+    _DesktopCategoryDefinition(5, "Variety", "variety", ("variety",)),
+    _DesktopCategoryDefinition(6, "Classical", "classical", ("classical", "classic")),
+    _DesktopCategoryDefinition(7, "Game Music", "game", ("game", "game music", "games")),
+    _DesktopCategoryDefinition(8, "NAMCO Original", "namco", ("namco", "namco original")),
+    _DesktopCategoryDefinition(9, "Dan Dojo", "dandojo", ("dan dojo", "dandojo", "dojo", "dan")),
+    _DesktopCategoryDefinition(10, "Taiko Towers", "tower", ("taiko tower", "taiko towers", "tower")),
+    _DesktopCategoryDefinition(0, DEFAULT_CATEGORY_TITLE, "unsorted", ("unsorted", "general")),
+)
+
+_CATEGORY_PREFIX_PATTERN = re.compile(r"^\d+\s*[-_.]?\s*")
+
+
+def _normalise_desktop_category_token(value: str) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.replace("＆", "&")
+    normalized = normalized.replace("&", " and ")
+    normalized = normalized.replace("™", " tm ")
+    normalized = _clean_metadata_value(normalized)
+    normalized = re.sub(r"\s+", " ", normalized.strip())
+    token = re.sub(r"[^0-9a-zA-Z]+", " ", normalized).strip().casefold()
+    token = re.sub(r"\s+", " ", token)
+    return token
+
+
+def _desktop_slugify(value: str) -> str:
+    token = _normalise_desktop_category_token(value)
+    return token.replace(" ", "-") if token else ""
+
+
+_DESKTOP_CATEGORY_TOKEN_MAP: Dict[str, _DesktopCategoryDefinition] = {}
+_DESKTOP_CATEGORY_ID_MAP: Dict[int, _DesktopCategoryDefinition] = {}
+for definition in _DESKTOP_CATEGORY_DEFINITIONS:
+    if definition.category_id is not None:
+        _DESKTOP_CATEGORY_ID_MAP[int(definition.category_id)] = definition
+    for alias in definition.aliases:
+        token = _normalise_desktop_category_token(alias)
+        if token:
+            _DESKTOP_CATEGORY_TOKEN_MAP[token] = definition
+
+
+def _resolve_desktop_category(category_id: int, category_title: str) -> Tuple[int, str, str]:
+    cleaned_title = unicodedata.normalize("NFKC", category_title or "")
+    cleaned_title = _CATEGORY_PREFIX_PATTERN.sub("", cleaned_title)
+    cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
+    if not cleaned_title:
+        cleaned_title = DEFAULT_CATEGORY_TITLE
+    token = _normalise_desktop_category_token(cleaned_title)
+    definition = _DESKTOP_CATEGORY_TOKEN_MAP.get(token)
+    if definition is None and category_id in _DESKTOP_CATEGORY_ID_MAP:
+        definition = _DESKTOP_CATEGORY_ID_MAP[category_id]
+    if definition is None and token:
+        for candidate_token, candidate_definition in _DESKTOP_CATEGORY_TOKEN_MAP.items():
+            if token == candidate_token:
+                definition = candidate_definition
+                break
+    if definition is None:
+        slug_value = _desktop_slugify(cleaned_title) or "unsorted"
+        resolved_id = category_id if category_id else 0
+        resolved_title = cleaned_title if cleaned_title else DEFAULT_CATEGORY_TITLE
+        if not resolved_title.strip():
+            resolved_title = DEFAULT_CATEGORY_TITLE
+            resolved_id = 0
+            slug_value = "unsorted"
+        return resolved_id, resolved_title, slug_value
+    resolved_id = definition.category_id if definition.category_id is not None else (category_id or 0)
+    return resolved_id, definition.title, definition.slug
 
 def _parse_tja_strict(
     path: Path,
@@ -4009,6 +4105,7 @@ class SongScanner:
         diagnostics: List[str],
         category_id: int,
         category_title: str,
+        category_slug: Optional[str] = None,
     ) -> TjaImportRecord:
         category_mode = _resolve_category_mode(category_title)
         charts, chart_issues = self._build_chart_records(
@@ -4120,6 +4217,7 @@ class SongScanner:
             genre=genre_value,
             category_id=category_id,
             category_title=category_title,
+            category_slug=category_slug,
             pack=pack_value,
             charts=charts,
             import_issues=sorted(set(import_issues)),
@@ -4176,6 +4274,12 @@ class SongScanner:
                 )
                 for item in charts_raw
             ]
+            raw_slug = payload.get('category_slug')
+            slug_value = (
+                str(raw_slug).strip()
+                if isinstance(raw_slug, str) and raw_slug.strip()
+                else None
+            )
             record = TjaImportRecord(
                 relative_path=str(payload['relative_path']),
                 relative_dir=str(payload.get('relative_dir', '')),
@@ -4202,6 +4306,7 @@ class SongScanner:
                 genre=payload.get('genre'),
                 category_id=int(payload.get('category_id', 0)),
                 category_title=str(payload.get('category_title', DEFAULT_CATEGORY_TITLE)),
+                category_slug=slug_value,
                 pack=_clean_metadata_value(str(payload.get('pack'))) if isinstance(payload.get('pack'), str) and payload.get('pack').strip() else None,
                 charts=charts,
                 import_issues=list(payload.get('import_issues', [])),
@@ -5067,6 +5172,32 @@ class SongScanner:
             'scanner_primary_course': primary_course,
             'scanner_primary_difficulty': primary_difficulty,
         }
+        if self._single_node_mode:
+            meta_payload: Dict[str, object] = {
+                'category': base.category_title,
+                'category_id': base.category_id,
+            }
+            slug_value: Optional[str] = None
+            for record in records:
+                slug_candidate = getattr(record, 'category_slug', None)
+                if isinstance(slug_candidate, str) and slug_candidate.strip():
+                    slug_value = slug_candidate.strip()
+                    break
+            if not slug_value:
+                slug_candidate = getattr(base, 'category_slug', None)
+                if isinstance(slug_candidate, str) and slug_candidate.strip():
+                    slug_value = slug_candidate.strip()
+            if not slug_value:
+                fallback_slug = _desktop_slugify(base.category_title)
+                if fallback_slug:
+                    slug_value = fallback_slug
+            if slug_value:
+                meta_payload['category_slug'] = slug_value
+                meta_payload['category_key'] = slug_value
+            existing_meta = document.get('meta') if isinstance(document.get('meta'), Mapping) else {}
+            merged_meta = dict(existing_meta)
+            merged_meta.update(meta_payload)
+            document['meta'] = merged_meta
         if base.pack:
             document['pack'] = base.pack
         if audio_hash is not None:
@@ -5879,6 +6010,31 @@ class SongScanner:
                 except Exception as exc:  # pragma: no cover - defensive logging path
                     SUMMARY_LOGGER.info("scan:summary(format_error=%s)", exc)
 
+            if self._single_node_mode:
+                raw_counts = summary.get('desktop_category_counts')
+                if isinstance(raw_counts, Mapping):
+                    try:
+                        normalized_counts = {
+                            str(name): int(raw_counts[name])
+                            for name in raw_counts
+                        }
+                    except Exception:
+                        normalized_counts = {}
+                    total_categories = sum(normalized_counts.values())
+                    if total_categories:
+                        top_entries = sorted(
+                            normalized_counts.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )
+                        top_summary = ", ".join(
+                            f"{name}:{count}" for name, count in top_entries[:5]
+                        )
+                        LOGGER.info(
+                            "desktop.category.summary total=%d details=%s",
+                            total_categories,
+                            top_summary,
+                        )
+
             active_stack = getattr(self, '_active_refresher_stack', None)
             if active_stack is not None:
                 with contextlib.suppress(Exception):
@@ -6115,6 +6271,12 @@ class SongScanner:
             'changed': 0,
         }
 
+        desktop_category_counts: Optional[defaultdict[str, int]]
+        if self._single_node_mode:
+            desktop_category_counts = defaultdict(int)
+        else:
+            desktop_category_counts = None
+
         bulk_batch_size = max(1, int(getattr(self, '_state_bulk_batch_size', 1000)))
 
         def _flush_bulk_ops(collection, ops: List[UpdateOne], *, label: str) -> None:
@@ -6320,6 +6482,7 @@ class SongScanner:
                     skip_due_to_failure = True
 
             record: Optional[TjaImportRecord] = None
+            record_category_slug: Optional[str] = None
             diagnostics: List[str] = []
             file_hash: Optional[str] = None
             file_sha1: Optional[str] = None
@@ -6333,6 +6496,15 @@ class SongScanner:
                 if record_payload:
                     record = self._record_from_state(record_payload)
                     if record:
+                        if self._single_node_mode:
+                            resolved_id, resolved_title, resolved_slug = _resolve_desktop_category(
+                                record.category_id,
+                                record.category_title,
+                            )
+                            record.category_id = resolved_id
+                            record.category_title = resolved_title
+                            record.category_slug = resolved_slug
+                            record_category_slug = resolved_slug
                         file_hash = str(state_doc.get('tja_hash') or record.tja_hash)
                         sha1_value = state_doc.get('tja_sha1')
                         if isinstance(sha1_value, str) and sha1_value:
@@ -6396,6 +6568,12 @@ class SongScanner:
                             audio_size = audio_stat.st_size
 
                     category_id, category_title = self._determine_category(tja_path)
+                    local_category_slug: Optional[str] = None
+                    if self._single_node_mode:
+                        category_id, category_title, local_category_slug = _resolve_desktop_category(
+                            category_id,
+                            category_title,
+                        )
                     if category_id and category_title:
                         categories[category_id] = category_title
 
@@ -6414,7 +6592,10 @@ class SongScanner:
                         diagnostics=diagnostics,
                         category_id=category_id,
                         category_title=category_title,
+                        category_slug=local_category_slug,
                     )
+                    record_category_slug = local_category_slug
+                    record.category_slug = local_category_slug
                 except Exception:
                     LOGGER.error('scan-job-crash: file=%s', tja_path, exc_info=True)
                     summary['errors'] += 1
@@ -6450,6 +6631,24 @@ class SongScanner:
                 failed_state_updates[tja_key] = failure_payload
                 continue
 
+            if self._single_node_mode:
+                if record_category_slug is None:
+                    resolved_id, resolved_title, resolved_slug = _resolve_desktop_category(
+                        record.category_id,
+                        record.category_title,
+                    )
+                    record.category_id = resolved_id
+                    record.category_title = resolved_title
+                    record_category_slug = resolved_slug
+                    record.category_slug = resolved_slug
+                if record_category_slug:
+                    if record_category_slug == 'unsorted':
+                        self._metrics.increment('unsorted_total')
+                    else:
+                        self._metrics.increment('assigned_category_total')
+                    if desktop_category_counts is not None:
+                        desktop_category_counts[record_category_slug] += 1
+
             if file_sha1 is None:
                 try:
                     tja_bytes = tja_path.read_bytes()
@@ -6480,6 +6679,13 @@ class SongScanner:
                 'parse_failed_at': _timestamp_seconds(None if was_dirty else parse_failed_at),
                 'last_ok_sha1': file_sha1 if was_dirty else (last_ok_sha1 or file_sha1),
             }
+            if self._single_node_mode:
+                meta_entry = record_meta[tja_key]
+                meta_entry['category'] = record.category_title
+                meta_entry['category_id'] = record.category_id
+                if record_category_slug:
+                    meta_entry['category_slug'] = record_category_slug
+                    meta_entry['category_key'] = record_category_slug
 
             if record.category_id != 0:
                 categories[record.category_id] = record.category_title
@@ -6717,6 +6923,9 @@ class SongScanner:
                 manifest_documents_for_meta,
                 fs_index=index_current,
             )
+
+        if self._single_node_mode and desktop_category_counts is not None:
+            summary['desktop_category_counts'] = dict(sorted(desktop_category_counts.items()))
 
         self._metrics.flush()
 
@@ -7505,6 +7714,8 @@ class _ScanMetrics:
             'tja_skipped_unknown_course_total': 0,
             'tja_valid_total': 0,
             'recovered_titles_total': 0,
+            'assigned_category_total': 0,
+            'unsorted_total': 0,
         }
         self._last_logged = 0.0
 
