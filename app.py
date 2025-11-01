@@ -713,6 +713,8 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
         cursor = []
 
     categories: dict[tuple[object, str], dict[str, object]] = {}
+    unsorted_present = False
+    unsorted_count = 0
 
     for raw_doc in cursor:
         if not isinstance(raw_doc, Mapping):
@@ -731,6 +733,8 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
             or raw_doc.get('name')
         )
         if not category_title:
+            unsorted_present = True
+            unsorted_count += 1
             continue
         category_id = _coerce_category_id(
             raw_doc.get('category_id')
@@ -748,6 +752,7 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
             base_entry: dict[str, object] = {
                 'id': category_id if category_id is not None else None,
                 'title': category_title,
+                'count': 0,
             }
             song_skin = raw_doc.get('song_skin') or raw_doc.get('songSkin')
             if isinstance(song_skin, Mapping):
@@ -768,6 +773,8 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
             _merge_category_documents(existing, raw_doc)
             if isinstance(metadata, Mapping):
                 _merge_category_documents(existing, metadata)
+        entry = categories[key]
+        entry['count'] = int(entry.get('count', 0)) + 1
 
     for manifest_title in manifest_categories.values():
         normalized_title = _normalize_category_title(manifest_title)
@@ -778,6 +785,7 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
             categories[key] = {
                 'id': None,
                 'title': manifest_title,
+                'count': 0,
                 'song_skin': None,
             }
 
@@ -791,12 +799,15 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
         or _normalize_category_title(entry.get('title')) == DEFAULT_CATEGORY_TITLE
         for entry in categories.values()
     )
-    if not have_default:
+    if not have_default and unsorted_present:
         categories[('id', 0)] = {
             'id': 0,
             'title': DEFAULT_CATEGORY_TITLE,
+            'count': unsorted_count,
             'song_skin': None,
         }
+    elif unsorted_present and ('id', 0) in categories:
+        categories[('id', 0)]['count'] = categories[('id', 0)].get('count', 0) + unsorted_count
 
     ordered = sorted(
         categories.values(),
