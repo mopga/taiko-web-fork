@@ -3812,6 +3812,9 @@ else:
         def _resolve_asset_relative() -> PurePosixPath:
             if name_token.lower() == "main.tja":
                 return relative_main
+            relative_main_token = relative_main.as_posix().casefold()
+            if name_token.casefold() == relative_main_token:
+                return relative_main
             if assets_doc:
                 direct = _from_mapping(assets_doc, name_token)
                 if direct is not None:
@@ -3826,9 +3829,15 @@ else:
                     candidate = relative_main.parent.joinpath(PurePosixPath(wave_name))
                     return candidate
             component = _desktop_normalize_posix_path(name_token)
-            if component is None or component.is_absolute():
+            if component is None or component.is_absolute() or ".." in component.parts:
                 raise FileNotFoundError("invalid asset path")
-            return relative_main.parent.joinpath(component)
+            if component == relative_main:
+                return component
+            parent = component.parent
+            if parent in {PurePosixPath("."), PurePosixPath("")}:
+                base_dir = relative_main.parent if relative_main.parent != PurePosixPath("") else PurePosixPath(".")
+                return base_dir.joinpath(component)
+            return component
 
         relative = _resolve_asset_relative()
         absolute = (songs_root / relative.as_posix()).resolve()
@@ -3881,9 +3890,74 @@ else:
         if len(segments) < 2:
             abort(404)
         song_identifier = segments[0]
-        asset_name = "/".join(segments[1:])
-        if not song_identifier or not asset_name:
+        requested_filename = "/".join(segments[1:])
+        if not song_identifier or not requested_filename:
             abort(404)
+
+        asset_name = requested_filename
+        normalized_identifier = _desktop_normalize_identifier(song_identifier)
+        if not normalized_identifier:
+            abort(404)
+
+        if requested_filename.lower() == "main.tja":
+            main_override: Optional[str] = None
+
+            def _sanitize_candidate(value: object) -> Optional[str]:
+                normalized = _desktop_normalize_posix_path(value)
+                if normalized is None:
+                    return None
+                if normalized.is_absolute() or ".." in normalized.parts:
+                    return None
+                return normalized.as_posix()
+
+            try:
+                song_store = _require_song_store()
+                song_document = _desktop_fetch_song_document(
+                    normalized_identifier,
+                    song_store=song_store,
+                )
+            except FileNotFoundError:
+                song_document = None
+            except Exception:
+                app.logger.exception(
+                    "desktop song metadata lookup failed id=%s",
+                    song_identifier,
+                )
+                abort(500)
+
+            if song_document is not None:
+                manifest_entry = _desktop_load_manifest_entry(
+                    song_document,
+                    manifest_store=MANIFEST_STORE,
+                )
+                if manifest_entry:
+                    main_override = (
+                        _sanitize_candidate(manifest_entry.get("tja_path"))
+                        or _sanitize_candidate(manifest_entry.get("file_path"))
+                    )
+                    if main_override is None:
+                        assets_manifest = manifest_entry.get("assets")
+                        if isinstance(assets_manifest, Mapping):
+                            main_override = (
+                                _sanitize_candidate(assets_manifest.get("tja_main"))
+                                or _sanitize_candidate(
+                                    (assets_manifest.get("files", {}) if isinstance(assets_manifest.get("files"), Mapping) else {}).get("tja_main")
+                                )
+                            )
+
+                if main_override is None:
+                    main_override = _sanitize_candidate(song_document.get("tja_path"))
+                if main_override is None:
+                    assets_doc = song_document.get("assets")
+                    if isinstance(assets_doc, Mapping):
+                        main_override = _sanitize_candidate(assets_doc.get("tja_main"))
+                        if main_override is None:
+                            files_doc = assets_doc.get("files")
+                            if isinstance(files_doc, Mapping):
+                                main_override = _sanitize_candidate(files_doc.get("tja_main"))
+
+            if main_override is not None:
+                asset_name = main_override
 
         try:
             resolved_path = resolve_song_file_path(song_identifier, asset_name)
