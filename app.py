@@ -1497,6 +1497,9 @@ def create_app():
         if songs_dir_value is None:
             songs_dir_value = str(Path.home() / 'Music' / 'TaikoSongs')
     SONGS_DIR_PATH = Path(songs_dir_value).expanduser().resolve()
+    app_instance.logger.info('profile=%s', RUN_PROFILE)
+    if RUN_PROFILE == 'desktop':
+        app_instance.logger.info('desktop.songs_dir=%s', SONGS_DIR_PATH)
     app_instance.logger.info(
         'profile=%s catalog_source=%s songs_dir=%s',
         RUN_PROFILE,

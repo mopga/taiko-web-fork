@@ -10,6 +10,8 @@ import pytest
 
 from cachelib.file import FileSystemCache
 
+import server.paths as server_paths
+
 from songs_scanner import SongScanner
 
 from tests.test_songs_scanner import _DummyDB
@@ -21,12 +23,20 @@ if str(ROOT_DIR) not in sys.path:
 
 def _import_desktop_app(monkeypatch, tmp_path: Path):
     songs_dir = tmp_path / "songs"
-    songs_dir.mkdir()
+    songs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _songs_dir_factory() -> Path:
+        songs_dir.mkdir(parents=True, exist_ok=True)
+        return songs_dir
+
     monkeypatch.setenv("RUN_PROFILE", "desktop")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SCAN_ON_START", "skip")
     monkeypatch.setenv("ENABLE_SONG_WATCHER", "0")
     monkeypatch.setenv("SONGS_DIR", str(songs_dir))
+    monkeypatch.setattr(server_paths, "songs_dir", _songs_dir_factory)
+    monkeypatch.setattr(server_paths, "get_songs_dir", _songs_dir_factory)
+    monkeypatch.setattr(server_paths, "get_songs_dir_desktop", _songs_dir_factory)
     sys.modules.pop("app", None)
     for module_name in list(sys.modules.keys()):
         if module_name == "flask_session" or module_name.startswith("flask_session."):
@@ -92,6 +102,33 @@ def test_no_redis_in_desktop(tmp_path, monkeypatch, caplog):
     assert app_module.app.config.get("SESSION_TYPE") == "cachelib"
     assert app_module.app.config.get("SESSION_REDIS") is None
     assert "redis" not in caplog.text.lower()
+
+
+def test_desktop_song_route_serves_and_restricts(tmp_path, monkeypatch):
+    songs_dir = tmp_path / "songs"
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+
+    pack_dir = songs_dir / "TestPack"
+    pack_dir.mkdir()
+    tja_payload = "#TITLE Test Pack\n"
+    tja_path = pack_dir / "Test.tja"
+    tja_path.write_text(tja_payload, encoding="utf-8")
+    ogg_payload = b"OggS\x00\x02"
+    ogg_path = pack_dir / "Test.ogg"
+    ogg_path.write_bytes(ogg_payload)
+
+    client = app_module.app.test_client()
+
+    tja_response = client.get("/songs/TestPack/Test.tja")
+    assert tja_response.status_code == 200
+    assert tja_response.data == tja_payload.encode("utf-8")
+
+    ogg_response = client.get("/songs/TestPack/Test.ogg")
+    assert ogg_response.status_code == 200
+    assert ogg_response.data == ogg_payload
+
+    traversal_response = client.get("/songs/../../etc/passwd")
+    assert traversal_response.status_code == 404
 
 
 def test_web_profile_unchanged(tmp_path, monkeypatch):
