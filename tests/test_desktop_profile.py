@@ -540,12 +540,12 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
 
     pack_dir = songs_dir / "ScannerPack"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    tja_path = pack_dir / "CustomName.tja"
+    tja_path = pack_dir / "SongName.tja"
     tja_path.write_text(
         "\n".join(
             [
                 "TITLE:Scanner Song",
-                "WAVE:main.ogg",
+                "WAVE:SongName.ogg",
                 "COURSE:Oni",
                 "LEVEL:5",
                 "#START",
@@ -555,7 +555,9 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    (pack_dir / "main.ogg").write_bytes(b"\x00\x00")
+    audio_path = pack_dir / "SongName.ogg"
+    audio_payload = b"\x11\x22"
+    audio_path.write_bytes(audio_payload)
 
     scanner = SongScanner(
         db=_DummyDB(),
@@ -580,9 +582,13 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.data == tja_path.read_bytes()
 
-    direct_response = client.get(f"/songs/{song_identifier}/CustomName.tja")
+    direct_response = client.get(f"/songs/{song_identifier}/SongName.tja")
     assert direct_response.status_code == 200
     assert direct_response.data == tja_path.read_bytes()
+
+    audio_response = client.get(f"/songs/{song_identifier}/SongName.ogg")
+    assert audio_response.status_code == 200
+    assert audio_response.data == audio_payload
 
     missing_response = client.get(f"/songs/{song_identifier}/nope.tja")
     assert missing_response.status_code == 404

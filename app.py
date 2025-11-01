@@ -50,6 +50,7 @@ from cachelib.file import FileSystemCache
 from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from redis import Redis
+from werkzeug.utils import safe_join
 
 if TYPE_CHECKING:
     from pymongo import MongoClient
@@ -3870,6 +3871,10 @@ else:
     @app.route("/songs/<path:filename>")
     def desktop_song_files(filename: str):
         if not isinstance(filename, str) or not filename.strip():
+            abort(404)
+
+        candidate = safe_join(str(DESKTOP_SONGS_DIR), filename)
+        if candidate is None:
             abort(404)
 
         segments = [segment for segment in filename.split("/") if segment]
