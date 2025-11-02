@@ -45,7 +45,6 @@ from storage.interfaces import LeaderLock, ManifestStore, SongStore
 from lock.redis_lock import RedisLeaderLock, SCAN_LEADER_KEY
 from desktop_categories import (
     CANON_DESKTOP_BY_SLUG,
-    category_id_from_slug,
     category_title_from_slug,
     derive_category_from_path,
     normalize_category_slug,
@@ -6414,17 +6413,26 @@ class SongScanner:
                     record = self._record_from_state(record_payload)
                     if record:
                         if self._single_node_mode:
+                            canonical = None
                             normalised_slug = normalize_category_slug(record.category_slug)
                             if normalised_slug:
                                 record.category_slug = normalised_slug
-                                record.category_id = category_id_from_slug(normalised_slug)
-                                record.category_title = category_title_from_slug(normalised_slug, fallback=record.category_title)
+                                canonical = CANON_DESKTOP_BY_SLUG.get(normalised_slug)
+                                if canonical is not None:
+                                    record.category_id = canonical.id
+                                    record.category_title = canonical.title
+                                else:
+                                    record.category_title = category_title_from_slug(
+                                        normalised_slug,
+                                        fallback=record.category_title,
+                                    )
                             else:
                                 canonical = resolve_desktop_category(record.category_id, record.category_title)
                                 if canonical is not None:
                                     record.category_id = canonical.id
                                     record.category_title = canonical.title
                                     record.category_slug = canonical.slug
+                            if canonical is not None:
                                 record_category_slug = canonical.slug
                         file_hash = str(state_doc.get('tja_hash') or record.tja_hash)
                         sha1_value = state_doc.get('tja_sha1')
@@ -6498,9 +6506,8 @@ class SongScanner:
                         category_title = canonical.title
                         local_category_slug = canonical.slug
                     elif normalized_slug:
-                        category_id = category_id_from_slug(normalized_slug)
-                        category_title = category_title_from_slug(normalized_slug, fallback=category_title)
                         local_category_slug = normalized_slug
+                        category_title = category_title_from_slug(normalized_slug, fallback=category_title)
                     else:
                         canonical = resolve_desktop_category(category_id, category_title)
                         if canonical is not None:
@@ -6512,8 +6519,15 @@ class SongScanner:
                         normalized_alias_slug = normalize_category_slug(alias_slug)
                         if normalized_alias_slug:
                             local_category_slug = normalized_alias_slug
-                            category_id = category_id_from_slug(normalized_alias_slug)
-                            category_title = category_title_from_slug(normalized_alias_slug, fallback=category_title)
+                            alias_canonical = CANON_DESKTOP_BY_SLUG.get(normalized_alias_slug)
+                            if alias_canonical is not None:
+                                category_id = alias_canonical.id
+                                category_title = alias_canonical.title
+                            else:
+                                category_title = category_title_from_slug(
+                                    normalized_alias_slug,
+                                    fallback=category_title,
+                                )
                     if local_category_slug:
                         categories[category_id] = category_title
                     elif category_id and category_title:
@@ -6578,16 +6592,30 @@ class SongScanner:
                     record_category_slug = normalize_category_slug(record_category_slug)
                 if record_category_slug:
                     record.category_slug = record_category_slug
-                    record.category_id = category_id_from_slug(record_category_slug)
-                    record.category_title = category_title_from_slug(record_category_slug, fallback=record.category_title)
+                    canonical = CANON_DESKTOP_BY_SLUG.get(record_category_slug)
+                    if canonical is not None:
+                        record.category_id = canonical.id
+                        record.category_title = canonical.title
+                    else:
+                        record.category_title = category_title_from_slug(
+                            record_category_slug,
+                            fallback=record.category_title,
+                        )
                 else:
                     alias_slug = desktop_slug_from_alias(record.category_title)
                     normalized_alias_slug = normalize_category_slug(alias_slug)
                     if normalized_alias_slug:
                         record_category_slug = normalized_alias_slug
                         record.category_slug = normalized_alias_slug
-                        record.category_id = category_id_from_slug(normalized_alias_slug)
-                        record.category_title = category_title_from_slug(normalized_alias_slug, fallback=record.category_title)
+                        alias_canonical = CANON_DESKTOP_BY_SLUG.get(normalized_alias_slug)
+                        if alias_canonical is not None:
+                            record.category_id = alias_canonical.id
+                            record.category_title = alias_canonical.title
+                        else:
+                            record.category_title = category_title_from_slug(
+                                normalized_alias_slug,
+                                fallback=record.category_title,
+                            )
                     else:
                         canonical = resolve_desktop_category(record.category_id, record.category_title)
                         if canonical is not None:
