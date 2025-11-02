@@ -15,6 +15,7 @@ import server.paths as server_paths
 from songs_scanner import SongScanner
 
 from tests.test_songs_scanner import _DummyDB
+from desktop_categories import CANON_DESKTOP
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -412,9 +413,18 @@ def test_desktop_modes_and_categories_with_song_data(tmp_path, monkeypatch):
     assert isinstance(categories_payload, list)
     assert categories_payload
     assert all(isinstance(item, dict) for item in categories_payload)
-    # desktop categories API now exposes the canonical genre list only
-    assert all(item.get("title") != "Taiko Towers" for item in categories_payload)
-    assert all(item.get("title") != "Dan Dojo" for item in categories_payload)
+    canonical_slice = categories_payload[: len(CANON_DESKTOP)]
+    assert len(canonical_slice) == len(CANON_DESKTOP)
+    for canonical, entry in zip(CANON_DESKTOP, canonical_slice):
+        assert entry.get("id") == canonical["id"]
+        assert entry.get("title") == canonical["title"]
+
+    dynamic_titles = {
+        entry.get("title")
+        for entry in categories_payload[len(CANON_DESKTOP) :]
+        if isinstance(entry, dict)
+    }
+    assert {"Taiko Towers", "Dan Dojo"}.issubset(dynamic_titles)
 
     modes_response = client.get("/api/modes")
     assert modes_response.status_code == 200

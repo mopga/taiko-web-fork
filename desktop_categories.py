@@ -65,6 +65,23 @@ _CANON_DESKTOP: tuple[DesktopCategory, ...] = (
     ),
     DesktopCategory(
         id=4,
+        slug="children",
+        title="Children & Folk",
+        aliases=(
+            "children",
+            "kids",
+            "children & folk",
+            "children-and-folk",
+            "folk",
+        ),
+        title_lang={
+            "ja": "キッズ",
+            "en": "Children & Folk",
+        },
+        song_skin=None,
+    ),
+    DesktopCategory(
+        id=5,
         slug="variety",
         title="Variety",
         aliases=("variety", "variety music"),
@@ -75,7 +92,7 @@ _CANON_DESKTOP: tuple[DesktopCategory, ...] = (
         song_skin=None,
     ),
     DesktopCategory(
-        id=5,
+        id=6,
         slug="classical",
         title="Classical",
         aliases=("classical", "classic"),
@@ -86,7 +103,7 @@ _CANON_DESKTOP: tuple[DesktopCategory, ...] = (
         song_skin=None,
     ),
     DesktopCategory(
-        id=6,
+        id=7,
         slug="game",
         title="Game Music",
         aliases=("game music", "game-music", "game"),
@@ -97,7 +114,7 @@ _CANON_DESKTOP: tuple[DesktopCategory, ...] = (
         song_skin=None,
     ),
     DesktopCategory(
-        id=7,
+        id=8,
         slug="namco",
         title="NAMCO Original",
         aliases=("namco", "namco original", "namco-original"),
@@ -200,6 +217,8 @@ def slug_from_topdir(name: str) -> str:
         return "vocaloid"
     if "anime" in lowered:
         return "anime"
+    if "children" in lowered or "kids" in lowered or "folk" in lowered:
+        return "children"
     if "classical" in lowered or "classic" in lowered:
         return "classical"
     if "variety" in lowered:
@@ -229,13 +248,22 @@ def derive_category_from_path(path: Path, songs_root: Path) -> Optional[str]:
 
 
 def resolve_category(category_id: Optional[int], title: Optional[str]) -> Optional[DesktopCategory]:
-    if category_id is not None and category_id in CANON_DESKTOP_BY_ID:
-        return CANON_DESKTOP_BY_ID[category_id]
+    alias_slug: Optional[str] = None
     if title:
-        slug = slug_from_alias(title)
-        if slug:
-            slug = normalize_category_slug(slug)
-            return CANON_DESKTOP_BY_SLUG.get(slug)
+        alias_slug = slug_from_alias(title)
+        if alias_slug:
+            alias_slug = normalize_category_slug(alias_slug)
+            if alias_slug:
+                canonical_from_alias = CANON_DESKTOP_BY_SLUG.get(alias_slug)
+                if canonical_from_alias is not None:
+                    return canonical_from_alias
+
+    if category_id is not None and category_id in CANON_DESKTOP_BY_ID:
+        canonical = CANON_DESKTOP_BY_ID[category_id]
+        return canonical
+
+    if alias_slug:
+        return CANON_DESKTOP_BY_SLUG.get(alias_slug)
     return None
 
 
