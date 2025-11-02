@@ -3519,7 +3519,17 @@ class SongScanner:
         self._scan_io_threads = _posint_env('SCAN_IO_THREADS', io_threads_default)
         self._mongo_bulk_batch = _posint_env_any('SCAN_BATCH_MAX_OPS', 'MONGO_BULK_BATCH', default=800)
         self._leader_check_interval = _posint_env('LEADER_CHECK_INTERVAL', 200)
-        self._fast_path_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
+        fast_path_env = os.getenv('SCANNER_FAST_PATH')
+        if fast_path_env is None:
+            fast_path_env = '1'
+        try:
+            fast_path_enabled = _parse_bool_env(str(fast_path_env))
+        except AttributeError:
+            fast_path_enabled = bool(fast_path_env)
+        legacy_disabled = _parse_bool_env(os.getenv('SCAN_FAST_PATH_DISABLED', 'false'))
+        self._fast_path_enabled = bool(fast_path_enabled and not legacy_disabled)
+        self._fast_path_disabled = not self._fast_path_enabled
+        self._hot_start_supported = bool(self._single_node_mode and self._fast_path_enabled)
         self._state_bulk_batch_size = 1000
         LOGGER.info(
             "Scanner configuration: key=%s base_dir=%s ttl=%d refresh=%d io_threads=%d bulk_batch=%d progress_every=%d progress_every_files=%d",
@@ -5982,6 +5992,8 @@ class SongScanner:
         self._active_refresher_stack = refresher_stack
         manifest_meta = self._load_manifest_meta() or {}
         manifest_checksum: Optional[str] = None
+        manifest_entry_checksum_meta: Optional[str] = None
+        manifest_songs_after: Optional[int] = None
         manifest_documents = 0
         manifest_files_count: Optional[int] = None
         force_scan = False
@@ -5993,6 +6005,13 @@ class SongScanner:
                 if isinstance(candidate, str) and candidate.strip():
                     manifest_checksum = candidate.strip()
                     break
+            for candidate in (
+                manifest_meta.get('manifest_entry_checksum'),
+                manifest_meta.get('manifestEntryChecksum'),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    manifest_entry_checksum_meta = candidate.strip()
+                    break
             manifest_documents_value = _coerce_int(manifest_meta.get('manifest_documents'))
             if manifest_documents_value is not None:
                 manifest_documents = manifest_documents_value
@@ -6000,9 +6019,12 @@ class SongScanner:
             if manifest_files_count is None:
                 manifest_files_count = manifest_documents_value
             force_scan = bool(manifest_meta.get('force'))
+            manifest_songs_after = _coerce_int(manifest_meta.get('songs_count_after'))
         summary['manifest_documents'] = manifest_documents
         if manifest_checksum:
             summary['manifest_checksum'] = manifest_checksum
+        if manifest_entry_checksum_meta:
+            summary['manifest_entry_checksum'] = manifest_entry_checksum_meta
         summary['fast_path'] = False
         summary['leader'] = False
         summary['reason'] = 'digest_changed'
@@ -6061,7 +6083,20 @@ class SongScanner:
 
         stored_manifest_files = manifest_files_count if manifest_files_count is not None else manifest_documents
 
-        digest_equal = bool(manifest_checksum) and manifest_checksum == checksum and stored_manifest_files == files_count
+        manifest_checksum_candidates: List[str] = []
+        if isinstance(manifest_checksum, str) and manifest_checksum:
+            manifest_checksum_candidates.append(manifest_checksum)
+        if isinstance(manifest_entry_checksum_meta, str) and manifest_entry_checksum_meta:
+            if manifest_entry_checksum_meta not in manifest_checksum_candidates:
+                manifest_checksum_candidates.append(manifest_entry_checksum_meta)
+
+        checksum_matches_manifest = bool(
+            checksum_value
+            and manifest_checksum_candidates
+            and any(checksum_value == candidate for candidate in manifest_checksum_candidates)
+        )
+
+        digest_equal = bool(checksum_matches_manifest and stored_manifest_files == files_count)
 
         reason_label = 'digest_changed'
         if not manifest_checksum:
@@ -6069,12 +6104,33 @@ class SongScanner:
         if force_scan:
             reason_label = 'force'
 
+        hot_start_candidate = False
+        if (
+            self._hot_start_supported
+            and not full
+            and not force_scan
+            and checksum_matches_manifest
+        ):
+            manifest_songs_after_positive = (
+                manifest_songs_after is not None and manifest_songs_after > 0
+            )
+            songs_count_positive = (
+                songs_count_value is None or songs_count_value > 0
+            )
+            if manifest_songs_after_positive and songs_count_positive:
+                hot_start_candidate = True
+
         fast_path_candidate = (
-            digest_equal
+            (digest_equal or hot_start_candidate)
             and not full
             and not force_scan
             and not self._fast_path_disabled
         )
+
+        if hot_start_candidate:
+            reason_label = 'hot_start'
+        elif digest_equal and reason_label not in {'first_start', 'force'}:
+            reason_label = 'digest_equal'
 
         rehydrate_mode: Optional[str] = None
         if digest_equal and manifest_documents > 0 and songs_count_value is not None:
@@ -6096,15 +6152,31 @@ class SongScanner:
 
         if fast_path_candidate:
             summary['fast_path'] = True
-            summary['reason'] = 'digest_equal'
-            LOGGER.info(
-                'Song scan skipped: fast_path=True, digest_unchanged=%s',
-                checksum,
-            )
-            self._log_scan_outcome(summary, fast_path=True, reason='digest_equal')
+            if songs_count_value is not None:
+                summary['songs_count_after'] = songs_count_value
+            elif manifest_songs_after is not None:
+                summary['songs_count_after'] = manifest_songs_after
+            checksum_label = checksum if checksum else summary.get('fs_checksum') or '-'
+            if hot_start_candidate:
+                summary['reason'] = 'hot_start'
+                LOGGER.info(
+                    'Song scan skipped: fast_path=True reason=hot_start checksum=%s',
+                    checksum_label,
+                )
+                self._log_scan_outcome(summary, fast_path=True, reason='hot_start')
+            else:
+                summary['reason'] = 'digest_equal'
+                LOGGER.info(
+                    'Song scan skipped: fast_path=True, digest_unchanged=%s',
+                    checksum_label,
+                )
+                self._log_scan_outcome(summary, fast_path=True, reason='digest_equal')
             refresher_stack.close()
             self._active_refresher_stack = None
             return summary
+
+        if hot_start_candidate:
+            rehydrate_mode = None
 
         if rehydrate_mode is not None:
             summary['rehydrate_mode'] = rehydrate_mode
@@ -6152,6 +6224,8 @@ class SongScanner:
                             files_count,
                             manifest_documents,
                             fs_index=index_current,
+                            manifest_entry_checksum=summary.get('manifest_entry_checksum'),
+                            songs_count_after=summary.get('songs_count_after'),
                         )
                     LOGGER.info(
                         'Songs collection reconciled with manifest (mode=%s, rehydrated=%s, total=%s)',
@@ -6894,6 +6968,13 @@ class SongScanner:
             leader_active = False
 
         if performed_scan:
+            if (_coerce_int(summary.get('songs_count_after')) or 0) <= 0:
+                fallback_after = _coerce_int(summary.get('manifest_documents')) or 0
+                songs_before_value = _coerce_int(summary.get('songs_count_before'))
+                if songs_before_value is not None and songs_before_value > fallback_after:
+                    fallback_after = songs_before_value
+                if fallback_after > 0:
+                    summary['songs_count_after'] = fallback_after
             manifest_documents_for_meta = int(summary.get('manifest_documents') or 0)
             final_manifest_checksum = checksum or summary.get('fs_checksum') or ''
             if final_manifest_checksum is None:
@@ -6904,6 +6985,8 @@ class SongScanner:
                 files_count,
                 manifest_documents_for_meta,
                 fs_index=index_current,
+                manifest_entry_checksum=summary.get('manifest_entry_checksum'),
+                songs_count_after=summary.get('songs_count_after'),
             )
 
         if self._single_node_mode and desktop_category_counts is not None:
@@ -7133,15 +7216,25 @@ class SongScanner:
 
     def _load_manifest_meta(self) -> Optional[Dict[str, object]]:
         collection = self._meta_collection
-        if collection is None:
-            return None
-        try:
-            doc = collection.find_one({'_id': 'songs_manifest'})
-        except Exception:  # pragma: no cover - tolerate transient meta errors
-            LOGGER.debug('Failed to load songs manifest meta document', exc_info=True)
-            return None
-        if isinstance(doc, dict):
-            return dict(doc)
+        if collection is not None:
+            try:
+                doc = collection.find_one({'_id': 'songs_manifest'})
+            except Exception:  # pragma: no cover - tolerate transient meta errors
+                LOGGER.debug('Failed to load songs manifest meta document', exc_info=True)
+            else:
+                if isinstance(doc, dict):
+                    return dict(doc)
+        store = self._manifest_store
+        if store is not None:
+            try:
+                manifest_doc = store.get('songs_manifest')
+            except Exception:  # pragma: no cover - tolerate storage errors
+                LOGGER.debug('Failed to load manifest meta from manifest store', exc_info=True)
+            else:
+                if isinstance(manifest_doc, Mapping):
+                    payload = dict(manifest_doc)
+                    payload.setdefault('_id', 'songs_manifest')
+                    return payload
         return None
 
     def _update_manifest_meta(
@@ -7151,10 +7244,10 @@ class SongScanner:
         manifest_documents: int,
         *,
         fs_index: Optional[Mapping[str, Tuple[int, int]]] = None,
+        manifest_entry_checksum: Optional[object] = None,
+        songs_count_after: Optional[object] = None,
     ) -> None:
         collection = self._meta_collection
-        if collection is None:
-            return
         updated_at_ms = _timestamp_ms(datetime.now(UTC))
         if updated_at_ms is None:
             updated_at_ms = int(time.time() * 1000)
@@ -7168,14 +7261,34 @@ class SongScanner:
         }
         if fs_index:
             payload['fs_index'] = _encode_fs_index(fs_index)
+        if manifest_entry_checksum is not None:
+            checksum_token = str(manifest_entry_checksum).strip()
+            if checksum_token:
+                payload['manifest_entry_checksum'] = checksum_token
+                payload['manifestEntryChecksum'] = checksum_token
+        songs_after_value = _coerce_int(songs_count_after)
+        if songs_after_value is not None:
+            payload['songs_count_after'] = songs_after_value
         update = {
             '$set': payload,
             '$unset': {'force': ''},
         }
+        handled = False
+        if collection is not None:
+            try:
+                collection.update_one({'_id': 'songs_manifest'}, update, upsert=True)
+                handled = True
+            except Exception:  # pragma: no cover - tolerate transient meta errors
+                LOGGER.debug('Failed to update songs manifest meta document', exc_info=True)
+        if handled:
+            return
+        store = self._manifest_store
+        if store is None:
+            return
         try:
-            collection.update_one({'_id': 'songs_manifest'}, update, upsert=True)
-        except Exception:  # pragma: no cover - tolerate transient meta errors
-            LOGGER.debug('Failed to update songs manifest meta document', exc_info=True)
+            store.update_one({'_id': 'songs_manifest'}, update, upsert=True)
+        except Exception:  # pragma: no cover - tolerate transient manifest errors
+            LOGGER.debug('Failed to update manifest meta fallback document', exc_info=True)
 
     def _log_scan_outcome(self, summary: Dict[str, object], *, fast_path: bool, reason: str) -> None:
         leader = self.has_leader_lock()
@@ -7230,14 +7343,35 @@ class SongScanner:
             else:
                 counter = getattr(song_store, 'count_documents', None)
                 if not callable(counter):
-                    return None
-                filter_doc = {
-                    '$or': [
-                        {'disabled': False},
-                        {'disabled': {'$exists': False}},
-                    ]
-                }
-                raw_count = counter(filter_doc)
+                    counter = getattr(song_store, 'count', None)
+                    if callable(counter):
+                        raw_count = counter(None)  # type: ignore[misc]
+                    else:
+                        return None
+                else:
+                    filter_doc = {
+                        '$or': [
+                            {'disabled': False},
+                            {'disabled': {'$exists': False}},
+                        ]
+                    }
+                    raw_count = counter(filter_doc)
+                    if _coerce_int(raw_count) in (None, 0):
+                        try:
+                            fallback_count = counter({})  # type: ignore[misc]
+                        except Exception:
+                            fallback_count = None
+                        if _coerce_int(fallback_count) not in (None, 0):
+                            raw_count = fallback_count
+                    if _coerce_int(raw_count) in (None, 0):
+                        count_all = getattr(song_store, 'count', None)
+                        if callable(count_all):
+                            try:
+                                raw_count_alt = count_all(None)  # type: ignore[misc]
+                            except Exception:
+                                raw_count_alt = None
+                            if _coerce_int(raw_count_alt) not in (None, 0):
+                                raw_count = raw_count_alt
         except Exception:  # pragma: no cover - tolerate storage access failures
             LOGGER.debug('Failed to count enabled songs', exc_info=True)
             return None
@@ -7557,6 +7691,17 @@ class SongScanner:
         songs_count_after = self._count_enabled_songs()
         if songs_count_after is not None:
             summary['songs_count_after'] = songs_count_after
+
+        if (
+            (_coerce_int(summary.get('songs_count_after')) or 0) <= 0
+            and manifest_documents > 0
+        ):
+            estimate = manifest_documents
+            songs_before_value = _coerce_int(summary.get('songs_count_before'))
+            if songs_before_value is not None and songs_before_value > estimate:
+                estimate = songs_before_value
+            summary['songs_count_after'] = estimate
+            songs_count_after = estimate
 
         summary['found'] = processed
         summary['inserted'] = inserted

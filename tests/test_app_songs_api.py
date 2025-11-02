@@ -398,6 +398,162 @@ class SongsApiTestCase(unittest.TestCase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]['source_type'], 'custom')
 
+    def test_tower_chart_lookup_and_caching_desktop(self):
+        manifest_entries = [
+            {
+                '_id': 'tower-ama',
+                'id': 'tower-ama',
+                'title': 'Taiko Tower 10 Ama kuchi',
+                'title_lc': 'taiko tower 10 ama kuchi',
+                'aliases': ['Taiko Tower 10 Ama-kuchi'],
+                'charts': [
+                    {
+                        'mode': 'tower',
+                        'course': 'oni',
+                        'display_course': 'Ama kuchi',
+                        'chart_data': {
+                            'duration_ms': 1000,
+                            'measures': [{'notes': [{'type': 'don', 'time': 0}]}],
+                        },
+                    }
+                ],
+            }
+        ]
+        manifest_meta = {
+            '_id': '__meta__',
+            'manifest_checksum': 'tower-check',
+            'manifest_entry_checksum': 'tower-entry',
+            'songs_count_after': 1,
+        }
+        songs_docs = [
+            {
+                'scanner_stable_id': 'tower-ama',
+                'id': 101,
+                'title': 'Taiko Tower 10 Ama kuchi',
+                'charts': [
+                    {
+                        'mode': 'tower',
+                        'course': 'oni',
+                        'display_course': 'Ama kuchi',
+                        'chart_data': {
+                            'duration_ms': 1500,
+                            'measures': [{'notes': [{'type': 'don', 'time': 0}]}],
+                        },
+                    }
+                ],
+                'valid_chart_count': 1,
+                'is_playable': True,
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            with mock.patch.object(taiko_app, 'RUN_PROFILE', 'desktop'):
+                response = self.client.get(
+                    '/api/tower/chart?title=Taiko+Tower+10+Ama+kuchi&course=oni&mode=tower'
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload['status'], 'ok')
+                etag_value = response.headers.get('ETag')
+                self.assertTrue(etag_value)
+                self.assertEqual(response.headers.get('Cache-Control'), 'no-store, must-revalidate')
+                vary_tokens = {
+                    token.strip()
+                    for token in (response.headers.get('Vary') or '').split(',')
+                    if token.strip()
+                }
+                self.assertIn('If-None-Match', vary_tokens)
+                follow = self.client.get(
+                    '/api/tower/chart?title=Taiko+Tower+10+Ama+kuchi&course=oni&mode=tower',
+                    headers={'If-None-Match': etag_value},
+                )
+                self.assertEqual(follow.status_code, 304)
+                self.assertEqual(follow.data, b'')
+
+    def test_dan_chart_lookup_and_caching_desktop(self):
+        manifest_entries = [
+            {
+                '_id': 'dojo-nijiiro',
+                'id': 'dojo-nijiiro',
+                'title': 'Nijiiro 2020 Eighth Dan',
+                'title_lc': 'nijiiro 2020 eighth dan',
+                'aliases': ['Nijiiro 2020 8th Dan'],
+                'charts': [
+                    {
+                        'mode': 'dandojo',
+                        'course': 'oni',
+                        'display_course': 'Eighth Dan',
+                        'rank': 'oni',
+                        'chart_data': {
+                            'duration_ms': 800,
+                            'measures': [{'notes': [{'type': 'don', 'time': 0}]}],
+                        },
+                    }
+                ],
+            }
+        ]
+        manifest_meta = {
+            '_id': '__meta__',
+            'manifest_checksum': 'dojo-check',
+            'manifest_entry_checksum': 'dojo-entry',
+            'songs_count_after': 1,
+        }
+        songs_docs = [
+            {
+                'scanner_stable_id': 'dojo-nijiiro',
+                'id': 202,
+                'title': 'Nijiiro 2020 Eighth Dan',
+                'charts': [
+                    {
+                        'mode': 'dandojo',
+                        'course': 'oni',
+                        'display_course': 'Eighth Dan',
+                        'rank': 'oni',
+                        'chart_data': {
+                            'duration_ms': 900,
+                            'measures': [{'notes': [{'type': 'don', 'time': 0}]}],
+                        },
+                    }
+                ],
+                'valid_chart_count': 1,
+                'is_playable': True,
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            with mock.patch.object(taiko_app, 'RUN_PROFILE', 'desktop'):
+                response = self.client.get(
+                    '/api/dan/chart?title=Nijiiro+2020+Eighth+Dan&rank=oni&mode=dandojo'
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload['status'], 'ok')
+                self.assertEqual(payload['rank'], 'oni')
+                etag_value = response.headers.get('ETag')
+                self.assertTrue(etag_value)
+                self.assertEqual(response.headers.get('Cache-Control'), 'no-store, must-revalidate')
+                follow = self.client.get(
+                    '/api/dan/chart?title=Nijiiro+2020+Eighth+Dan&rank=oni&mode=dandojo',
+                    headers={'If-None-Match': etag_value},
+                )
+                self.assertEqual(follow.status_code, 304)
+
+    def test_dan_chart_not_found_message(self):
+        manifest_entries: list[dict[str, object]] = []
+        manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'empty', 'count': 0, 'songs_count_after': 0}
+        songs_docs: list[dict[str, object]] = []
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            with mock.patch.object(taiko_app, 'RUN_PROFILE', 'desktop'):
+                response = self.client.get(
+                    '/api/dan/chart?title=Missing+Song&rank=oni&mode=dandojo'
+                )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.get_json()
+        self.assertEqual(payload.get('status'), 'error')
+        self.assertIn('title=Missing Song', payload.get('error', ''))
+
     def test_projection_integrity(self):
         manifest_entries = []
         manifest_meta = {'_id': '__meta__', 'manifest_checksum': 'projection', 'count': 1}

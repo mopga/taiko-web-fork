@@ -895,6 +895,232 @@ def _normalize_if_none_match(header_value: Optional[str]) -> Optional[str]:
     return token or None
 
 
+def _normalize_chart_title_base(value: str) -> str:
+    if not isinstance(value, str):
+        return ''
+    normalized = unicodedata.normalize('NFKC', value)
+    normalized = normalized.replace('\u3000', ' ')
+    normalized = normalized.replace('_', ' ')
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+
+def _casefold_chart_title(value: str) -> str:
+    return _normalize_chart_title_base(value).casefold()
+
+
+def _loose_chart_title(value: str) -> str:
+    base = _normalize_chart_title_base(value)
+    stripped = ''.join(
+        char
+        for char in base
+        if unicodedata.category(char) and unicodedata.category(char)[0] not in {'P', 'S'}
+    )
+    stripped = re.sub(r'\s+', ' ', stripped).strip()
+    return stripped.casefold()
+
+
+def _iter_song_title_candidates(
+    document: Mapping[str, object],
+    *,
+    seen: Optional[set[int]] = None,
+) -> Iterable[tuple[str, str]]:
+    if not isinstance(document, Mapping):
+        return
+    if seen is None:
+        seen = set()
+    doc_id = id(document)
+    if doc_id in seen:
+        return
+    seen.add(doc_id)
+
+    def _yield_value(value: object, label: str) -> Iterable[tuple[str, str]]:
+        if isinstance(value, str):
+            token = value.strip()
+            if token:
+                yield token, label
+        return ()
+
+    simple_fields = (
+        'title',
+        'title_lc',
+        'titleNormalized',
+        'title_en',
+        'title_ja',
+        'titleJa',
+        'title_kana',
+    )
+    for field in simple_fields:
+        yield from _yield_value(document.get(field), field)
+
+    titles_map = document.get('titles')
+    if isinstance(titles_map, Mapping):
+        for lang, value in titles_map.items():
+            yield from _yield_value(value, f'titles.{lang}')
+
+    title_lang_map = document.get('title_lang')
+    if isinstance(title_lang_map, Mapping):
+        for lang, value in title_lang_map.items():
+            yield from _yield_value(value, f'title_lang.{lang}')
+
+    locale_map = document.get('locale')
+    if isinstance(locale_map, Mapping):
+        for lang, payload in locale_map.items():
+            if isinstance(payload, Mapping):
+                yield from _yield_value(payload.get('title'), f'locale.{lang}')
+
+    aliases_value = document.get('aliases')
+    if isinstance(aliases_value, Sequence) and not isinstance(aliases_value, (str, bytes, bytearray)):
+        for alias in aliases_value:
+            yield from _yield_value(alias, 'alias')
+
+    alias_value = document.get('alias')
+    if isinstance(alias_value, str) and alias_value.strip():
+        yield alias_value.strip(), 'alias'
+    elif isinstance(alias_value, Sequence) and not isinstance(alias_value, (str, bytes, bytearray)):
+        for alias in alias_value:
+            yield from _yield_value(alias, 'alias')
+
+    alternate_titles = document.get('alternate_titles')
+    if isinstance(alternate_titles, Sequence) and not isinstance(alternate_titles, (str, bytes, bytearray)):
+        for value in alternate_titles:
+            yield from _yield_value(value, 'alternate_title')
+
+    meta_value = document.get('meta')
+    if isinstance(meta_value, Mapping):
+        yield from _iter_song_title_candidates(meta_value, seen=seen)
+
+    snapshot_value = document.get('scanner_manifest_snapshot')
+    if isinstance(snapshot_value, Mapping):
+        yield from _iter_song_title_candidates(snapshot_value, seen=seen)
+
+
+def _match_entry_by_title(
+    entry: Mapping[str, object],
+    target_casefold: str,
+    target_loose: str,
+) -> Optional[int]:
+    best_rank: Optional[int] = None
+    for value, source in _iter_song_title_candidates(entry):
+        normalized = _casefold_chart_title(value)
+        if normalized == target_casefold:
+            rank = 0 if 'alias' not in source else 1
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                if rank == 0:
+                    break
+            continue
+        loose_value = _loose_chart_title(value)
+        if target_loose and loose_value and loose_value == target_loose:
+            rank = 2 if 'alias' not in source else 3
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+    return best_rank
+
+
+def _lookup_song_candidates_by_title(
+    title: str,
+) -> list[tuple[int, dict[str, object], dict[str, object]]]:
+    store = _get_manifest_store()
+    if store is None:
+        return []
+    try:
+        cursor = store.find({'_id': {'$ne': '__meta__'}})
+    except Exception:
+        app.logger.debug('Failed to enumerate songs manifest entries for title lookup', exc_info=True)
+        cursor = []
+
+    target_casefold = _casefold_chart_title(title)
+    target_loose = _loose_chart_title(title)
+    matches: list[tuple[int, dict[str, object], dict[str, object]]] = []
+    seen_ids: set[str] = set()
+
+    for raw_entry in cursor:
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = dict(raw_entry)
+        rank = _match_entry_by_title(entry, target_casefold, target_loose)
+        if rank is None:
+            continue
+        stable_id = entry.get('id') or entry.get('_id')
+        stable_id_str = str(stable_id) if stable_id is not None else ''
+        if stable_id_str:
+            if stable_id_str in seen_ids:
+                continue
+            seen_ids.add(stable_id_str)
+        song_doc: Optional[Mapping[str, Any]] = None
+        if stable_id_str:
+            try:
+                song_doc = _load_song_document_for_identifier(
+                    stable_id_str,
+                    projection={
+                        '_id': False,
+                        'charts': True,
+                        'title': True,
+                        'titleNormalized': True,
+                        'aliases': True,
+                        'titles': True,
+                        'title_en': True,
+                        'title_ja': True,
+                    },
+                )
+            except Exception:
+                app.logger.debug(
+                    'Song lookup failed for stable_id=%s',
+                    stable_id_str,
+                    exc_info=app.logger.isEnabledFor(logging.DEBUG),
+                )
+        if song_doc is None:
+            song_doc = entry
+        matches.append((rank, entry, dict(song_doc)))
+
+    matches.sort(
+        key=lambda item: (
+            item[0],
+            _casefold_chart_title(
+                item[2].get('title')
+                or item[1].get('title')
+                or item[1].get('title_lc')
+                or ''
+            ),
+            str(item[1].get('id') or item[1].get('_id') or ''),
+        )
+    )
+    return matches
+
+
+def _resolve_song_charts(
+    song_document: Mapping[str, object],
+    manifest_entry: Mapping[str, object],
+) -> list[dict[str, object]]:
+    charts: list[dict[str, object]] = []
+    for source in (
+        song_document.get('charts'),
+        manifest_entry.get('charts'),
+    ):
+        if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)):
+            for chart in source:
+                if isinstance(chart, Mapping):
+                    charts.append(dict(chart))
+    return charts
+
+
+def _maybe_handle_desktop_etag(etag: Optional[str]) -> Optional[Response]:
+    if RUN_PROFILE != 'desktop' or not etag:
+        return None
+    request_etag = _normalize_if_none_match(request.headers.get('If-None-Match'))
+    if request_etag and request_etag == etag:
+        response = make_response('', 304)
+        _apply_catalog_cache_headers(
+            response,
+            etag=f'"{etag}"',
+            cache_control='no-store, must-revalidate',
+            vary='If-None-Match, Accept-Encoding',
+        )
+        return response
+    return None
+
+
 def _normalize_difficulties(entry, assume_valid=False):
     src = entry.get('difficulties') if isinstance(entry, dict) else None
     if not isinstance(src, dict):
@@ -2881,7 +3107,8 @@ def route_api_modes():
 @app.route(basedir + 'api/tower/chart')
 @app.cache.cached(timeout=15, query_string=True)
 def route_api_tower_chart():
-    title = request.args.get('title', '').strip()
+    title_param = request.args.get('title', '')
+    title = title_param.strip()
     if not title:
         return jsonify({'status': 'error', 'message': 'missing_title'}), 400
     course_param = request.args.get('course', '').strip().casefold() or 'oni'
@@ -2890,30 +3117,41 @@ def route_api_tower_chart():
     if mode_param in {'dan', 'dojo'}:
         mode_param = 'dandojo'
 
-    projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
-    song = _require_song_store().find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
-    if song is None:
-        normalised_title = title.casefold()
-        song = _require_song_store().find_one({'titleNormalized': normalised_title}, projection)
-    if song is None:
-        return jsonify({'status': 'error', 'message': 'not_found'}), 404
+    prefer_modes = (mode_param,) if mode_param else ('tower', 'dandojo')
+    candidates = _lookup_song_candidates_by_title(title)
+    if not candidates:
+        normalised_title = _normalize_chart_title_base(title)
+        error_message = {
+            'status': 'error',
+            'error': f'song(s) not found for title={normalised_title} course={course_param}',
+        }
+        return jsonify(error_message), 404
 
-    charts = song.get('charts') if isinstance(song.get('charts'), list) else []
-    prefer_modes = (mode_param,) if mode_param else ("tower", "dandojo")
-    best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
+    selected_entry: Optional[Mapping[str, object]] = None
+    selected_song: Optional[Mapping[str, object]] = None
+    best_chart: Optional[Mapping[str, object]] = None
 
-    if best_chart is None:
+    for _, entry, song in candidates:
+        charts = _resolve_song_charts(song, entry)
+        best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
+        if best_chart is not None:
+            selected_entry = entry
+            selected_song = song
+            break
+
+    if selected_entry is None or selected_song is None or best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
 
     chart_data_source = best_chart.get('chart_data')
     if isinstance(chart_data_source, dict):
-        chart_data = dict(chart_data_source)
+        chart_data: dict[str, object] = dict(chart_data_source)
     else:
         chart_data = {
             'course': best_chart.get('canonical_course') or best_chart.get('course'),
             'total_notes': best_chart.get('total_notes', 0),
             'measures': best_chart.get('measures', []),
         }
+
     measures = chart_data.get('measures')
     if not isinstance(measures, list):
         measures = []
@@ -2935,6 +3173,7 @@ def route_api_tower_chart():
             total_notes = int(total_notes)
         except (TypeError, ValueError):
             total_notes = sum(len(m.get('notes', [])) for m in normalized_measures)
+
     course_label = best_chart.get('display_course') or course_param
     duration_value = chart_data.get('duration_ms')
     try:
@@ -2942,16 +3181,47 @@ def route_api_tower_chart():
     except (TypeError, ValueError):
         duration_int = duration_ms
 
-    response = {
+    song_title = (
+        selected_song.get('title')
+        or selected_entry.get('title')
+        or _normalize_chart_title_base(title)
+    )
+
+    response_payload = {
         'status': 'ok',
-        'title': song.get('title'),
+        'title': song_title,
         'mode': best_chart.get('mode'),
         'display_course': best_chart.get('display_course'),
         'chart_data': chart_data,
     }
-    LOGGER.info('tower-chart: title=%s course=%s notes=%d dur_ms=%d', title, course_label, total_notes, duration_int)
-    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song.get('title'), course_label, total_notes, duration_int)
-    return jsonify(response)
+
+    LOGGER.info('tower-chart: title=%s course=%s notes=%d dur_ms=%d', song_title, course_label, total_notes, duration_int)
+    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song_title, course_label, total_notes, duration_int)
+
+    desktop_mode = RUN_PROFILE == 'desktop'
+    etag_source: Optional[str] = None
+    if desktop_mode:
+        manifest_meta = _load_manifest_meta()
+        manifest_etag = _extract_manifest_etag(manifest_meta)
+        chart_fingerprint = hashlib.sha1(
+            json.dumps(chart_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+        stable_id = selected_entry.get('id') or selected_entry.get('_id') or ''
+        etag_components = [manifest_etag or chart_fingerprint, str(stable_id), mode_param or '', course_param]
+        etag_source = hashlib.sha1('|'.join(etag_components).encode('utf-8')).hexdigest()
+        cached_response = _maybe_handle_desktop_etag(etag_source)
+        if cached_response is not None:
+            return cached_response
+
+    response = JSONResponse(content=response_payload, media_type='application/json')
+    if desktop_mode and etag_source:
+        _apply_catalog_cache_headers(
+            response,
+            etag=f'"{etag_source}"',
+            cache_control='no-store, must-revalidate',
+            vary='If-None-Match, Accept-Encoding',
+        )
+    return response
 
 
 @app.route(basedir + 'api/dan/chart')
@@ -2960,7 +3230,8 @@ def route_api_dan_chart():
     if not is_modes_manifest_enabled():
         return jsonify({'status': 'disabled'}), 404
 
-    title = request.args.get('title', '').strip()
+    title_param = request.args.get('title', '')
+    title = title_param.strip()
     if not title:
         return jsonify({'status': 'error', 'message': 'missing_title'}), 400
     rank_raw = request.args.get('rank', '').strip()
@@ -2972,24 +3243,34 @@ def route_api_dan_chart():
         mode_param = 'dandojo'
     rank_param = rank_raw.casefold()
 
-    projection = {'_id': False, 'charts': True, 'title': True, 'titleNormalized': True}
-    song = _require_song_store().find_one({'title': {'$regex': f'^{re.escape(title)}$', '$options': 'i'}}, projection)
-    if song is None:
-        normalised_title = title.casefold()
-        song = _require_song_store().find_one({'titleNormalized': normalised_title}, projection)
-    if song is None:
-        return jsonify({'status': 'error', 'message': 'not_found'}), 404
-
-    charts = song.get('charts') if isinstance(song.get('charts'), list) else []
     prefer_modes = (mode_param,) if mode_param else ('dandojo',)
-    best_chart = select_best_chart(charts, rank_param, prefer_modes=prefer_modes)
+    candidates = _lookup_song_candidates_by_title(title)
+    if not candidates:
+        normalised_title = _normalize_chart_title_base(title)
+        error_message = {
+            'status': 'error',
+            'error': f'song(s) not found for title={normalised_title} rank={rank_param}',
+        }
+        return jsonify(error_message), 404
 
-    if best_chart is None:
+    selected_entry: Optional[Mapping[str, object]] = None
+    selected_song: Optional[Mapping[str, object]] = None
+    best_chart: Optional[Mapping[str, object]] = None
+
+    for _, entry, song in candidates:
+        charts = _resolve_song_charts(song, entry)
+        best_chart = select_best_chart(charts, rank_param, prefer_modes=prefer_modes)
+        if best_chart is not None:
+            selected_entry = entry
+            selected_song = song
+            break
+
+    if selected_entry is None or selected_song is None or best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404
 
     chart_data_source = best_chart.get('chart_data')
     if isinstance(chart_data_source, dict):
-        chart_data = dict(chart_data_source)
+        chart_data: dict[str, object] = dict(chart_data_source)
     else:
         chart_data = {
             'course': best_chart.get('canonical_course') or best_chart.get('course'),
@@ -3032,18 +3313,48 @@ def route_api_dan_chart():
     except (TypeError, ValueError):
         duration_int = duration_ms
 
-    response = {
+    song_title = (
+        selected_song.get('title')
+        or selected_entry.get('title')
+        or _normalize_chart_title_base(title)
+    )
+
+    response_payload = {
         'status': 'ok',
-        'title': song.get('title'),
+        'title': song_title,
         'mode': best_chart.get('mode'),
         'display_course': best_chart.get('display_course'),
         'rank': best_chart.get('rank'),
         'chart_data': chart_data,
     }
 
-    LOGGER.info('dan-chart: title=%s rank=%s notes=%d dur_ms=%d', title, rank_label, total_notes, duration_int)
-    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song.get('title'), rank_label, total_notes, duration_int)
-    return jsonify(response)
+    LOGGER.info('dan-chart: title=%s rank=%s notes=%d dur_ms=%d', song_title, rank_label, total_notes, duration_int)
+    LOGGER.info('chart-final: title=%s course|rank=%s notes=%d dur_ms=%d', song_title, rank_label, total_notes, duration_int)
+
+    desktop_mode = RUN_PROFILE == 'desktop'
+    etag_source: Optional[str] = None
+    if desktop_mode:
+        manifest_meta = _load_manifest_meta()
+        manifest_etag = _extract_manifest_etag(manifest_meta)
+        chart_fingerprint = hashlib.sha1(
+            json.dumps(chart_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+        stable_id = selected_entry.get('id') or selected_entry.get('_id') or ''
+        etag_components = [manifest_etag or chart_fingerprint, str(stable_id), mode_param or '', rank_param]
+        etag_source = hashlib.sha1('|'.join(etag_components).encode('utf-8')).hexdigest()
+        cached_response = _maybe_handle_desktop_etag(etag_source)
+        if cached_response is not None:
+            return cached_response
+
+    response = JSONResponse(content=response_payload, media_type='application/json')
+    if desktop_mode and etag_source:
+        _apply_catalog_cache_headers(
+            response,
+            etag=f'"{etag_source}"',
+            cache_control='no-store, must-revalidate',
+            vary='If-None-Match, Accept-Encoding',
+        )
+    return response
 
 
 @app.route(basedir + 'api/categories')
