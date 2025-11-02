@@ -252,6 +252,65 @@ def test_desktop_serves_main_alias(tmp_path, monkeypatch):
     assert traversal_response.status_code == 404
 
 
+def test_desktop_hot_start_fast_path(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+
+    songs_dir = tmp_path / "songs"
+    pack_dir = songs_dir / "HotStart"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+
+    tja_path = pack_dir / "main.tja"
+    tja_path.write_text(
+        "\n".join(
+            [
+                "TITLE:Hot Start Song",
+                "WAVE:main.ogg",
+                "COURSE:Oni",
+                "LEVEL:5",
+                "#START",
+                "1111,",
+                "#END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "main.ogg").write_bytes(b"OggS\x00\x02")
+
+    summary_first = app_module.perform_song_scan(full=False)
+    assert summary_first.get('fast_path') is False
+    assert (summary_first.get('songs_count_after') or 0) >= 1
+
+    duration_first = float(summary_first.get('duration_seconds') or 0.0)
+
+    summary_second = app_module.perform_song_scan(full=False)
+    assert summary_second.get('fast_path') is True
+    assert summary_second.get('reason') == 'hot_start'
+    assert summary_second.get('inserted', 0) == 0
+    assert summary_second.get('updated', 0) == 0
+    duration_second = float(summary_second.get('duration_seconds') or 0.0)
+    assert duration_second <= duration_first
+    assert (summary_second.get('songs_count_after') or 0) >= 1
+
+    tja_path.write_text(
+        "\n".join(
+            [
+                "TITLE:Hot Start Song",
+                "WAVE:main.ogg",
+                "COURSE:Oni",
+                "LEVEL:5",
+                "#START",
+                "1111,",
+                "2222,",
+                "#END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary_third = app_module.perform_song_scan(full=False)
+    assert summary_third.get('fast_path') is False
+
+
 def test_web_profile_unchanged(tmp_path, monkeypatch):
     songs_dir = tmp_path / "songs"
     songs_dir.mkdir()
