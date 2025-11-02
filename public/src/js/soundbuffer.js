@@ -7,7 +7,11 @@
 		this.context = new AudioContext()
 		this.audioDecoder = this.context.decodeAudioData.bind(this.context)
 		this.oggDecoder = this.audioDecoder
-		pageEvents.add(window, ["click", "touchend", "keypress"], this.pageClicked.bind(this))
+		pageEvents.add(
+			window,
+			["click", "touchend", "keypress", "pointerdown", "touchstart", "keydown"],
+			this.pageClicked.bind(this)
+		)
 		this.gainList = []
 	}
 	load(file, gain){
@@ -64,7 +68,14 @@
 		if(this.context.state === "suspended"){
 			this.context.resume()
 		}
-	}
+        }
+	async ensureRunning(){
+		try{
+			if(this.context && this.context.state !== "running"){
+				await this.context.resume()
+			}
+		}catch(_){}
+        }
 	saveSettings(){
 		for(var i = 0; i < this.gainList.length; i++){
 			var gain = this.gainList[i]
