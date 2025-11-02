@@ -58,8 +58,11 @@ if TYPE_CHECKING:
 from songs_scanner import SongScanner, empty_scan_summary
 from desktop_categories import (
     CANON_DESKTOP_BY_SLUG,
-    canonical_categories_with_counts,
+    build_categories_payload,
+    category_id_from_slug,
+    category_title_from_slug,
     empty_category_counts,
+    normalize_category_slug,
     resolve_category as resolve_desktop_category,
     slug_from_alias as desktop_slug_from_alias,
 )
@@ -668,9 +671,10 @@ def _merge_category_documents(target: dict, source: Mapping[str, object]) -> Non
 
 def _collect_desktop_categories() -> list[dict[str, object]]:
     store = _get_song_store()
-    counts = empty_category_counts()
+    counts: dict[str, int] = dict(empty_category_counts())
+    titles: dict[str, str] = {}
     if store is None:
-        return canonical_categories_with_counts(counts)
+        return build_categories_payload(counts, titles)
 
     projection = {
         'category_id': 1,
@@ -693,49 +697,56 @@ def _collect_desktop_categories() -> list[dict[str, object]]:
             continue
         meta = raw_doc.get('meta') if isinstance(raw_doc.get('meta'), Mapping) else {}
         slug: Optional[str] = None
+        title_hint: Optional[str] = None
 
         if isinstance(meta, Mapping):
             slug_candidate = meta.get('category_slug') or meta.get('category_key')
             if isinstance(slug_candidate, str):
-                normalized_slug = slug_candidate.strip().casefold()
-                if normalized_slug in CANON_DESKTOP_BY_SLUG:
-                    slug = normalized_slug
-            if slug is None:
+                slug = normalize_category_slug(slug_candidate)
+            if slug:
+                category_name = meta.get('category')
+                if isinstance(category_name, str) and category_name.strip():
+                    title_hint = category_name.strip()
+            else:
                 title_candidate = meta.get('category')
                 if isinstance(title_candidate, str):
+                    title_hint = title_candidate.strip()
                     alias_slug = desktop_slug_from_alias(title_candidate)
-                    if alias_slug in CANON_DESKTOP_BY_SLUG:
-                        slug = alias_slug
+                    slug = normalize_category_slug(alias_slug)
 
-        if slug is None:
+        if not slug:
             category_id = _coerce_category_id(
                 raw_doc.get('category_id')
                 or (meta.get('category_id') if isinstance(meta, Mapping) else None)
             )
-            title_candidate = raw_doc.get('category') or raw_doc.get('name') or raw_doc.get('title')
-            title_value = title_candidate if isinstance(title_candidate, str) else None
-            canonical = resolve_desktop_category(category_id, title_value)
+            name_candidate = raw_doc.get('category') or raw_doc.get('name') or raw_doc.get('title')
+            name_value = name_candidate if isinstance(name_candidate, str) else None
+            canonical = resolve_desktop_category(category_id, name_value)
             if canonical is not None:
                 slug = canonical.slug
+                title_hint = canonical.title
+            elif isinstance(name_value, str):
+                title_hint = title_hint or name_value.strip()
+                alias_slug = desktop_slug_from_alias(name_value)
+                slug = normalize_category_slug(alias_slug)
 
-        if slug is None:
-            title_candidate = raw_doc.get('category')
-            if isinstance(title_candidate, str):
-                alias_slug = desktop_slug_from_alias(title_candidate)
-                if alias_slug in CANON_DESKTOP_BY_SLUG:
-                    slug = alias_slug
+        if not slug and isinstance(raw_doc.get('title'), str):
+            alias_slug = desktop_slug_from_alias(raw_doc['title'])
+            slug = normalize_category_slug(alias_slug)
+            if isinstance(raw_doc['title'], str) and raw_doc['title'].strip():
+                title_hint = title_hint or raw_doc['title'].strip()
 
-        if slug is None:
-            title_candidate = raw_doc.get('title') or raw_doc.get('name')
-            if isinstance(title_candidate, str):
-                alias_slug = desktop_slug_from_alias(title_candidate)
-                if alias_slug in CANON_DESKTOP_BY_SLUG:
-                    slug = alias_slug
+        normalized_slug = normalize_category_slug(slug)
+        if not normalized_slug:
+            continue
+        counts[normalized_slug] = counts.get(normalized_slug, 0) + 1
+        if normalized_slug not in titles:
+            if isinstance(title_hint, str) and title_hint.strip():
+                titles[normalized_slug] = title_hint.strip()
+            else:
+                titles[normalized_slug] = category_title_from_slug(normalized_slug)
 
-        if slug and slug in counts:
-            counts[slug] = counts.get(slug, 0) + 1
-
-    return canonical_categories_with_counts(counts)
+    return build_categories_payload(counts, titles)
 
 
 def _normalize_categories_payload(categories: Iterable[object]) -> list[dict[str, object]]:
@@ -854,6 +865,22 @@ def _load_manifest_meta() -> Optional[dict]:
             return dict(meta)
     except Exception:
         app.logger.debug('Failed to load songs manifest meta', exc_info=True)
+    return None
+
+
+def _extract_manifest_etag(meta: Optional[Mapping[str, object]]) -> Optional[str]:
+    if not isinstance(meta, Mapping):
+        return None
+    for key in (
+        'manifest_entry_checksum',
+        'manifestEntryChecksum',
+        'manifestChecksum',
+        'manifest_checksum',
+        'checksum',
+    ):
+        candidate = meta.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
     return None
 
 
@@ -2204,24 +2231,30 @@ def _serialize_catalog_entry(
     meta_value = entry.get('meta') if isinstance(entry.get('meta'), Mapping) else {}
     if isinstance(meta_value, Mapping):
         slug_candidate = meta_value.get('category_slug') or meta_value.get('category_key')
-        canonical = None
-        if isinstance(slug_candidate, str):
-            normalized_slug = slug_candidate.strip().casefold()
+        normalized_slug = normalize_category_slug(slug_candidate)
+        if normalized_slug:
+            category_id_value = category_id_from_slug(normalized_slug)
             canonical = CANON_DESKTOP_BY_SLUG.get(normalized_slug)
-        if canonical is None:
+            if canonical is not None:
+                category_value = canonical.title
+            else:
+                meta_category_title = meta_value.get('category')
+                if isinstance(meta_category_title, str) and meta_category_title.strip():
+                    category_value = meta_category_title.strip()
+                elif not category_value:
+                    category_value = category_title_from_slug(normalized_slug)
+        else:
             meta_category_id = _coerce_category_id(meta_value.get('category_id'))
             meta_category_title = meta_value.get('category') if isinstance(meta_value.get('category'), str) else None
             canonical = resolve_desktop_category(meta_category_id, meta_category_title)
-        if canonical is not None:
-            category_value = canonical.title
-            category_id_value = canonical.id
-        else:
-            meta_category_title = meta_value.get('category')
-            if isinstance(meta_category_title, str) and not category_value:
-                category_value = meta_category_title
-            meta_category_id = _coerce_category_id(meta_value.get('category_id'))
-            if meta_category_id is not None and (not category_id_value or category_id_value <= 0):
-                category_id_value = meta_category_id
+            if canonical is not None:
+                category_value = canonical.title
+                category_id_value = canonical.id
+            else:
+                if isinstance(meta_category_title, str) and meta_category_title.strip() and not category_value:
+                    category_value = meta_category_title.strip()
+                if meta_category_id is not None and (not category_id_value or category_id_value <= 0):
+                    category_id_value = meta_category_id
     duration_value = _first('duration_ms', 0)
     preview_available = bool(_first('preview_available', False))
     source_type_value = _first('source_type', 'tja') or 'tja'
@@ -2515,16 +2548,12 @@ def _load_filesystem_catalog_entries(
 def route_api_songs():
     app.logger.debug('api_songs: catalog_source=%s', CATALOG_SOURCE)
     cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    if RUN_PROFILE == 'desktop':
+        cache_control = 'no-store, must-revalidate'
     vary_header = 'If-None-Match, Accept-Encoding'
 
     meta = _load_manifest_meta()
-    etag: Optional[str] = None
-    if isinstance(meta, dict):
-        for key in ('manifestChecksum', 'manifest_checksum', 'checksum'):
-            candidate = meta.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                etag = candidate.strip()
-                break
+    etag = _extract_manifest_etag(meta)
 
     quoted_etag = f'"{etag}"' if etag else None
 
@@ -2616,6 +2645,20 @@ def route_api_songs():
     else:
         app.logger.warning('Unexpected /api/songs payload type %s; normalizing to []', type(payload).__name__)
         normalized_payload = []
+
+    if RUN_PROFILE == 'desktop' and not etag:
+        serialized_payload = json.dumps(normalized_payload, sort_keys=True, separators=(',', ':'))
+        etag = hashlib.sha1(serialized_payload.encode('utf-8')).hexdigest()
+        quoted_etag = f'"{etag}"'
+        if request_etag == etag:
+            response = make_response('', 304)
+            _apply_catalog_cache_headers(
+                response,
+                etag=quoted_etag,
+                cache_control=cache_control,
+                vary=vary_header,
+            )
+            return response
 
     response = JSONResponse(content=normalized_payload, media_type='application/json')
     _apply_catalog_cache_headers(response, etag=quoted_etag, cache_control=cache_control, vary=vary_header)
@@ -3011,7 +3054,42 @@ def route_api_categories():
         return error_response
 
     categories = _normalize_categories_payload(documents)
-    return jsonify(categories)
+
+    cache_control = 'public, max-age=86400, stale-while-revalidate=600'
+    vary_header = 'If-None-Match, Accept-Encoding'
+    etag: Optional[str] = None
+
+    if RUN_PROFILE == 'desktop':
+        cache_control = 'no-store, must-revalidate'
+        meta = _load_manifest_meta()
+        etag = _extract_manifest_etag(meta)
+        request_etag = _normalize_if_none_match(request.headers.get('If-None-Match'))
+        if not etag:
+            serialized = json.dumps(categories, sort_keys=True, separators=(',', ':'))
+            etag = hashlib.sha1(serialized.encode('utf-8')).hexdigest()
+        if etag and request_etag == etag:
+            response = make_response('', 304)
+            _apply_catalog_cache_headers(
+                response,
+                etag=f'"{etag}"',
+                cache_control=cache_control,
+                vary=vary_header,
+            )
+            return response
+
+        response = make_response(jsonify(categories))
+        _apply_catalog_cache_headers(
+            response,
+            etag=f'"{etag}"' if etag else None,
+            cache_control=cache_control,
+            vary=vary_header,
+        )
+        return response
+
+    response = jsonify(categories)
+    response.headers['Cache-Control'] = cache_control
+    response.headers.setdefault('Vary', vary_header)
+    return response
 
 
 @app.route(basedir + 'import/report')
