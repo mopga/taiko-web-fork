@@ -1058,7 +1058,11 @@ class SongSelect{
 		this.clearHash()
 		pageEvents.send("song-select-back")
 	}
-	toLoadSong(difficulty, shift, ctrl, touch){
+	async toLoadSong(difficulty, shift, ctrl, touch){
+		var soundBufferInstance = typeof soundBuffer !== "undefined" && soundBuffer ? soundBuffer : (snd && snd.buffer ? snd.buffer : null)
+		if(soundBufferInstance && typeof soundBufferInstance.ensureRunning === "function"){
+			await soundBufferInstance.ensureRunning() // гарантированный unlock по жесту Play
+		}
 		this.clean()
 		var selectedSong = this.songs[this.selectedSong]
 		assets.sounds["v_diffsel"].stop()
