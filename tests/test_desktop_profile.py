@@ -252,6 +252,209 @@ def test_desktop_serves_main_alias(tmp_path, monkeypatch):
     assert traversal_response.status_code == 404
 
 
+def test_desktop_dojo_and_tower_chart_endpoints(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    songs_dir = tmp_path / "songs"
+
+    dojo_dir = songs_dir / "DojoSample"
+    dojo_dir.mkdir(parents=True, exist_ok=True)
+    dojo_playlist = dojo_dir / "dojo_segments.t3u8"
+    dojo_main = dojo_dir / "main.tja"
+
+    dojo_segments = [
+        dojo_dir / "dan_segment_1.tja",
+        dojo_dir / "dan_segment_2.tja",
+    ]
+
+    dojo_main.write_text("\n".join([
+        "TITLE:Dojo Sample",
+        "WAVE:dojo_segments.t3u8",
+        "COURSE:DAN",
+        "LEVEL:1",
+        "#START",
+        "#END",
+    ]), encoding="utf-8")
+
+    dojo_playlist.write_text("\n".join([
+        "#EXTM3U",
+        dojo_segments[0].name,
+        dojo_segments[1].name,
+    ]), encoding="utf-8")
+
+    dojo_segments[0].write_text("\n".join([
+        "TITLE:Segment A",
+        "COURSE:Oni",
+        "LEVEL:5",
+        "BPM:120",
+        "#START",
+        "1111,",
+        "#END",
+    ]), encoding="utf-8")
+
+    dojo_segments[1].write_text("\n".join([
+        "TITLE:Segment B",
+        "COURSE:Oni",
+        "LEVEL:6",
+        "BPM:150",
+        "#START",
+        "2222,",
+        "#END",
+    ]), encoding="utf-8")
+
+    tower_dir = songs_dir / "TowerSample"
+    tower_dir.mkdir(parents=True, exist_ok=True)
+    tower_playlist = tower_dir / "tower_segments.t3u8"
+    tower_main = tower_dir / "main.tja"
+
+    tower_segments = [
+        tower_dir / "tower_segment_1.tja",
+        tower_dir / "tower_segment_2.tja",
+    ]
+
+    tower_main.write_text("\n".join([
+        "TITLE:Tower Sample",
+        "WAVE:tower_segments.t3u8",
+        "COURSE:TOWER",
+        "LEVEL:2",
+        "#START",
+        "#END",
+    ]), encoding="utf-8")
+
+    tower_playlist.write_text("\n".join([
+        "#EXTM3U",
+        tower_segments[0].name,
+        tower_segments[1].name,
+    ]), encoding="utf-8")
+
+    tower_segments[0].write_text("\n".join([
+        "TITLE:Tower Segment 1",
+        "COURSE:Oni",
+        "LEVEL:7",
+        "BPM:140",
+        "#START",
+        "3333,",
+        "#END",
+    ]), encoding="utf-8")
+
+    tower_segments[1].write_text("\n".join([
+        "TITLE:Tower Segment 2",
+        "COURSE:Oni",
+        "LEVEL:8",
+        "BPM:160",
+        "#START",
+        "4444,",
+        "#END",
+    ]), encoding="utf-8")
+
+    scan_summary = app_module.perform_song_scan(full=True)
+    assert scan_summary.get('errors', 0) == 0
+
+    client = app_module.app.test_client()
+
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+
+    entries = list(song_store.find({}))
+    dojo_entry = next(
+        (
+            doc
+            for doc in entries
+            if doc.get('assets', {}).get('playlist_path') == 'DojoSample/dojo_segments.t3u8'
+        ),
+        None,
+    )
+    assert dojo_entry is not None
+
+    tower_entry = next(
+        (
+            doc
+            for doc in entries
+            if doc.get('assets', {}).get('playlist_path') == 'TowerSample/tower_segments.t3u8'
+        ),
+        None,
+    )
+    assert tower_entry is not None
+
+    manifest_store = app_module.MANIFEST_STORE
+    assert manifest_store is not None
+    manifest_entries = list(manifest_store.find({'_id': {'$ne': '__meta__'}}))
+
+    dojo_manifest = next(
+        (
+            doc
+            for doc in manifest_entries
+            if any(
+                (chart.get('mode') or '').strip().lower() == 'dandojo'
+                for chart in doc.get('charts') or []
+            )
+        ),
+        None,
+    )
+    assert dojo_manifest is not None
+    dojo_chart_entry = next(
+        chart
+        for chart in dojo_manifest.get('charts') or []
+        if (chart.get('mode') or '').strip().lower() == 'dandojo'
+    )
+    assert dojo_chart_entry.get('chart_data', {}).get('meta', {}).get('segments')
+    rank_token = str(
+        dojo_chart_entry.get('display_course')
+        or dojo_chart_entry.get('rank')
+        or dojo_chart_entry.get('canonical_course')
+        or 'dan'
+    ).strip().lower()
+
+    tower_manifest = next(
+        (
+            doc
+            for doc in manifest_entries
+            if any(
+                (chart.get('mode') or '').strip().lower() == 'tower'
+                for chart in doc.get('charts') or []
+            )
+        ),
+        None,
+    )
+    assert tower_manifest is not None
+    tower_chart_entry = next(
+        chart
+        for chart in tower_manifest.get('charts') or []
+        if (chart.get('mode') or '').strip().lower() == 'tower'
+    )
+    assert tower_chart_entry.get('chart_data', {}).get('meta', {}).get('segments')
+    course_token = str(
+        tower_chart_entry.get('canonical_course')
+        or tower_chart_entry.get('course')
+        or 'oni'
+    ).strip().lower()
+
+    dan_response = client.get(
+        "/api/dan/chart",
+        query_string={"title": "Dojo Sample", "rank": rank_token},
+    )
+    assert dan_response.status_code == 200
+    dan_payload = dan_response.get_json()
+    assert dan_payload["status"] == "ok"
+    dan_chart = dan_payload["chart_data"]
+    assert dan_chart["duration_ms"] > 0
+    assert dan_chart["notes"]
+    assert dan_chart.get("meta", {}).get("segments")
+    assert dan_chart.get("meta", {}).get("playlist_path") == "DojoSample/dojo_segments.t3u8"
+
+    tower_response = client.get(
+        "/api/tower/chart",
+        query_string={"title": "Tower Sample", "course": course_token},
+    )
+    assert tower_response.status_code == 200
+    tower_payload = tower_response.get_json()
+    assert tower_payload["status"] == "ok"
+    tower_chart = tower_payload["chart_data"]
+    assert tower_chart["duration_ms"] > 0
+    assert tower_chart["notes"]
+    assert tower_chart.get("meta", {}).get("segments")
+    assert tower_chart.get("meta", {}).get("playlist_path") == "TowerSample/tower_segments.t3u8"
+
+
 def test_desktop_hot_start_fast_path(tmp_path, monkeypatch):
     app_module = _import_desktop_app(monkeypatch, tmp_path)
 
