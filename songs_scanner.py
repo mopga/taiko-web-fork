@@ -1076,6 +1076,7 @@ SUPPORTED_AUDIO_EXTS = [
     ".flac",
     ".opus",
     ".t3u8",
+    ".m3u8",
 ]
 
 COURSE_ALIASES = {
@@ -5210,6 +5211,46 @@ class SongScanner:
                         if main_filename_value is None:
                             main_filename_value = candidate_main.name
 
+            if not assets_payload.get('tja_main'):
+                fallback_relative: Optional[str] = None
+                fallback_absolute: Optional[Path] = None
+                fallback_name: Optional[str] = None
+                for record in sorted_records:
+                    candidate_relative = _normalise_relative_path(record.relative_path)
+                    if not candidate_relative:
+                        continue
+                    fallback_relative = candidate_relative
+                    candidate_name = PurePosixPath(candidate_relative).name
+                    if candidate_name:
+                        fallback_name = fallback_name or candidate_name
+                    try:
+                        candidate_absolute = (self._songs_root / candidate_relative).resolve()
+                        candidate_absolute.relative_to(self._songs_root)
+                    except Exception:
+                        candidate_absolute = None
+                    if candidate_absolute is not None and candidate_absolute.is_file():
+                        fallback_absolute = candidate_absolute
+                        fallback_name = candidate_absolute.name or fallback_name
+                        assets_files.setdefault(candidate_relative, str(candidate_absolute))
+                        if fallback_name:
+                            assets_files.setdefault(fallback_name, str(candidate_absolute))
+                        break
+                if fallback_relative:
+                    if not main_relative_path:
+                        main_relative_path = fallback_relative
+                    document.setdefault('tja_path', fallback_relative)
+                    if fallback_name:
+                        assets_payload.setdefault('tja_main_name', fallback_name)
+                        if main_filename_value is None:
+                            main_filename_value = fallback_name
+                    if fallback_absolute is not None and fallback_absolute.is_file():
+                        absolute_main_path = fallback_absolute
+                        assets_payload['tja_main'] = str(fallback_absolute)
+                        if dir_path_value is None:
+                            dir_path_value = str(fallback_absolute.parent)
+                    else:
+                        assets_payload['tja_main'] = fallback_relative
+
             if dir_path_value is None and main_relative_path:
                 main_relative = PurePosixPath(main_relative_path)
                 parent_path = main_relative.parent
@@ -5757,10 +5798,13 @@ class SongScanner:
 
         def _find_hls_playlist() -> Optional[Path]:
             candidates: List[Path] = []
+            suffixes = ("*.t3u8", "*.m3u8")
             hls_dir = tja_path.parent / "HLS"
             if hls_dir.is_dir():
-                candidates.extend(sorted(hls_dir.glob('*.t3u8'), key=lambda p: p.name.lower()))
-            candidates.extend(sorted(tja_path.parent.glob('*.t3u8'), key=lambda p: p.name.lower()))
+                for pattern in suffixes:
+                    candidates.extend(sorted(hls_dir.glob(pattern), key=lambda p: p.name.lower()))
+            for pattern in suffixes:
+                candidates.extend(sorted(tja_path.parent.glob(pattern), key=lambda p: p.name.lower()))
             for candidate in candidates:
                 try:
                     resolved = candidate.resolve()
@@ -5774,6 +5818,18 @@ class SongScanner:
                     return resolved
             return None
 
+        has_special_mode = parsed.has_dojo_course or any(
+            course.normalised in {"DAN", "DOJO", "KYUU"}
+            or course.mode in {"tower", "dan", "dojo"}
+            or (course.display_course in {"tower", "dan"} if course.display_course else False)
+            for course in parsed.courses
+        )
+
+        if has_special_mode:
+            playlist = _find_hls_playlist()
+            if playlist is not None:
+                return playlist, diagnostics
+
         if parsed.wave:
             candidate = (tja_path.parent / parsed.wave).resolve()
             try:
@@ -5782,13 +5838,14 @@ class SongScanner:
                 diagnostics.append('wave-outside-root')
             else:
                 if candidate.is_file():
+                    if has_special_mode and candidate.suffix.lower() not in {".t3u8", ".m3u8"}:
+                        playlist = _find_hls_playlist()
+                        if playlist is not None:
+                            return playlist, diagnostics
                     return candidate, diagnostics
                 diagnostics.append('wave-missing')
-        has_dojo_charts = parsed.has_dojo_course or any(
-            course.normalised in {"DAN", "DOJO", "KYUU"} for course in parsed.courses
-        )
 
-        if has_dojo_charts:
+        if has_special_mode:
             playlist = _find_hls_playlist()
             if playlist is not None:
                 return playlist, diagnostics

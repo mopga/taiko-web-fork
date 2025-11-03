@@ -779,6 +779,141 @@ def test_desktop_scanner_populates_song_and_main_tja(tmp_path, monkeypatch):
     assert len(categories_payload) > 0
 
 
+def test_desktop_scanner_handles_dojo_and_tower(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    song_store = app_module.SONG_STORE
+    manifest_store = app_module.MANIFEST_STORE
+    songs_dir = tmp_path / "dojo_songs"
+    songs_dir.mkdir()
+    app_module.DESKTOP_SONGS_DIR = songs_dir
+    if hasattr(app_module, "SONGS_DIR_PATH"):
+        app_module.SONGS_DIR_PATH = songs_dir
+
+    dojo_dir = songs_dir / "DanDojo"
+    dojo_dir.mkdir(parents=True, exist_ok=True)
+    dojo_tja = dojo_dir / "Nijiiro 2022 Second Dan.tja"
+    dojo_tja.write_text(
+        "\n".join(
+            [
+                "TITLE:Dojo Challenge",
+                "COURSE:Dan",
+                "LEVEL:5",
+                "WAVE:Nijiiro 2022 Second Dan.mp3",
+                "#START",
+                "1111,",
+                "#END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (dojo_dir / "Nijiiro 2022 Second Dan.mp3").write_bytes(b"mp3")
+    (dojo_dir / "Nijiiro 2022 Second Dan.t3u8").write_text("#EXTM3U\n", encoding="utf-8")
+
+    tower_dir = songs_dir / "TowerPack"
+    tower_dir.mkdir(parents=True, exist_ok=True)
+    tower_tja = tower_dir / "Taiko Tower 3 Ama-kuchi.tja"
+    tower_tja.write_text(
+        "\n".join(
+            [
+                "TITLE:Tower Trial",
+                "COURSE:Tower Floor 1",
+                "LEVEL:4",
+                "WAVE:Taiko Tower 3 Ama-kuchi.mp3",
+                "#START",
+                "1111,",
+                "#END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tower_dir / "Taiko Tower 3 Ama-kuchi.mp3").write_bytes(b"mp3")
+    hls_dir = tower_dir / "HLS"
+    hls_dir.mkdir()
+    (hls_dir / "playlist.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+
+    scanner = SongScanner(
+        db=_DummyDB(),
+        songs_dir=songs_dir,
+        songs_baseurl="/songs/",
+        song_store=song_store,
+        manifest_store=manifest_store,
+    )
+
+    summary = scanner.scan(full=True)
+    assert summary.get('errors', 0) == 0
+
+    docs = list(song_store.find())
+    assert len(docs) >= 2
+
+    dojo_doc = next(doc for doc in docs if doc.get('title') == 'Dojo Challenge')
+    tower_doc = next(doc for doc in docs if doc.get('title') == 'Tower Trial')
+
+    assert dojo_doc.get('tja_filename') == dojo_tja.name
+    dojo_assets = dojo_doc.get('assets') or {}
+    assert isinstance(dojo_assets, dict)
+    assert dojo_assets.get('tja_main')
+    assert dojo_assets['tja_main'].endswith(dojo_tja.name)
+    dojo_files = dojo_assets.get('files') or {}
+    assert isinstance(dojo_files, dict)
+    assert any(
+        (isinstance(key, str) and key.endswith('.t3u8'))
+        or (isinstance(value, str) and value.endswith('.t3u8'))
+        for key, value in dojo_files.items()
+    )
+
+    assert tower_doc.get('tja_filename') == tower_tja.name
+    tower_assets = tower_doc.get('assets') or {}
+    assert isinstance(tower_assets, dict)
+    assert tower_assets.get('tja_main')
+    assert tower_assets['tja_main'].endswith(tower_tja.name)
+    tower_files = tower_assets.get('files') or {}
+    assert isinstance(tower_files, dict)
+    assert any(
+        (isinstance(key, str) and key.endswith('.m3u8'))
+        or (isinstance(value, str) and value.endswith('.m3u8'))
+        for key, value in tower_files.items()
+    )
+
+    dojo_id = dojo_doc.get('song_id')
+    assert isinstance(dojo_id, str)
+
+    song_store.update_one(
+        {'song_id': dojo_id},
+        {
+            '$set': {
+                'assets': {},
+                'tja_path': None,
+                'tja_filename': None,
+            }
+        },
+    )
+
+    resolved_main = app_module.resolve_main_tja_path(
+        dojo_id,
+        song_store=song_store,
+        manifest_store=manifest_store,
+        songs_dir=songs_dir,
+    )
+    assert resolved_main == dojo_tja.resolve()
+
+    resolved_alias = app_module.resolve_song_file_path(
+        dojo_id,
+        'main.tja',
+        song_store=song_store,
+        manifest_store=manifest_store,
+        songs_dir=songs_dir,
+    )
+    assert resolved_alias == dojo_tja.resolve()
+
+    updated_doc = song_store.find_one({'song_id': dojo_id})
+    assert isinstance(updated_doc, dict)
+    updated_assets = updated_doc.get('assets') or {}
+    assert updated_assets.get('tja_main')
+    assert updated_assets['tja_main'].endswith(dojo_tja.name)
+    assert updated_doc.get('tja_path')
+    assert updated_doc.get('tja_filename') == dojo_tja.name
+
+
 def test_desktop_api_login_guarded(tmp_path, monkeypatch):
     app_module = _import_desktop_app(monkeypatch, tmp_path)
     client = app_module.app.test_client()

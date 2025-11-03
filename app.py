@@ -4172,22 +4172,83 @@ else:
         candidate_dirs: list[PurePosixPath] = []
 
         def _register_file_candidate(value: object) -> None:
+            candidates: list[PurePosixPath] = []
+
             normalized = _desktop_normalize_posix_path(value)
-            if normalized is None:
-                return
-            if normalized not in candidate_files:
-                candidate_files.append(normalized)
-            parent = normalized.parent if normalized.parent != PurePosixPath("") else PurePosixPath(".")
-            if parent not in candidate_dirs:
-                candidate_dirs.append(parent)
+            if (
+                normalized is not None
+                and not normalized.is_absolute()
+                and ".." not in normalized.parts
+            ):
+                candidates.append(normalized)
+
+            url_relative = _desktop_extract_relative_path_from_url(value)
+            if url_relative is not None and url_relative not in candidates:
+                candidates.append(url_relative)
+
+            absolute_candidate = _desktop_normalize_absolute_asset_path(value, songs_root)
+            if absolute_candidate is not None:
+                try:
+                    relative_path = absolute_candidate.relative_to(songs_root)
+                except ValueError:
+                    relative_path = None
+                else:
+                    relative_candidate = PurePosixPath(relative_path.as_posix())
+                    if relative_candidate not in candidates:
+                        candidates.append(relative_candidate)
+
+            for candidate in candidates:
+                if candidate not in candidate_files:
+                    candidate_files.append(candidate)
+                parent = (
+                    candidate.parent
+                    if candidate.parent != PurePosixPath("")
+                    else PurePosixPath(".")
+                )
+                if parent not in candidate_dirs:
+                    candidate_dirs.append(parent)
 
         def _register_dir_candidate(value: object) -> None:
-            normalized = _desktop_extract_relative_path_from_url(value)
-            if normalized is None:
-                return
-            directory = normalized if normalized != PurePosixPath("") else PurePosixPath(".")
-            if directory not in candidate_dirs:
-                candidate_dirs.append(directory)
+            candidates: list[PurePosixPath] = []
+
+            normalized = _desktop_normalize_posix_path(value)
+            if (
+                normalized is not None
+                and not normalized.is_absolute()
+                and ".." not in normalized.parts
+            ):
+                candidates.append(
+                    normalized if normalized != PurePosixPath("") else PurePosixPath(".")
+                )
+
+            url_relative = _desktop_extract_relative_path_from_url(value)
+            if url_relative is not None:
+                normalized_url = url_relative if url_relative != PurePosixPath("") else PurePosixPath(".")
+                if normalized_url not in candidates:
+                    candidates.append(normalized_url)
+
+            if isinstance(value, (str, PurePosixPath, os.PathLike)):
+                try:
+                    raw_path = os.fspath(value) if not isinstance(value, PurePosixPath) else value.as_posix()
+                except TypeError:
+                    raw_path = None
+                if raw_path:
+                    candidate_path = Path(raw_path)
+                    if not candidate_path.is_absolute():
+                        candidate_path = songs_root / candidate_path.as_posix()
+                    try:
+                        resolved_dir = candidate_path.resolve()
+                        resolved_dir.relative_to(songs_root)
+                    except Exception:
+                        resolved_dir = None
+                    if resolved_dir is not None and resolved_dir.is_dir():
+                        relative_dir = PurePosixPath(resolved_dir.relative_to(songs_root).as_posix())
+                        if relative_dir not in candidates:
+                            candidates.append(relative_dir if relative_dir != PurePosixPath("") else PurePosixPath("."))
+
+            for candidate in candidates:
+                if candidate not in candidate_dirs:
+                    candidate_dirs.append(candidate)
 
         def _register_identifier_directory(value: object) -> None:
             identifier = _desktop_normalize_identifier(value)
@@ -4212,8 +4273,20 @@ else:
             _register_file_candidate(paths_doc.get("tja_url"))
             _register_dir_candidate(paths_doc.get("dir_url"))
 
+        assets_candidate_docs = list(_desktop_iter_asset_documents(song_doc, manifest_entry))
+        for assets_doc in assets_candidate_docs:
+            _register_file_candidate(assets_doc.get("tja_main"))
+            _register_file_candidate(assets_doc.get("tja_main_name"))
+            files_map = assets_doc.get("files") if isinstance(assets_doc.get("files"), Mapping) else None
+            if files_map:
+                for raw_key, raw_value in files_map.items():
+                    _register_file_candidate(raw_key)
+                    _register_file_candidate(raw_value)
+            _register_dir_candidate(assets_doc.get("dir"))
+
         _register_identifier_directory(song_doc.get("song_id"))
         _register_identifier_directory(song_doc.get("scanner_stable_id"))
+        _register_dir_candidate(song_doc.get("dir_path"))
 
         for candidate in candidate_files:
             try:
@@ -4238,6 +4311,121 @@ else:
 
         raise FileNotFoundError("main TJA file not found for song")
 
+    def _desktop_build_song_update_filter(
+        song_doc: Mapping[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        def _valid_string(value: object) -> bool:
+            return isinstance(value, str) and bool(value.strip())
+
+        for key in ("_id", "song_id", "scanner_stable_id", "id"):
+            candidate = song_doc.get(key)
+            if candidate is None:
+                continue
+            if isinstance(candidate, str) and not candidate.strip():
+                continue
+            return {key: candidate}
+        stable_id = song_doc.get("scanner_stable_id")
+        group_key = song_doc.get("group_key")
+        if _valid_string(stable_id) and _valid_string(group_key):
+            return {"scanner_stable_id": stable_id, "group_key": group_key}
+        return None
+
+    def _desktop_cache_resolved_main_tja(
+        song_doc: Mapping[str, Any],
+        absolute: Path,
+        *,
+        relative: Optional[PurePosixPath],
+        song_store: SongStoreInterface,
+        songs_root: Path,
+    ) -> None:
+        filter_doc = _desktop_build_song_update_filter(song_doc)
+        if filter_doc is None:
+            return
+        relative_path = relative
+        if relative_path is None:
+            try:
+                relative_candidate = absolute.relative_to(songs_root)
+            except Exception:
+                relative_candidate = None
+            if relative_candidate is not None:
+                relative_path = PurePosixPath(relative_candidate.as_posix())
+
+        set_payload: dict[str, Any] = {}
+        assets_source = song_doc.get("assets") if isinstance(song_doc.get("assets"), Mapping) else {}
+        assets_payload = dict(assets_source) if isinstance(assets_source, Mapping) else {}
+        assets_payload["tja_main"] = str(absolute)
+
+        main_name: Optional[str] = None
+        if relative_path is not None:
+            relative_token = relative_path.as_posix()
+            set_payload["tja_path"] = relative_token
+            main_name = relative_path.name
+            if main_name:
+                set_payload["tja_filename"] = main_name
+                assets_payload["tja_main_name"] = main_name
+
+        set_payload["assets"] = assets_payload
+
+        try:
+            song_store.update_one(filter_doc, {"$set": set_payload})
+        except Exception:
+            app.logger.debug(
+                "failed to cache resolved main TJA",
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
+        else:
+            if isinstance(song_doc, dict):
+                song_doc["assets"] = assets_payload
+                if relative_path is not None:
+                    song_doc["tja_path"] = relative_path.as_posix()
+                    if main_name:
+                        song_doc["tja_filename"] = main_name
+
+    def _desktop_resolve_main_tja_for_document(
+        song_doc: Mapping[str, Any],
+        *,
+        song_store: SongStoreInterface,
+        manifest_store: Optional[ManifestStoreInterface],
+        songs_root: Path,
+    ) -> Path:
+        manifest_entry = _desktop_load_manifest_entry(song_doc, manifest_store=manifest_store)
+        absolute = _desktop_resolve_main_tja_absolute_path(song_doc, manifest_entry, songs_root)
+        relative_path: Optional[PurePosixPath] = None
+        if absolute is not None:
+            try:
+                relative_candidate = absolute.relative_to(songs_root)
+            except Exception:
+                relative_candidate = None
+            else:
+                relative_path = PurePosixPath(relative_candidate.as_posix())
+        else:
+            relative_path = _desktop_resolve_main_tja_relative_path(
+                song_doc, manifest_entry, songs_root
+            )
+            absolute = (songs_root / relative_path.as_posix()).resolve()
+
+        try:
+            absolute.relative_to(songs_root)
+        except ValueError as exc:
+            raise FileNotFoundError("resolved path escapes songs directory") from exc
+        if not absolute.is_file():
+            raise FileNotFoundError("main TJA file missing")
+
+        try:
+            _desktop_cache_resolved_main_tja(
+                song_doc,
+                absolute,
+                relative=relative_path,
+                song_store=song_store,
+                songs_root=songs_root,
+            )
+        except Exception:
+            app.logger.debug(
+                "failed to persist resolved main TJA",
+                exc_info=app.logger.isEnabledFor(logging.DEBUG),
+            )
+        return absolute
+
     def resolve_main_tja_path(
         song_identifier: str,
         *,
@@ -4250,21 +4438,19 @@ else:
             raise FileNotFoundError("song identifier is missing")
         store = song_store or _require_song_store()
         songs_root = Path(songs_dir) if songs_dir is not None else DESKTOP_SONGS_DIR
+        try:
+            songs_root_resolved = songs_root.resolve()
+        except FileNotFoundError:
+            songs_root_resolved = songs_root
         document = _desktop_fetch_song_document(normalized_id, song_store=store)
         if document is None:
             raise FileNotFoundError("song not found")
-        manifest_entry = _desktop_load_manifest_entry(document, manifest_store=manifest_store)
-        absolute = _desktop_resolve_main_tja_absolute_path(document, manifest_entry, songs_root)
-        if absolute is None:
-            relative = _desktop_resolve_main_tja_relative_path(document, manifest_entry, songs_root)
-            absolute = (songs_root / relative.as_posix()).resolve()
-        try:
-            absolute.relative_to(songs_root)
-        except ValueError as exc:
-            raise FileNotFoundError("resolved path escapes songs directory") from exc
-        if not absolute.is_file():
-            raise FileNotFoundError("main TJA file missing")
-        return absolute
+        return _desktop_resolve_main_tja_for_document(
+            document,
+            song_store=store,
+            manifest_store=manifest_store,
+            songs_root=songs_root_resolved,
+        )
 
     def resolve_song_file_path(
         song_identifier: str,
@@ -4274,8 +4460,6 @@ else:
         manifest_store: Optional[ManifestStoreInterface] = None,
         songs_dir: Optional[Path] = None,
     ) -> Path:
-        del manifest_store  # desktop asset resolution does not consult manifest overrides
-
         normalized_id = _desktop_normalize_identifier(song_identifier)
         if not normalized_id:
             raise FileNotFoundError("song identifier is missing")
@@ -4317,6 +4501,14 @@ else:
             raise FileNotFoundError("song not found") from exc
         if not isinstance(document, Mapping):
             raise FileNotFoundError("song not found")
+
+        if normalized_request.as_posix().casefold() == "main.tja":
+            return _desktop_resolve_main_tja_for_document(
+                document,
+                song_store=store,
+                manifest_store=manifest_store,
+                songs_root=songs_root_resolved,
+            )
 
         dir_path_value = str(document.get("dir_path") or "").strip() if isinstance(document.get("dir_path"), str) else ""
         base_dir_candidate = Path(dir_path_value) if dir_path_value else songs_root / normalized_id
