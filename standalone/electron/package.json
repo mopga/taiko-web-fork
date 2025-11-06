@@ -24,6 +24,12 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true
+    },
     "files": [
       "package.json",
       "main.js",
@@ -61,13 +67,7 @@
         }
       ],
       "artifactName": "TaikoWeb-${version}-${os}-${arch}.${ext}",
-      "publisherName": "Taiko Web",
-      "nsis": {
-        "oneClick": false,
-        "perMachine": false,
-        "allowElevation": true,
-        "allowToChangeInstallationDirectory": true
-      }
+      "publisherName": "Taiko Web"
     },
     "mac": {
       "icon": "../assets/launcher/app.icns",
