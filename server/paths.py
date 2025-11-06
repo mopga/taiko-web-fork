@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import os
+import logging
+import os
 import platform
 import sys
 from pathlib import Path
+from typing import Optional
+
+_LOGGER = logging.getLogger(__name__)
+_SONGS_DIR_CACHE: Optional[Path] = None
+_SONGS_DIR_LOGGED = False
 
 
 def is_desktop() -> bool:
@@ -32,10 +39,54 @@ def public_dir() -> Path:
     return app_dir() / "public"
 
 
+def _expand_existing(path_value: Optional[str]) -> Optional[Path]:
+    if not path_value:
+        return None
+    try:
+        candidate = Path(path_value).expanduser()
+    except Exception:
+        return None
+    try:
+        if candidate.exists():
+            return candidate.resolve()
+    except Exception:
+        return None
+    return None
+
+
 def songs_dir() -> Path:
     """Return the songs directory bundled with the application."""
 
-    return app_dir() / "songs"
+    global _SONGS_DIR_CACHE, _SONGS_DIR_LOGGED
+
+    if _SONGS_DIR_CACHE is not None:
+        return _SONGS_DIR_CACHE
+
+    override = _expand_existing(os.getenv("TAIKO_SONGS_DIR"))
+    if override is not None:
+        target = override
+    else:
+        app_root_env = os.getenv("TAIKO_APP_ROOT")
+        app_root_path: Optional[Path] = None
+        if app_root_env:
+            try:
+                app_root_path = Path(app_root_env).expanduser().resolve()
+            except Exception:
+                app_root_path = None
+        candidate = app_root_path.joinpath("songs") if app_root_path else None
+        if candidate is not None and candidate.exists():
+            target = candidate.resolve()
+        else:
+            target = (app_dir() / "songs").resolve()
+
+    _SONGS_DIR_CACHE = target
+    if not _SONGS_DIR_LOGGED:
+        try:
+            _LOGGER.info("songs_dir=%s", target)
+        except Exception:
+            pass
+        _SONGS_DIR_LOGGED = True
+    return target
 
 
 def data_dir() -> Path:

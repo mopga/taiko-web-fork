@@ -19,6 +19,22 @@ When the scanner encounters a Tower/Dan playlist (case-insensitive `.m3u8`/
 The metadata also includes `meta.segments` with the timing, WAVE filenames, and
 source chart paths for each playlist segment.
 
+## Songs directory resolution
+
+The desktop backend resolves the songs root lazily, using the following
+priority:
+
+1. `TAIKO_SONGS_DIR` when set and the directory exists. The Electron shell sets
+   this variable whenever the user chooses a custom songs folder.
+2. `<TAIKO_APP_ROOT>/songs` when available. `TAIKO_APP_ROOT` is exported by the
+   Electron main process and points to the packaged application root (or the
+   repository root during development).
+3. `app_dir()/songs`, which corresponds to the bundled
+   `resources/backend/songs` directory in packaged builds.
+
+The resolved path is logged once as `songs_dir=<path>` during backend startup to
+aid diagnostics.
+
 ## Desktop loading flow
 
 On desktop (`isDesktopEnvironment()`), `public/src/js/loadsong.js` inspects

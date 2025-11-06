@@ -1528,6 +1528,7 @@ class ChartRecord:
     issues: List[str]
     mode: str = "standard"
     display_course: Optional[str] = None
+    chart_mode: Optional[str] = None
     segments: List[Dict[str, object]] = field(default_factory=list)
     unknown_directives: int = 0
     coerced: bool = False
@@ -4409,6 +4410,7 @@ class SongScanner:
                     meta_copy = {}
 
                 has_segment_meta = bool(meta_copy.get('segments')) or bool(chart_data_copy.get('segments'))
+                playlist_markers = has_segment_meta
                 if playlist_path is not None:
                     try:
                         playlist_relative_str = playlist_path.resolve().relative_to(self._songs_root).as_posix()
@@ -4419,9 +4421,13 @@ class SongScanner:
 
                 if playlist_relative_str and 'playlist_path' not in meta_copy:
                     meta_copy['playlist_path'] = playlist_relative_str
+                    playlist_markers = True
+
+                if playlist_url:
+                    playlist_markers = True
 
                 playlist_course = (
-                    has_segment_meta
+                    playlist_markers
                     and (
                         course.mode in {"tower", "dojo", "dan", "dandojo"}
                         or meta_copy.get('is_playlist_course')
@@ -4498,6 +4504,7 @@ class SongScanner:
                 issues=sorted(set(issues)),
                 mode=output_mode,
                 display_course=output_display_course,
+                chart_mode=output_mode if (playlist_course or output_mode in {"tower", "dandojo"}) else None,
                 segments=segments_copy,
                 unknown_directives=course.unknown_directives,
                 coerced=coerced,
@@ -4746,6 +4753,7 @@ class SongScanner:
                     branch=bool(item.get('branch', False)),
                     mode=str(item.get('mode', 'standard')),
                     display_course=item.get('display_course'),
+                    chart_mode=item.get('chart_mode'),
                     segments=[dict(segment) for segment in item.get('segments', [])] if isinstance(item.get('segments'), list) else [],
                     unknown_directives=int(item.get('unknown_directives', 0)) if item.get('unknown_directives') is not None else 0,
                     valid=bool(item.get('valid', False)),
@@ -5470,6 +5478,7 @@ class SongScanner:
                     'raw_course': chart.raw_course,
                     'normalised': chart.normalised,
                     'mode': chart.mode,
+                    'chart_mode': chart.chart_mode,
                     'display_course': chart.display_course,
                     'level': chart.level,
                     'branch': chart.branch,
@@ -5937,6 +5946,7 @@ class SongScanner:
 
             manifest_chart: Dict[str, object] = {
                 'mode': chart.get('mode'),
+                'chart_mode': chart.get('chart_mode'),
                 'course': chart.get('course'),
                 'canonical_course': chart.get('canonical_course'),
                 'display_course': chart.get('display_course'),
