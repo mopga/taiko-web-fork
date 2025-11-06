@@ -117,6 +117,24 @@ folder and restart the backend to rescan the library.
 > The Windows binaries are unsigned, so SmartScreen may display a warning. Use
 > "More info" → "Run anyway" to continue.
 
+### Tower/Dan playlist metadata
+
+The desktop scanner recognises Tower/Dan (Dojo) playlists regardless of the
+letter case of the `.m3u8`/`.t3u8` extension. When a course is aggregated from a
+playlist the exported chart entries include additional metadata:
+
+- `meta.is_playlist_course` – boolean flag that signals to the clients that the
+  course is composed from playlist segments.
+- `meta.playlist_path` – relative filesystem path (POSIX-style) to the detected
+  playlist within the `songs/` directory.
+- `meta.playlist_url` – HTTP URL for the playlist file under `songs_baseurl`.
+
+Each aggregated chart also exposes `meta.segments` with per-segment timing,
+source chart paths, and WAVE filenames. The desktop front-end uses this
+structure to fetch `/api/tower/chart` and `/api/dan/chart`, then sequentially
+loads the segment audio so Tower/Dan courses play back in full without relying
+on a single playlist file in the `audio_url` field.
+
 ### Prereqs
 - Python 3.10+ (verified on 3.11/3.12)
 - Windows: `pip install --upgrade pip` and ensure `python`/`pip` are in `PATH`
