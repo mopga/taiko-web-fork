@@ -9,28 +9,28 @@
   const mascotElement = document.getElementById('mascot');
 
   function setAssetImages() {
-    const fallbackBackground = new URL('../assets/launcher/title-screen.png', window.location.href).href;
-    const fallbackMascot = new URL('../assets/launcher/dancing-don.gif', window.location.href).href;
+    const getAssetUrl = window.desktop && typeof window.desktop.getAssetUrl === 'function'
+      ? window.desktop.getAssetUrl.bind(window.desktop)
+      : null;
 
+    const backgroundUrl = getAssetUrl ? getAssetUrl('launcher', 'title-screen.png') : null;
     if (splashElement) {
-      splashElement.style.backgroundImage = `url('${fallbackBackground}')`;
+      if (backgroundUrl) {
+        splashElement.style.backgroundImage = `url('${backgroundUrl}')`;
+      } else {
+        splashElement.style.removeProperty('background-image');
+      }
     }
+
+    const mascotUrl = getAssetUrl ? getAssetUrl('launcher', 'dancing-don.gif') : null;
     if (mascotElement) {
-      mascotElement.src = fallbackMascot;
-    }
-
-    if (!window.desktop || typeof window.desktop.getAssetUrl !== 'function') {
-      return;
-    }
-
-    const backgroundUrl = window.desktop.getAssetUrl('launcher', 'title-screen.png');
-    if (backgroundUrl && splashElement) {
-      splashElement.style.backgroundImage = `url('${backgroundUrl}')`;
-    }
-
-    const mascotUrl = window.desktop.getAssetUrl('launcher', 'dancing-don.gif');
-    if (mascotUrl && mascotElement) {
-      mascotElement.src = mascotUrl;
+      if (mascotUrl) {
+        mascotElement.src = mascotUrl;
+        mascotElement.hidden = false;
+      } else {
+        mascotElement.removeAttribute('src');
+        mascotElement.hidden = true;
+      }
     }
   }
 
