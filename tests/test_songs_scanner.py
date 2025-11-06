@@ -1572,7 +1572,31 @@ LEVEL:7
         hls_dir.mkdir(parents=True, exist_ok=True)
         tja_path = dojo_dir / "dojo.tja"
         playlist_path = hls_dir / "dojo.t3u8"
-        playlist_path.write_text("#EXTM3U\n", encoding="utf-8")
+        segment_one = dojo_dir / "segment_one.tja"
+        segment_two = dojo_dir / "segment_two.tja"
+        segment_one.write_text("\n".join([
+            "TITLE:Segment One",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "BPM:120",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+        segment_two.write_text("\n".join([
+            "TITLE:Segment Two",
+            "COURSE:Oni",
+            "LEVEL:6",
+            "BPM:140",
+            "#START",
+            "2222,",
+            "#END",
+        ]), encoding="utf-8")
+        playlist_path.write_text("\n".join([
+            "#EXTM3U",
+            segment_one.name,
+            segment_two.name,
+        ]), encoding="utf-8")
         tja_path.write_text("\n".join([
             "TITLE:Dojo Second Dan",
             "COURSE:Dan",
@@ -1600,12 +1624,22 @@ LEVEL:7
         charts = inserted['charts']
         self.assertEqual(len(charts), 1)
         chart = charts[0]
-        self.assertEqual(chart.get('mode'), 'standard')
-        self.assertIn('mapped-course', chart.get('issues', []))
+        self.assertEqual(chart.get('mode'), 'dandojo')
         self.assertTrue(chart['valid'])
         paths = inserted.get('paths', {})
-        self.assertIn('audio_url', paths)
-        self.assertTrue(paths['audio_url'].endswith('.t3u8'))
+        self.assertEqual(
+            paths.get('audio_url'),
+            '/songs/Dojo/Second Dan/HLS/dojo.t3u8',
+        )
+        chart_meta = chart.get('chart_data', {}).get('meta', {})
+        self.assertTrue(chart_meta.get('is_playlist_course'))
+        self.assertEqual(chart_meta.get('playlist_path'), 'Dojo/Second Dan/HLS/dojo.t3u8')
+        self.assertEqual(
+            chart_meta.get('playlist_url'),
+            '/songs/Dojo/Second Dan/HLS/dojo.t3u8',
+        )
+        segments_meta = chart_meta.get('segments') or []
+        self.assertTrue(segments_meta)
 
     def test_parse_tja_playlist_aggregates_segments(self):
         tmp_dir = Path(self._tmp_dir())

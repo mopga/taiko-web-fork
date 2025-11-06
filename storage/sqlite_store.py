@@ -827,6 +827,8 @@ class SQLiteSongStore:
         upsert: bool = False,
         **kwargs: Any,
     ) -> SQLiteUpdateResult:
+        if kwargs.get('array_filters'):
+            raise TypeError('array_filters not supported')
         existing = self.find_one(filter)
         if existing is None:
             if not upsert:
@@ -1301,6 +1303,22 @@ class SQLiteSongStore:
             payload["assets"] = dict(assets_payload)
         elif assets_payload:
             payload["assets"] = assets_payload
+        stable_id = payload.get("scanner_stable_id") or payload.get("song_id")
+        if not payload.get("charts") and isinstance(stable_id, str) and stable_id:
+            try:
+                cursor = self._db.execute(
+                    "SELECT value_json FROM manifest WHERE key = ? LIMIT 1",
+                    (stable_id,),
+                )
+                row = cursor.fetchone()
+            except Exception:
+                row = None
+            if row:
+                manifest_doc = _deserialize_json(row[0])
+                if isinstance(manifest_doc, Mapping):
+                    charts_payload = manifest_doc.get("charts")
+                    if isinstance(charts_payload, list):
+                        payload["charts"] = charts_payload
         if "song_id" in payload and "id" not in payload:
             payload["id"] = payload["song_id"]
         return payload

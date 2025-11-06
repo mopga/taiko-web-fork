@@ -1011,6 +1011,7 @@ function registerRestNotesLoader(Loader){
 
                 const promise = fetchJsonWithCache(url).then(json => {
                         const normalized = normalizeChartResponse(json);
+                        const rawChartData = json && typeof json === "object" && json.chart_data ? json.chart_data : null;
                         if(!normalized){
                                 return null;
                         }
@@ -1041,6 +1042,10 @@ function registerRestNotesLoader(Loader){
                                         course: normalized.course || currentSelection.course || currentSelection.rank || null,
                                 },
                         };
+
+                        if(rawChartData){
+                                result.chartData = rawChartData;
+                        }
 
                         const parserPayload = {chart_data: {measures: normalized.measures, duration_ms: normalized.duration_ms, total_notes: normalized.total_notes, course: normalized.course}};
                         const parsed = convertMeasuresToParsedChart(parserPayload, {modeKey: modeKey, selection: currentSelection});

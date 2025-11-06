@@ -1,3 +1,170 @@
+function isDesktopEnvironment(){
+        return typeof window !== "undefined" && window.desktop && typeof window.desktop === "object";
+}
+
+function coerceNumber(value, fallback){
+        var number = Number(value);
+        if(number === number && isFinite(number)){
+                return number;
+        }
+        return fallback;
+}
+
+function normaliseRelativePath(value){
+        return String(value || "").replace(/\\/g, "/");
+}
+
+function ensureSongsBase(){
+        var base = gameConfig && typeof gameConfig.songs_baseurl === "string" ? gameConfig.songs_baseurl : "/songs/";
+        if(!base){
+                base = "/songs/";
+        }
+        if(base.slice(-1) !== "/"){
+                base += "/";
+        }
+        return base;
+}
+
+function resolvePlaylistAudioUrl(baseUrl, playlistPath, segment){
+        if(!segment || typeof segment !== "object"){
+                return null;
+        }
+        var audioName = segment.audio;
+        if(typeof audioName !== "string" || !audioName.trim()){
+                return null;
+        }
+        var normalisedAudio = audioName.trim();
+        var normalisedTja = normaliseRelativePath(segment.tja_path);
+        var directory = "";
+        if(normalisedTja){
+                var idx = normalisedTja.lastIndexOf("/");
+                if(idx !== -1){
+                        directory = normalisedTja.slice(0, idx + 1);
+                }
+        }
+        if(!directory && playlistPath){
+                var normalisedPlaylist = normaliseRelativePath(playlistPath);
+                var playlistIdx = normalisedPlaylist.lastIndexOf("/");
+                if(playlistIdx !== -1){
+                        directory = normalisedPlaylist.slice(0, playlistIdx + 1);
+                }
+        }
+        var relative = directory + normalisedAudio;
+        if(relative.startsWith("http://") || relative.startsWith("https://") || relative.startsWith("file://")){
+                return relative;
+        }
+        if(relative.slice(0, 1) === "/"){
+                relative = relative.slice(1);
+        }
+        return baseUrl + relative;
+}
+
+class PlaylistCourseSound{
+        constructor(gain, segments, totalDuration){
+                this.gain = gain;
+                this.soundBuffer = gain.soundBuffer;
+                this.segments = Array.isArray(segments) ? segments : [];
+                this.duration = totalDuration || 0;
+                this.cfg = null;
+        }
+        getTime(){
+                return this.soundBuffer.getTime();
+        }
+        convertTime(time, absolute){
+                return this.soundBuffer.convertTime(time || 0, absolute);
+        }
+        scheduleSegments(baseTime, seek, until){
+                var endLimit = seek + until;
+                for(var i = 0; i < this.segments.length; i++){
+                        var segment = this.segments[i];
+                        if(!segment || !segment.sound){
+                                continue;
+                        }
+                        var sound = segment.sound;
+                        var start = segment.start || 0;
+                        var segmentEnd = start + sound.duration;
+                        if(segmentEnd <= seek){
+                                continue;
+                        }
+                        if(start >= endLimit){
+                                break;
+                        }
+                        var playWindowStart = Math.max(start, seek);
+                        var playWindowEnd = Math.min(segmentEnd, endLimit);
+                        var playDuration = playWindowEnd - playWindowStart;
+                        if(!(playDuration > 0)){
+                                continue;
+                        }
+                        var segmentSeek = playWindowStart - start;
+                        var relativeStart = playWindowStart - seek;
+                        var playStartTime = baseTime + relativeStart;
+                        var untilValue = segmentSeek + playDuration;
+                        sound.play(playStartTime, true, segmentSeek, untilValue);
+                }
+        }
+        play(time, absolute, seek, until){
+                var seekValue = typeof seek === "number" && seek === seek ? seek : 0;
+                var untilValue = typeof until === "number" && until === until ? until : this.duration;
+                if(untilValue <= 0){
+                        return;
+                }
+                this.stop(time, absolute);
+                var baseTime = this.convertTime(time || 0, absolute);
+                this.cfg = {
+                        started: baseTime,
+                        seek: seekValue,
+                        until: untilValue
+                };
+                this.scheduleSegments(baseTime, seekValue, untilValue);
+        }
+        stop(time, absolute){
+                        var stopAt = this.convertTime(time || 0, absolute);
+                        for(var i = 0; i < this.segments.length; i++){
+                                var segment = this.segments[i];
+                                if(segment && segment.sound){
+                                        segment.sound.stop(stopAt, true);
+                                }
+                        }
+                        this.cfg = null;
+        }
+        pause(time, absolute){
+                if(!this.cfg){
+                        return;
+                }
+                var stopAt = this.convertTime(time || 0, absolute);
+                var elapsed = stopAt - this.cfg.started;
+                this.cfg.pauseSeek = this.cfg.seek + Math.max(0, elapsed);
+                for(var i = 0; i < this.segments.length; i++){
+                        var segment = this.segments[i];
+                        if(segment && segment.sound){
+                                segment.sound.pause(stopAt, true);
+                        }
+                }
+        }
+        resume(time, absolute){
+                if(!this.cfg || typeof this.cfg.pauseSeek !== "number"){
+                        return;
+                }
+                var resumeSeek = this.cfg.pauseSeek;
+                var untilValue = this.cfg.until;
+                this.play(time, absolute, resumeSeek, untilValue);
+        }
+        playLoop(time, absolute, seek1, seek2, until){
+                var seekValue = typeof seek1 === "number" && seek1 === seek1 ? seek1 : 0;
+                var untilValue = typeof until === "number" && until === until ? until : this.duration;
+                this.play(time, absolute, seekValue, untilValue);
+        }
+        clean(){
+                for(var i = 0; i < this.segments.length; i++){
+                        var segment = this.segments[i];
+                        if(segment && segment.sound){
+                                segment.sound.clean();
+                        }
+                }
+                this.cfg = null;
+        }
+}
+
 class LoadSong{
 	constructor(...args){
 		this.init(...args)
@@ -138,6 +305,19 @@ class LoadSong{
                         mode: this.selectedSong.mode || songObj.mode || songObj.default_mode,
                         stars: this.selectedSong.stars
                 }
+
+                this._desktopPlaylistState = {enabled: false, candidate: null, preparing: false, prepared: false}
+                if(isDesktopEnvironment()){
+                        var desktopCandidate = this.detectDesktopPlaylistCourse(songObj, selection)
+                        if(desktopCandidate){
+                                this._desktopPlaylistState.enabled = true
+                                this._desktopPlaylistState.candidate = desktopCandidate
+                                songObj.music = "muted"
+                                if(songObj.sound){
+                                        delete songObj.sound
+                                }
+                        }
+                }
                 var notesPromise
                 if(typeof loadNotesForSong === "function"){
                         try{
@@ -188,6 +368,9 @@ class LoadSong{
                                         }
                                         this.selectedSong.songData = this.songData
                                         this.updateSongDataReference()
+                                        if(this._desktopPlaylistState && this._desktopPlaylistState.enabled){
+                                                this.prepareDesktopPlaylistCourse(song, songObj, selection, result)
+                                        }
                                 }
                                 return true
                         }
@@ -222,6 +405,9 @@ class LoadSong{
                                 }
                                 this.selectedSong.songData = this.songData
                                 this.updateSongDataReference()
+                                if(this._desktopPlaylistState && this._desktopPlaylistState.enabled){
+                                        this.prepareDesktopPlaylistCourse(song, songObj, selection, result)
+                                }
                                 return true
                         }
                         return this.queueLegacyNotesLoad(song, songObj).then(() => false)
@@ -279,6 +465,160 @@ class LoadSong{
                 }).catch(error => {
                         this.handleGameStartError(error)
                 })
+        }
+        detectDesktopPlaylistCourse(songObj, selection){
+                if(!songObj){
+                        return null
+                }
+                var charts = Array.isArray(songObj.charts) ? songObj.charts : []
+                var targetMode = selection && selection.mode ? String(selection.mode).toLowerCase() : null
+                for(var i = 0; i < charts.length; i++){
+                        var chart = charts[i]
+                        if(!chart || typeof chart !== "object"){
+                                continue
+                        }
+                        var chartData = chart.chart_data
+                        if(!chartData || typeof chartData !== "object"){
+                                continue
+                        }
+                        var meta = chartData.meta
+                        if(!meta || typeof meta !== "object" || !meta.is_playlist_course){
+                                continue
+                        }
+                        var segments = Array.isArray(meta.segments) ? meta.segments : []
+                        if(!segments.length){
+                                continue
+                        }
+                        var chartMode = chart.mode || chart.display_course || chart.canonical_course || chart.course || null
+                        return {
+                                chart: chart,
+                                chartData: chartData,
+                                meta: meta,
+                                mode: chartMode ? String(chartMode).toLowerCase() : targetMode
+                        }
+                }
+                return null
+        }
+        prepareDesktopPlaylistCourse(song, songObj, selection, restResult){
+                var state = this._desktopPlaylistState
+                if(!state || !state.enabled || state.prepared || state.preparing){
+                        return
+                }
+                var candidate = state.candidate || {}
+                var chartData = restResult && restResult.chartData ? restResult.chartData : candidate.chartData
+                if(!chartData || typeof chartData !== "object"){
+                        return
+                }
+                var meta = chartData.meta || candidate.meta || {}
+                if(!meta || typeof meta !== "object"){
+                        return
+                }
+                var segmentsMeta = Array.isArray(meta.segments) ? meta.segments : []
+                if(!segmentsMeta.length){
+                        return
+                }
+                var baseUrl = ensureSongsBase()
+                var playlistPath = meta.playlist_path || (songObj.paths && songObj.paths.playlist_path) || (candidate.meta && candidate.meta.playlist_path) || null
+                var prepared = []
+                var fallbackOffset = 0
+                for(var i = 0; i < segmentsMeta.length; i++){
+                        var seg = segmentsMeta[i]
+                        if(!seg || typeof seg !== "object"){
+                                continue
+                        }
+                        var audioUrl = resolvePlaylistAudioUrl(baseUrl, playlistPath, seg)
+                        if(!audioUrl){
+                                continue
+                        }
+                        var offsetMs = coerceNumber(seg.offset_ms, null)
+                        var durationMs = coerceNumber(seg.duration_ms, null)
+                        var startSeconds = offsetMs !== null ? Math.max(0, offsetMs / 1000) : fallbackOffset
+                        var estimatedDuration = durationMs !== null ? Math.max(0, durationMs / 1000) : null
+                        if(estimatedDuration !== null){
+                                fallbackOffset = startSeconds + estimatedDuration
+                        }else{
+                                fallbackOffset = startSeconds
+                        }
+                        prepared.push({
+                                url: audioUrl,
+                                start: startSeconds,
+                                meta: seg,
+                                estimatedDuration: estimatedDuration
+                        })
+                }
+                if(!prepared.length){
+                        return
+                }
+                state.preparing = true
+                var audioPromise = Promise.all(prepared.map(seg => {
+                        var remote = new RemoteFile(seg.url)
+                        return snd.musicGain.load(remote).then(sound => ({
+                                sound: sound,
+                                start: seg.start,
+                                meta: seg.meta,
+                                estimatedDuration: seg.estimatedDuration
+                        }))
+                })).then(loaded => {
+                        var segments = loaded.map(entry => {
+                                return {
+                                        sound: entry.sound,
+                                        start: entry.start || 0,
+                                        meta: entry.meta,
+                                        estimatedDuration: entry.estimatedDuration
+                                }
+                        })
+                        segments.sort((a, b) => a.start - b.start)
+                        var totalDuration = 0
+                        for(var i = 0; i < segments.length; i++){
+                                var segment = segments[i]
+                                var durationSeconds = segment.sound && segment.sound.duration ? segment.sound.duration : 0
+                                if(!(durationSeconds > 0) && segment.estimatedDuration){
+                                        durationSeconds = segment.estimatedDuration
+                                }
+                                segment.duration = durationSeconds
+                                var segmentEnd = segment.start + (durationSeconds || 0)
+                                if(segmentEnd > totalDuration){
+                                        totalDuration = segmentEnd
+                                }
+                        }
+                        var chartDuration = coerceNumber(chartData.duration_ms, null)
+                        if(chartDuration !== null){
+                                var chartSeconds = Math.max(0, chartDuration / 1000)
+                                if(chartSeconds > totalDuration){
+                                        totalDuration = chartSeconds
+                                }
+                        }
+                        var playlistSound = new PlaylistCourseSound(snd.musicGain, segments, totalDuration)
+                        songObj.sound = playlistSound
+                        songObj.music = "muted"
+                        if(totalDuration > 0){
+                                var durationMs = Math.round(totalDuration * 1000)
+                                songObj.duration_ms = durationMs
+                                this.selectedSong.duration_ms = durationMs
+                        }
+                        var playlistMeta = {
+                                segments: segments.map(segment => ({
+                                        start: segment.start,
+                                        duration: segment.duration,
+                                        meta: segment.meta
+                                })),
+                                chartData: chartData,
+                                playlistUrl: meta.playlist_url || null
+                        }
+                        songObj.desktopPlaylist = playlistMeta
+                        this.selectedSong.desktopPlaylist = playlistMeta
+                        if(chartData.total_notes != null && (!this.selectedSong.notesMeta || this.selectedSong.notesMeta.totalNotes == null)){
+                                var totalNotes = coerceNumber(chartData.total_notes, null)
+                                if(totalNotes !== null){
+                                        this.selectedSong.notesMeta = this.selectedSong.notesMeta || {}
+                                        this.selectedSong.notesMeta.totalNotes = totalNotes
+                                }
+                        }
+                        state.prepared = true
+                }).finally(() => {
+                        state.preparing = false
+                })
+                this.addPromise(audioPromise, "desktop-playlist-audio")
         }
         queueLegacyNotesLoad(song, songObj){
                 if(this._legacyNotesQueued){

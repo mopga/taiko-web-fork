@@ -455,6 +455,91 @@ def test_desktop_dojo_and_tower_chart_endpoints(tmp_path, monkeypatch):
     assert tower_chart.get("meta", {}).get("playlist_path") == "TowerSample/tower_segments.t3u8"
 
 
+def test_desktop_uppercase_playlist_detection(tmp_path, monkeypatch):
+    app_module = _import_desktop_app(monkeypatch, tmp_path)
+    songs_dir = tmp_path / "songs"
+
+    tower_dir = songs_dir / "UpperCaseTower"
+    tower_dir.mkdir(parents=True, exist_ok=True)
+
+    playlist_path = tower_dir / "segments.T3U8"
+    main_tja = tower_dir / "main.tja"
+    segment_one = tower_dir / "tower_one.tja"
+    segment_two = tower_dir / "tower_two.tja"
+
+    main_tja.write_text("\n".join([
+        "TITLE:Upper Tower",
+        "WAVE:segments.T3U8",
+        "COURSE:TOWER",
+        "LEVEL:2",
+        "#START",
+        "#END",
+    ]), encoding="utf-8")
+
+    playlist_path.write_text("\n".join([
+        "#EXTM3U",
+        segment_one.name,
+        segment_two.name,
+    ]), encoding="utf-8")
+
+    segment_one.write_text("\n".join([
+        "TITLE:Tower One",
+        "WAVE:tower_one.ogg",
+        "COURSE:Oni",
+        "LEVEL:6",
+        "BPM:140",
+        "#START",
+        "1111,",
+        "#END",
+    ]), encoding="utf-8")
+
+    segment_two.write_text("\n".join([
+        "TITLE:Tower Two",
+        "WAVE:tower_two.ogg",
+        "COURSE:Oni",
+        "LEVEL:7",
+        "BPM:160",
+        "#START",
+        "2222,",
+        "#END",
+    ]), encoding="utf-8")
+
+    summary = app_module.perform_song_scan(full=True)
+    assert summary.get('errors', 0) == 0
+
+    song_store = app_module.SONG_STORE
+    assert song_store is not None
+    entries = list(song_store.find({}))
+    tower_entry = next((doc for doc in entries if doc.get('assets', {}).get('playlist_path') == 'UpperCaseTower/segments.T3U8'), None)
+    assert tower_entry is not None
+    assets = tower_entry.get('assets', {}) or {}
+    assert assets.get('wave') == 'segments.T3U8'
+
+    charts = tower_entry.get('charts') or []
+    assert charts
+    chart_meta = charts[0].get('chart_data', {}).get('meta', {})
+    assert chart_meta.get('is_playlist_course') is True
+    assert chart_meta.get('playlist_path') == 'UpperCaseTower/segments.T3U8'
+    assert chart_meta.get('playlist_url') == '/songs/UpperCaseTower/segments.T3U8'
+
+    client = app_module.app.test_client()
+    response = client.get(
+        "/api/tower/chart",
+        query_string={"title": "Upper Tower", "course": "oni"},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "ok"
+    chart_data = payload["chart_data"]
+    assert chart_data.get("meta", {}).get("is_playlist_course") is True
+    assert chart_data.get("meta", {}).get("playlist_path") == "UpperCaseTower/segments.T3U8"
+    assert chart_data.get("meta", {}).get("playlist_url") == '/songs/UpperCaseTower/segments.T3U8'
+    segments = chart_data.get("meta", {}).get("segments") or []
+    assert segments
+    assert segments[0].get("audio") == "tower_one.ogg"
+    assert segments[0].get("tja_path") == "UpperCaseTower/" + segment_one.name
+
+
 def test_desktop_hot_start_fast_path(tmp_path, monkeypatch):
     app_module = _import_desktop_app(monkeypatch, tmp_path)
 
@@ -1059,8 +1144,8 @@ def test_desktop_scanner_handles_dojo_and_tower(tmp_path, monkeypatch):
     dojo_files = dojo_assets.get('files') or {}
     assert isinstance(dojo_files, dict)
     assert any(
-        (isinstance(key, str) and key.endswith('.t3u8'))
-        or (isinstance(value, str) and value.endswith('.t3u8'))
+        (isinstance(key, str) and key.lower().endswith('.t3u8'))
+        or (isinstance(value, str) and value.lower().endswith('.t3u8'))
         for key, value in dojo_files.items()
     )
 
@@ -1072,8 +1157,8 @@ def test_desktop_scanner_handles_dojo_and_tower(tmp_path, monkeypatch):
     tower_files = tower_assets.get('files') or {}
     assert isinstance(tower_files, dict)
     assert any(
-        (isinstance(key, str) and key.endswith('.m3u8'))
-        or (isinstance(value, str) and value.endswith('.m3u8'))
+        (isinstance(key, str) and key.lower().endswith('.m3u8'))
+        or (isinstance(value, str) and value.lower().endswith('.m3u8'))
         for key, value in tower_files.items()
     )
 

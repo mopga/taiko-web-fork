@@ -1485,7 +1485,7 @@ class CourseInfo:
 
 def _course_log_label(course: CourseInfo) -> str:
     if isinstance(course.display_course, str) and course.display_course:
-        return course.display_course
+        return course.display_course.strip().casefold()
     return course.canonical
 
 
@@ -2051,7 +2051,28 @@ def _normalise_course_token(value: str) -> str:
 
 def _base_course_token(value: str) -> str:
     token = (value or "").split(":", 1)[0]
+    if token.startswith("TOWER"):
+        return "TOWER"
+    if token.startswith("DAN"):
+        return "DAN"
+    if token.startswith("DOJO"):
+        return "DOJO"
+    if token.startswith("KYUU"):
+        return "KYUU"
     return token or value
+
+
+def _normalise_special_display_token(
+    raw_value: Optional[str], fallback: str
+) -> str:
+    if not isinstance(raw_value, str):
+        return fallback
+    candidate = raw_value.strip()
+    if not candidate:
+        return fallback
+    if candidate.casefold() == fallback and not candidate.isupper():
+        return fallback
+    return candidate
 
 
 def _is_dojo_course_token(token: str) -> bool:
@@ -2449,27 +2470,45 @@ def _parse_tja_strict(
                             state.default_bpm = bpm_value
         elif key_upper == "COURSE":
             raw_course_value = value_stripped.strip()
+            normalised_token = _normalise_course_token(raw_course_value)
+            base_token = _base_course_token(normalised_token)
+
+            treat_as_dojo = _is_dojo_course_token(normalised_token)
+            if treat_as_dojo and base_token == "DAN" and ":" not in raw_course_value:
+                treat_as_dojo = False
+
             special_mode: Optional[str] = None
             special_display: Optional[str] = None
             canonical_override: Optional[str] = None
 
-            normalised_token = _normalise_course_token(raw_course_value)
-            base_token = _base_course_token(normalised_token)
-
             if base_token == "TOWER":
                 canonical_override = "oni"
                 special_mode = "tower"
-                special_display = raw_course_value or "tower"
+                special_display = _normalise_special_display_token(
+                    raw_course_value, "tower"
+                )
             elif base_token == "DAN":
-                special_mode = "dandojo"
-                special_display = raw_course_value or "dandojo"
+                if treat_as_dojo:
+                    special_mode = "dandojo"
+                    special_display = _normalise_special_display_token(
+                        raw_course_value, "dandojo"
+                    )
+                else:
+                    special_mode = "dan"
+                    special_display = _normalise_special_display_token(
+                        raw_course_value, "dan"
+                    )
             elif base_token in {"DOJO", "KYUU"}:
                 special_mode = "dojo"
-                special_display = raw_course_value or "dojo"
+                special_display = _normalise_special_display_token(
+                    raw_course_value, "dojo"
+                )
 
-            if _is_dojo_course_token(normalised_token):
+            if treat_as_dojo:
                 canonical_lower = "dojo"
-                initial_mode = special_mode or ("dandojo" if base_token == "DAN" else "dojo")
+                initial_mode = special_mode or (
+                    "dandojo" if base_token == "DAN" else "dojo"
+                )
                 display_value = special_display or raw_course_value or "dojo"
                 active_course = CourseInfo(
                     canonical=canonical_lower,
@@ -3590,6 +3629,7 @@ class SongScanner:
         self._scan_lock = threading.Lock()
         self._group_locks: Dict[str, threading.Lock] = {}
         self._group_locks_guard = threading.Lock()
+        self._playlist_segment_paths: Set[Path] = set()
         self._state_collection = getattr(self.db, 'song_scanner_state', None)
         self._manifest_collection = getattr(self.db, 'songs_manifest', None)
         self._meta_collection = getattr(self.db, 'meta', None)
@@ -3972,18 +4012,43 @@ class SongScanner:
         preference_tokens.extend(['oni', 'ura', 'hard', 'normal', 'easy'])
 
         for entry in entries:
-            candidate_path = (resolved_playlist.parent / entry).resolve()
-            try:
-                candidate_path.relative_to(self._songs_root)
-            except ValueError:
-                LOGGER.warning('Playlist segment outside songs directory: %s', candidate_path)
-                aggregate_issues.append('playlist-segment-outside-root')
+            initial_candidate = (resolved_playlist.parent / entry).resolve()
+            candidates = [initial_candidate]
+            parent_dir = resolved_playlist.parent.parent
+            if parent_dir != resolved_playlist.parent:
+                candidates.append((parent_dir / entry).resolve())
+
+            candidate_path: Optional[Path] = None
+            last_error: Optional[str] = None
+            last_probe: Optional[Path] = None
+
+            for probe in candidates:
+                last_probe = probe
+                try:
+                    probe.relative_to(self._songs_root)
+                except ValueError:
+                    last_error = 'playlist-segment-outside-root'
+                    continue
+
+                if not probe.is_file():
+                    last_error = 'playlist-segment-missing'
+                    continue
+
+                candidate_path = probe
+                break
+
+            if candidate_path is None:
+                warning_path = last_probe or initial_candidate
+                if last_error == 'playlist-segment-outside-root':
+                    LOGGER.warning('Playlist segment outside songs directory: %s', warning_path)
+                    aggregate_issues.append('playlist-segment-outside-root')
+                else:
+                    LOGGER.warning('Playlist segment missing: %s', warning_path)
+                    aggregate_issues.append('playlist-segment-missing')
                 continue
 
-            if not candidate_path.is_file():
-                LOGGER.warning('Playlist segment missing: %s', candidate_path)
-                aggregate_issues.append('playlist-segment-missing')
-                continue
+            with contextlib.suppress(Exception):
+                self._playlist_segment_paths.add(candidate_path)
 
             if candidate_path.suffix.lower() != '.tja':
                 aggregate_issues.append('playlist-segment-unsupported')
@@ -4001,6 +4066,7 @@ class SongScanner:
                 candidate_path,
                 category_mode='standard',
                 playlist_path=None,
+                playlist_url=None,
             )
 
             selectable = [chart for chart in segment_charts if isinstance(chart, ChartRecord)]
@@ -4103,6 +4169,7 @@ class SongScanner:
                         duration_int = measure_end - offset_ms
 
             segment_relative = candidate_path.relative_to(self._songs_root).as_posix()
+            segment_audio = segment_parsed.wave
             segment_info = {
                 'title': segment_parsed.title or segment_parsed.subtitle or selected.raw_course or selected.course,
                 'course': selected.course,
@@ -4113,6 +4180,8 @@ class SongScanner:
                 'offset_ms': offset_ms,
                 'tja_path': segment_relative,
             }
+            if segment_audio:
+                segment_info['audio'] = segment_audio
             aggregate_segments.append(segment_info)
 
             total_notes += selected.total_notes or 0
@@ -4140,6 +4209,7 @@ class SongScanner:
             'meta': {
                 'segments': aggregate_segments,
                 'playlist_path': playlist_relative,
+                'is_playlist_course': True,
             },
             'segments': aggregate_segments,
         }
@@ -4159,8 +4229,9 @@ class SongScanner:
         parsed: ParsedTJA,
         tja_path: Path,
         *,
-        category_mode: str = "standard",
+        category_mode: Optional[str] = None,
         playlist_path: Optional[Path] = None,
+        playlist_url: Optional[str] = None,
     ) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
         import_issues: List[str] = []
@@ -4200,6 +4271,21 @@ class SongScanner:
 
         category_mode = (category_mode or "standard").strip().casefold()
 
+        def _normalise_special_display(
+            value: Optional[str], fallback: str
+        ) -> str:
+            candidate: Optional[str]
+            if isinstance(value, str):
+                candidate = value.strip()
+            else:
+                candidate = None
+            if candidate:
+                lowered = candidate.casefold()
+                if fallback == "dandojo" and lowered in {"dojo", "dandojo"}:
+                    return "dandojo"
+                return lowered
+            return fallback
+
         def _derive_rank_value(
             course: CourseInfo,
             *,
@@ -4227,7 +4313,7 @@ class SongScanner:
             issues = list(course.issues)
             mode = course.mode or "standard"
 
-            if playlist_path is not None and mode in {"tower", "dandojo"}:
+            if playlist_path is not None and mode in {"tower", "dandojo", "dan", "dojo"}:
                 aggregate = self._parse_tja_playlist(playlist_path, base_course=course)
                 if aggregate is not None:
                     course.chart_data = aggregate.chart_data
@@ -4314,42 +4400,87 @@ class SongScanner:
 
             chart_data_copy = _clone_chart_data(course.chart_data)
 
+            playlist_course = False
+            if isinstance(chart_data_copy, dict):
+                meta_source = chart_data_copy.get('meta')
+                if isinstance(meta_source, Mapping):
+                    meta_copy = dict(meta_source)
+                else:
+                    meta_copy = {}
+
+                has_segment_meta = bool(meta_copy.get('segments')) or bool(chart_data_copy.get('segments'))
+                if playlist_path is not None:
+                    try:
+                        playlist_relative_str = playlist_path.resolve().relative_to(self._songs_root).as_posix()
+                    except ValueError:
+                        playlist_relative_str = None
+                else:
+                    playlist_relative_str = None
+
+                if playlist_relative_str and 'playlist_path' not in meta_copy:
+                    meta_copy['playlist_path'] = playlist_relative_str
+
+                playlist_course = (
+                    has_segment_meta
+                    and (
+                        course.mode in {"tower", "dojo", "dan", "dandojo"}
+                        or meta_copy.get('is_playlist_course')
+                        or category_mode in {"tower", "dandojo"}
+                    )
+                )
+
+                if playlist_course:
+                    meta_copy['is_playlist_course'] = True
+                    if playlist_url:
+                        meta_copy['playlist_url'] = playlist_url
+                elif playlist_url and 'playlist_url' not in meta_copy and has_segment_meta:
+                    meta_copy['playlist_url'] = playlist_url
+
+                if meta_copy:
+                    chart_data_copy['meta'] = meta_copy
+
             output_mode = mode
             output_display_course = display_course
             rank_value: Optional[str] = None
 
             if category_mode == "tower":
                 output_mode = "tower"
-                output_display_course = (
-                    display_course or course.raw_name or "tower"
+                hint_value = display_course or course.raw_name
+                output_display_course = _normalise_special_display(
+                    hint_value, "tower"
                 )
+                if "tower" not in output_display_course:
+                    output_display_course = "tower"
             elif category_mode == "dandojo":
                 output_mode = "dandojo"
-                output_display_course = (
-                    display_course or course.raw_name or "dandojo"
+                output_display_course = _normalise_special_display(
+                    display_course or course.raw_name, "dandojo"
                 )
                 rank_value = _derive_rank_value(
                     course, display_hint=output_display_course
                 )
             else:
                 if mode == "dan":
-                    output_mode = "dandojo"
+                    output_mode = "dandojo" if playlist_course else "standard"
                 elif mode in {"tower", "dojo", "dandojo"}:
                     output_mode = mode
                 else:
                     output_mode = "standard"
 
                 if output_mode == "tower":
-                    output_display_course = (
-                        display_course or course.raw_name or "tower"
+                    hint_value = display_course or course.raw_name
+                    output_display_course = _normalise_special_display(
+                        hint_value, "tower"
                     )
+                    if "tower" not in output_display_course:
+                        output_display_course = "tower"
                 elif output_mode == "dojo":
-                    output_display_course = (
-                        display_course or course.raw_name or "dojo"
+                    output_display_course = _normalise_special_display(
+                        display_course or course.raw_name, "dojo"
                     )
                 elif output_mode == "dandojo":
-                    output_display_course = (
-                        display_course or course.raw_name or "dandojo"
+                    output_display_course = _normalise_special_display(
+                        display_course or course.raw_name, "dandojo"
                     )
                     rank_value = _derive_rank_value(
                         course, display_hint=output_display_course
@@ -4450,6 +4581,7 @@ class SongScanner:
             tja_path,
             category_mode=category_mode,
             playlist_path=playlist_path,
+            playlist_url=playlist_url,
         )
         import_issues = list(chart_issues)
 
@@ -4520,7 +4652,14 @@ class SongScanner:
         if not charts:
             import_issues.append('no-courses')
 
-        if audio_url is None:
+        playlist_course_present = any(
+            isinstance(chart.chart_data, Mapping)
+            and isinstance(chart.chart_data.get('meta'), Mapping)
+            and chart.chart_data['meta'].get('is_playlist_course')
+            for chart in charts
+        )
+
+        if audio_url is None and not playlist_course_present:
             import_issues.append('missing-audio')
 
         valid_chart_count = sum(1 for chart in charts if chart.valid)
@@ -6313,13 +6452,22 @@ class SongScanner:
 
         def _iter_playlist_candidates() -> Iterable[Tuple[Path, str]]:
             candidates: List[Path] = []
-            suffixes = ("*.t3u8", "*.m3u8")
+            suffixes = {".t3u8", ".m3u8"}
+
+            def _collect_matching(directory: Path) -> None:
+                try:
+                    entries = list(directory.iterdir())
+                except FileNotFoundError:
+                    return
+                for entry in sorted(entries, key=lambda p: p.name.lower()):
+                    if entry.is_file() and entry.suffix.lower() in suffixes:
+                        candidates.append(entry)
+
             hls_dir = tja_path.parent / "HLS"
             if hls_dir.is_dir():
-                for pattern in suffixes:
-                    candidates.extend(sorted(hls_dir.glob(pattern), key=lambda p: p.name.lower()))
-            for pattern in suffixes:
-                candidates.extend(sorted(tja_path.parent.glob(pattern), key=lambda p: p.name.lower()))
+                _collect_matching(hls_dir)
+            _collect_matching(tja_path.parent)
+
             for candidate in candidates:
                 try:
                     resolved = candidate.resolve()
@@ -6350,14 +6498,18 @@ class SongScanner:
 
         for resolved, semantics in _iter_playlist_candidates():
             if semantics == 'segments':
-                if playlist_path is None:
+                if has_special_mode and playlist_path is None:
                     playlist_path = resolved
             elif semantics == 'audio':
                 if audio_path is None:
                     audio_path = resolved
+                if has_special_mode and playlist_path is None:
+                    playlist_path = resolved
             else:
                 if audio_path is None:
                     audio_path = resolved
+                if has_special_mode and playlist_path is None:
+                    playlist_path = resolved
 
         if parsed.wave:
             candidate = (tja_path.parent / parsed.wave).resolve()
@@ -6371,16 +6523,18 @@ class SongScanner:
                     if suffix in {'.t3u8', '.m3u8'}:
                         semantics = _classify_playlist_file(candidate)
                         if semantics == 'segments':
-                            if playlist_path is None:
+                            if has_special_mode and playlist_path is None:
                                 playlist_path = candidate
                         elif semantics == 'audio':
                             if audio_path is None:
                                 audio_path = candidate
-                        else:
                             if has_special_mode and playlist_path is None:
                                 playlist_path = candidate
+                        else:
                             if audio_path is None:
                                 audio_path = candidate
+                            if has_special_mode and playlist_path is None:
+                                playlist_path = candidate
                     else:
                         audio_path = candidate
                 else:
@@ -6608,6 +6762,7 @@ class SongScanner:
         performed_scan = False
         refresher_stack = contextlib.ExitStack()
         self._active_refresher_stack = refresher_stack
+        self._playlist_segment_paths.clear()
         manifest_meta = self._load_manifest_meta() or {}
         manifest_checksum: Optional[str] = None
         manifest_entry_checksum_meta: Optional[str] = None
@@ -7014,6 +7169,19 @@ class SongScanner:
                 summary['errors'] += 1
                 continue
 
+            try:
+                resolved_tja = tja_path.resolve()
+            except FileNotFoundError:
+                summary['errors'] += 1
+                LOGGER.warning("Chart disappeared during resolution: %s", tja_path)
+                continue
+
+            if resolved_tja in self._playlist_segment_paths:
+                LOGGER.debug('Skipping playlist segment %s', resolved_tja)
+                summary['skipped'] += 1
+                self._playlist_segment_paths.discard(resolved_tja)
+                continue
+
             tja_key = relative_tja.as_posix()
             state_doc = state_docs.get(tja_key)
             seen_state_paths.add(tja_key)
@@ -7164,8 +7332,25 @@ class SongScanner:
                         self._metrics.increment('tja_skipped_unknown_course_total', parsed.skipped_unknown_course)
                     if parsed.has_dojo_course:
                         self._metrics.increment('tja_dojo_parsed_total')
+                    has_special_mode = parsed.has_dojo_course or any(
+                        _is_special_playlist_course(course.normalised)
+                        or course.mode in {"tower", "dan", "dojo", "dandojo"}
+                        or (
+                            isinstance(course.display_course, str)
+                            and course.display_course.strip().casefold()
+                            in {"tower", "dan", "dandojo"}
+                        )
+                        for course in parsed.courses
+                    )
                     audio_path, playlist_path, detect_diagnostics = self._detect_audio(tja_path, parsed)
                     diagnostics.extend(detect_diagnostics)
+                    if (
+                        has_special_mode
+                        and playlist_path is not None
+                        and audio_path is not None
+                        and audio_path == playlist_path
+                    ):
+                        audio_path = None
                     tja_bytes = tja_path.read_bytes()
                     file_hash = md5_bytes(tja_bytes)
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
@@ -7202,7 +7387,11 @@ class SongScanner:
                             audio_stat = audio_path.stat()
                             audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
                             audio_size = audio_stat.st_size
-                    elif playlist_relative is not None and playlist_path is not None:
+                    elif (
+                        playlist_relative is not None
+                        and playlist_path is not None
+                        and playlist_url
+                    ):
                         audio_url = playlist_url
                         music_type = playlist_path.suffix.lower().lstrip('.')
                         try:
