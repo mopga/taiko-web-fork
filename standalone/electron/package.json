@@ -6,7 +6,7 @@
   "license": "MIT",
   "private": true,
   "main": "main.js",
-  "productName": "Taiko Web",
+  "productName": "Taiko no Desk",
   "scripts": {
     "dev": "cross-env ELECTRON_DEV=1 electron .",
     "start": "electron .",
@@ -18,7 +18,7 @@
   },
   "build": {
     "appId": "com.taikoweb.desktop",
-    "productName": "Taiko Web",
+    "productName": "Taiko no Desk",
     "asar": true,
     "directories": {
       "output": "dist",
@@ -40,7 +40,7 @@
     ],
     "extraResources": [
       {
-        "from": "../dist/backend/taiko-web-backend",
+        "from": "../dist/backend/backend",
         "to": "backend",
         "filter": [
           "**/*"
@@ -66,7 +66,8 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "TaikoWeb-${version}-${os}-${arch}.${ext}",
+      "executableName": "TaikoNoDesk",
+      "artifactName": "Taiko no Desk-${version}.${ext}",
       "publisherName": "Taiko Web"
     },
     "mac": {
@@ -76,7 +77,7 @@
         { "target": "dmg" },
         { "target": "zip" }
       ],
-      "artifactName": "TaikoWeb-${version}-${os}-${arch}.${ext}"
+      "artifactName": "Taiko no Desk-${version}.${ext}"
     }
   },
   "devDependencies": {

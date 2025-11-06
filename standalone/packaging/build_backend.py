@@ -23,7 +23,7 @@ def _ensure_pyinstaller() -> None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pyinstaller"])  # nosec: B603
 
 
-APP_NAME = "taiko-web-backend"
+APP_NAME = "backend"
 
 
 def build_backend() -> None:
@@ -55,7 +55,7 @@ def build_backend() -> None:
     if not app_dir.exists():
         raise FileNotFoundError(f"PyInstaller did not create bundle at {app_dir}")
 
-    binary_name = "taiko-web-backend.exe" if sys.platform.startswith("win") else "taiko-web-backend"
+    binary_name = "backend.exe" if sys.platform.startswith("win") else "backend"
     binary_path = app_dir / binary_name
     if not binary_path.exists():
         raise FileNotFoundError(f"Expected backend binary not found at {binary_path}")

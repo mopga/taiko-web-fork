@@ -290,20 +290,34 @@ async function startBackendFlow() {
 }
 
 function resolveBackendExecutable() {
-  const exeName = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+  const primaryExe = process.platform === 'win32' ? 'backend.exe' : 'backend';
+  const legacyExe = process.platform === 'win32' ? 'taiko-web-backend.exe' : 'taiko-web-backend';
+
   if (process.env.ELECTRON_DEV === '1' || !app.isPackaged) {
-    const candidate = path.resolve(__dirname, '..', 'dist', 'backend', 'taiko-web-backend', exeName);
+    // Primary: new folder/name
+    let candidate = path.resolve(__dirname, '..', 'dist', 'backend', 'backend', primaryExe);
     if (fs.existsSync(candidate)) {
       return candidate;
     }
-    throw new Error(`Backend executable not found at ${candidate}`);
+    // Fallback: legacy folder/name
+    candidate = path.resolve(__dirname, '..', 'dist', 'backend', 'taiko-web-backend', legacyExe);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    throw new Error(`Backend executable not found in dist/backend/{backend,taiko-web-backend}`);
   }
 
-  const packaged = path.join(process.resourcesPath, 'backend', exeName);
+  // Packaged app: resources/backend/<exe>
+  let packaged = path.join(process.resourcesPath, 'backend', primaryExe);
   if (fs.existsSync(packaged)) {
     return packaged;
   }
-  throw new Error(`Backend executable not found at ${packaged}`);
+  // Fallback to legacy name
+  packaged = path.join(process.resourcesPath, 'backend', legacyExe);
+  if (fs.existsSync(packaged)) {
+    return packaged;
+  }
+  throw new Error(`Backend executable not found in resources/backend`);
 }
 
 function ensurePathExists(targetPath) {
