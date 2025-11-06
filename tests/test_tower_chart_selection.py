@@ -1,4 +1,7 @@
+import pytest
+
 from tower_chart_selection import normalise_course_tokens, select_best_chart
+from tests._helpers import load_app_module
 
 
 def test_select_best_chart_prefers_tower_over_standard():
@@ -150,3 +153,55 @@ def test_select_best_chart_supports_numeric_course_token():
     best_chart = select_best_chart(charts, "1")
 
     assert best_chart is charts[0]
+
+
+@pytest.mark.parametrize('mode_query', ["", "&mode=tower"])
+def test_tower_chart_route_falls_back_to_standard_chart(monkeypatch, mode_query):
+    app_module = load_app_module()
+
+    monkeypatch.setattr(app_module, 'RUN_PROFILE', 'web')
+
+    fallback_chart = {
+        'mode': 'tower',
+        'course': 'oni',
+        'display_course': 'Oni',
+        'chart_data': {
+            'duration_ms': 1200,
+            'measures': [{'notes': [{'type': 'don', 'time': 0}]}],
+        },
+    }
+    candidate_entry = {'id': 'tower-song', 'title': 'Tower Song', 'charts': []}
+    candidate_song = {'title': 'Tower Song', 'charts': [fallback_chart]}
+
+    def _fake_lookup(title):
+        assert title
+        return [(0, candidate_entry, candidate_song)]
+
+    def _fake_resolve(song, entry):
+        assert song is candidate_song
+        assert entry is candidate_entry
+        return list(song.get('charts', []))
+
+    call_sequences: list[tuple[object, ...]] = []
+
+    def _fake_select(charts, course, prefer_modes=("tower", "dandojo")):
+        call_sequences.append(tuple(prefer_modes or ()))
+        if prefer_modes:
+            return None
+        return charts[0] if charts else None
+
+    monkeypatch.setattr(app_module, '_lookup_song_candidates_by_title', _fake_lookup)
+    monkeypatch.setattr(app_module, '_resolve_song_charts', _fake_resolve)
+    monkeypatch.setattr(app_module, 'select_best_chart', _fake_select)
+
+    client = app_module.app.test_client()
+    response = client.get(f'/api/tower/chart?title=Tower+Song&course=oni{mode_query}')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert isinstance(payload['chart_data']['measures'], list)
+    assert payload['mode'] == fallback_chart['mode']
+    # Ensure the initial tower lookup was attempted before falling back to standard charts.
+    assert any(modes for modes in call_sequences)
+    assert tuple() in call_sequences

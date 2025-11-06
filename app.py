@@ -3137,12 +3137,32 @@ def route_api_tower_chart():
     selected_song: Optional[Mapping[str, object]] = None
     best_chart: Optional[Mapping[str, object]] = None
 
-    for _, entry, song in candidates:
-        charts = _resolve_song_charts(song, entry)
-        best_chart = select_best_chart(charts, course_param, prefer_modes=prefer_modes)
-        if best_chart is not None:
+    def _attempt_selection(mode_preferences: Sequence[object]) -> tuple[Optional[Mapping[str, object]], Optional[Mapping[str, object]], Optional[Mapping[str, object]]]:
+        for _, entry, song in candidates:
+            charts = _resolve_song_charts(song, entry)
+            chart = select_best_chart(charts, course_param, prefer_modes=mode_preferences)
+            if chart is not None:
+                return entry, song, chart
+        return None, None, None
+
+    mode_attempts: list[Sequence[object]] = []
+    initial_modes = tuple(prefer_modes) if isinstance(prefer_modes, Sequence) else tuple()
+    mode_attempts.append(initial_modes)
+    mode_attempts.append(())
+    mode_attempts.append(('standard',))
+
+    seen_modes: set[tuple[object, ...]] = set()
+
+    for mode_preferences in mode_attempts:
+        key = tuple(mode_preferences)
+        if key in seen_modes:
+            continue
+        seen_modes.add(key)
+        entry, song, chart = _attempt_selection(mode_preferences)
+        if entry is not None and song is not None and chart is not None:
             selected_entry = entry
             selected_song = song
+            best_chart = chart
             break
 
     if selected_entry is None or selected_song is None or best_chart is None:
