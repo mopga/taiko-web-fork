@@ -8,10 +8,26 @@ import sys
 from pathlib import Path
 
 
+def _ensure_pyinstaller() -> None:
+    """Ensure PyInstaller is available in the current interpreter.
+
+    Uses sys.executable to install if the import fails, guaranteeing we use
+    the same Python that invoked this script.
+    """
+    try:
+        import PyInstaller  # type: ignore  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pyinstaller"])  # nosec: B603
+
+
 APP_NAME = "taiko-web-backend"
 
 
 def build_backend() -> None:
+    _ensure_pyinstaller()
     repo_root = Path(__file__).resolve().parents[1].parent
     spec = repo_root / "taiko-web-backend.spec"
     dist = repo_root / "standalone" / "dist" / "backend"
