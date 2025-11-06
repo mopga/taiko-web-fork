@@ -76,29 +76,29 @@ Pre-built desktop packages are published by the CI workflow:
 Grab them from the [Releases page](../../releases)
 or from the workflow run summary. Each release ships the following files:
 
-- **Windows installer** – `taiko-web-backend-setup-<version>.exe` installs the
-  backend under `%APPDATA%\taiko-web-backend` and creates shortcuts that launch
+- **Windows installer** – `Taiko no Desk-<version>.exe` installs the
+  backend under `%APPDATA%\backend` and creates shortcuts that launch
   the desktop profile on port 8000.
-- **Windows portable zip** – `taiko-web-backend-windows.zip` contains the
-  `taiko-web-backend` folder produced by PyInstaller. Extract it anywhere, then
+- **Windows portable zip** – `Taiko no Desk-<version>.zip` contains the
+  `backend` folder produced by PyInstaller. Extract it anywhere, then
   run:
 
   ```powershell
-  Expand-Archive taiko-web-backend-windows.zip
-  cd taiko-web-backend
+  Expand-Archive "Taiko no Desk-<version>.zip"
+  cd backend
   ```
 
   ```cmd
-  set RUN_PROFILE=desktop && taiko-web-backend.exe --port 8000
+  set RUN_PROFILE=desktop && backend.exe --port 8000
   ```
 
-- **Linux archive** – `taiko-web-backend-linux-x64.tar.gz` expands to a
-  `taiko-web-backend` directory with the self-contained binary. Launch it with:
+- **Linux archive** – `Taiko no Desk-<version>.tar.gz` expands to a
+  `backend` directory with the self-contained binary. Launch it with:
 
   ```bash
-  tar -xzf taiko-web-backend-linux-x64.tar.gz
-  cd taiko-web-backend
-  RUN_PROFILE=desktop ./taiko-web-backend --port 8000
+  tar -xzf "Taiko no Desk-<version>.tar.gz"
+  cd backend
+  RUN_PROFILE=desktop ./backend --port 8000
   ```
 
 All desktop builds honour the `DATA_DIR` environment variable. When it is not
@@ -215,9 +215,9 @@ containing the running backend binary. When working from sources this resolves
 to `<repo-root>/songs/`; packaged builds include an empty `songs/` folder next to
 the executable. Typical installation targets:
 
-- **Windows** installer/portable ZIP: `<install-dir>\backend\taiko-web-backend\songs`
-- **macOS** `.app`: `Taiko Web Desktop.app/Contents/Resources/backend/taiko-web-backend/songs`
-- **Linux** AppImage/ZIP: `<install-dir>/backend/taiko-web-backend/songs`
+- **Windows** installer/portable ZIP: `<install-dir>\backend\backend\songs`
+- **macOS** `.app`: `Taiko no Desk.app/Contents/Resources/backend/backend/songs`
+- **Linux** AppImage/ZIP: `<install-dir>/backend/backend/songs`
 
 You can also use the “Open Songs Folder” menu entry inside the desktop app to
 jump directly to the correct directory. Each song belongs in its own directory
@@ -225,7 +225,7 @@ that contains a `.tja` or `.tjc` chart file and optional audio/background
 assets:
 
 ```
-taiko-web-backend/
+backend/
 └── songs/
     ├── MySong1/
     │   ├── MySong1.tja
