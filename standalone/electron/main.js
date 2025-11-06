@@ -9,7 +9,7 @@ const treeKill = require('tree-kill');
 
 const APP_ID = 'com.taikoweb.desktop';
 const DEFAULT_PORT = 8000;
-const HEALTH_TIMEOUT_MS = 60_000;
+const HEALTH_TIMEOUT_MS = 30_000;
 const SONGS_TIMEOUT_MS = 60_000;
 
 let mainWindow = null;
@@ -26,6 +26,8 @@ let songsScanPromise = null;
 let lastStatusMessage = 'Запускаем Taiko Web…';
 let lastStatusPayload = {
   message: lastStatusMessage,
+  detail: null,
+  progress: null,
   port: currentPort,
   songsPath: selectedSongsPath,
   errorMessage: null,
@@ -363,10 +365,12 @@ function spawnBackend(executable, workingDir, dataDir, port) {
     RUN_PROFILE: 'desktop',
     PORT: String(port),
     DATA_DIR: dataDir,
+    SONGS_DIR: selectedSongsPath ?? '',
+    LOG_LEVEL: process.env.LOG_LEVEL ?? 'info',
   };
 
   const args = ['--host', '127.0.0.1', '--port', String(port)];
-  const captureLogs = process.env.ELECTRON_DEV === '1';
+  const captureLogs = true; // always capture to file; forward to console in dev
   const child = spawn(executable, args, {
     cwd: workingDir,
     windowsHide: true,
@@ -415,18 +419,32 @@ function setupBackendLogging(child) {
     const logPath = path.join(logsDir, `backend-${timestamp}.log`);
     const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
-    const forward = (chunk) => {
+    const forward = (chunk, isStdErr = false) => {
       if (!logStream.destroyed) {
         logStream.write(chunk);
+      }
+      if (process.env.ELECTRON_DEV === '1') {
+        try {
+          const text = chunk.toString('utf-8');
+          if (isStdErr) {
+            // eslint-disable-next-line no-console
+            console.error(text.trimEnd());
+          } else {
+            // eslint-disable-next-line no-console
+            console.log(text.trimEnd());
+          }
+        } catch (_) {
+          // ignore console forwarding errors
+        }
       }
     };
 
     if (child.stdout) {
-      child.stdout.on('data', forward);
+      child.stdout.on('data', (c) => forward(c, false));
     }
 
     if (child.stderr) {
-      child.stderr.on('data', forward);
+      child.stderr.on('data', (c) => forward(c, true));
     }
 
     const finalize = () => {
@@ -437,6 +455,23 @@ function setupBackendLogging(child) {
 
     child.once('close', finalize);
     child.once('exit', finalize);
+    // simple rotation: keep latest 10 files
+    try {
+      const files = fs
+        .readdirSync(logsDir)
+        .filter((f) => f.startsWith('backend-') && f.endsWith('.log'))
+        .map((f) => ({ f, t: fs.statSync(path.join(logsDir, f)).mtimeMs }))
+        .sort((a, b) => b.t - a.t);
+      for (let i = 10; i < files.length; i += 1) {
+        try {
+          fs.unlinkSync(path.join(logsDir, files[i].f));
+        } catch (_) {
+          // ignore
+        }
+      }
+    } catch (_) {
+      // ignore rotation issues
+    }
   } catch (error) {
     // ignore logging issues to avoid breaking the app in dev mode
   }
@@ -544,6 +579,8 @@ function updateStatus(message, extra = {}) {
 function emitStatus(extra = {}) {
   const payload = {
     message: lastStatusMessage,
+    detail: extra.detail ?? null,
+    progress: typeof extra.progress === 'number' ? extra.progress : null,
     port: currentPort,
     songsPath: getCurrentSongsPath(),
     errorMessage: null,
@@ -662,7 +699,7 @@ function runSongsScan() {
 }
 
 function getEnvPort() {
-  const sources = [process.env.PORT, process.env.APP_PORT];
+  const sources = [process.env.TAIKO_DESKTOP_PORT, process.env.PORT, process.env.APP_PORT];
   for (const source of sources) {
     if (source === undefined || source === null) {
       continue;
@@ -756,6 +793,87 @@ function showFatalBackendExit(code, signal) {
     });
 }
 
+function httpPost(url, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(url);
+      const lib = parsed.protocol === 'https:' ? https : http;
+      const req = lib.request(
+        {
+          method: 'POST',
+          protocol: parsed.protocol,
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: parsed.pathname + parsed.search,
+          timeout: timeoutMs,
+          headers: { 'Content-Type': 'application/json' },
+        },
+        (res) => {
+          res.resume();
+          resolve();
+        }
+      );
+      req.on('timeout', () => req.destroy());
+      req.on('error', () => resolve());
+      req.end();
+    } catch (_) {
+      resolve();
+    }
+  });
+}
+
+async function gracefulShutdown(child) {
+  try {
+    if (backendUrl) {
+      await httpPost(`${backendUrl}/shutdown`, 3_000);
+      await delay(1_000);
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  return new Promise((resolve) => {
+    const timeoutForceKillMs = 10_000;
+    const softTimeoutMs = 3_000;
+
+    const finish = () => resolve();
+
+    const onExit = () => {
+      child.removeListener('exit', onExit);
+      finish();
+    };
+
+    child.once('exit', onExit);
+
+    try {
+      if (process.platform === 'win32') {
+        treeKill(child.pid, 'SIGTERM');
+      } else {
+        child.kill('SIGTERM');
+      }
+    } catch (_) {
+      // ignore
+    }
+
+    setTimeout(() => {
+      try {
+        if (process.platform === 'win32') {
+          treeKill(child.pid, 'SIGKILL');
+        } else if (!child.killed) {
+          child.kill('SIGKILL');
+        }
+      } catch (_) {
+        // ignore
+      }
+    }, softTimeoutMs);
+
+    setTimeout(() => {
+      child.removeListener('exit', onExit);
+      finish();
+    }, timeoutForceKillMs);
+  });
+}
+
 function stopBackend() {
   if (!backendProcess) {
     return Promise.resolve();
@@ -767,49 +885,6 @@ function stopBackend() {
   backendUrl = null;
   emitStatus();
 
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      resolve();
-    };
-
-    const onExit = () => {
-      child.removeListener('exit', onExit);
-      cleanup();
-    };
-
-    child.once('exit', onExit);
-
-    try {
-      if (process.platform === 'win32') {
-        treeKill(child.pid, 'SIGTERM', () => {
-          setTimeout(() => {
-            try {
-              treeKill(child.pid, 'SIGKILL');
-            } catch (error) {
-              // ignore
-            }
-          }, 2000);
-        });
-      } else {
-        child.kill('SIGTERM');
-        setTimeout(() => {
-          try {
-            if (!child.killed) {
-              child.kill('SIGKILL');
-            }
-          } catch (error) {
-            // ignore
-          }
-        }, 2000);
-      }
-    } catch (error) {
-      cleanup();
-    }
-
-    setTimeout(() => {
-      child.removeListener('exit', onExit);
-      cleanup();
-    }, 5000);
-  });
+  return gracefulShutdown(child);
 }
 
