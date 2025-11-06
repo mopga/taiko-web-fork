@@ -1303,14 +1303,19 @@ def _finalise_chart_metrics(
 def _normalised_requires_synthetic_notes(
     normalised: Optional[str], *, mode: Optional[str] = None
 ) -> bool:
-    if mode == "dojo":
+    if mode in {"dojo", "dandojo"}:
         return True
     token = (normalised or "").upper()
     return token in SYNTHETIC_NOTE_COURSE_TOKENS
 
-# NB: "DAN" is intentionally downcast via COURSE_DOWNCAST_MAP so that dojo packs
-# can be scanned in MVP mode without full exam support.
-DOJO_COURSE_TOKENS = {"DOJO", "KYUU"}
+# NB: tokens are normalised via ``_normalise_course_token`` which strips
+# whitespace, hyphen and underscore separators but preserves ``:`` delimiters.
+# ``DAN`` courses are treated as dojo-style content even when they ship with
+# playlist metadata that will later be expanded into full exams. ``TOWER``
+# tokens are handled separately but still participate in the special-mode
+# detection pipeline.
+DOJO_COURSE_TOKENS = {"DOJO", "KYUU", "DAN"}
+SPECIAL_PLAYLIST_COURSE_TOKENS = {"DOJO", "KYUU", "DAN", "TOWER"}
 
 COURSE_DOWNCAST_MAP = {
     "TOWER": "oni",
@@ -1545,6 +1550,17 @@ class ChartMetrics:
 
 
 @dataclass
+class PlaylistAggregate:
+    chart_data: Dict[str, object]
+    total_notes: int
+    hit_notes: int
+    measures: int
+    duration_ms: int
+    segments: List[Dict[str, object]] = field(default_factory=list)
+    issues: List[str] = field(default_factory=list)
+
+
+@dataclass
 class _CourseParseState:
     measure_index: int = 0
     segments: List[Dict[str, object]] = field(default_factory=list)
@@ -1656,12 +1672,85 @@ def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, 
             if 'time_sig' in measure:
                 measure_copy['time_sig'] = measure['time_sig']
             measures_payload.append(measure_copy)
-    return {
+    notes_source = chart.get('notes')
+    notes_payload: List[Dict[str, object]] = []
+    if isinstance(notes_source, list):
+        for note in notes_source:
+            if not isinstance(note, dict):
+                continue
+            note_copy: Dict[str, object] = {}
+            if 'type' in note:
+                note_copy['type'] = note['type']
+            at_value = note.get('at')
+            try:
+                note_copy['at'] = int(at_value)
+            except (TypeError, ValueError):
+                if at_value is not None:
+                    note_copy['at'] = at_value
+            if 'duration' in note:
+                duration_value = note.get('duration')
+                try:
+                    note_copy['duration'] = int(duration_value)
+                except (TypeError, ValueError):
+                    if duration_value is not None:
+                        note_copy['duration'] = duration_value
+            if note.get('synthetic'):
+                note_copy['synthetic'] = True
+            if note_copy:
+                notes_payload.append(note_copy)
+
+    def _clone_segment_payload(raw_segment: Mapping[str, object]) -> Dict[str, object]:
+        segment_copy: Dict[str, object] = {}
+        for key in (
+            'title',
+            'course',
+            'display_course',
+            'total_notes',
+            'hit_notes',
+            'duration_ms',
+            'offset_ms',
+            'tja_path',
+            'audio',
+        ):
+            if key in raw_segment:
+                segment_copy[key] = raw_segment[key]
+        return segment_copy
+
+    segments_source = chart.get('segments')
+    segments_payload: List[Dict[str, object]] = []
+    if isinstance(segments_source, list):
+        for segment in segments_source:
+            if isinstance(segment, Mapping):
+                segments_payload.append(_clone_segment_payload(segment))
+
+    meta_source = chart.get('meta')
+    meta_payload: Dict[str, object] = {}
+    if isinstance(meta_source, Mapping):
+        for key, value in meta_source.items():
+            if key == 'segments' and isinstance(value, list):
+                meta_payload['segments'] = [
+                    _clone_segment_payload(segment)
+                    for segment in value
+                    if isinstance(segment, Mapping)
+                ]
+            elif isinstance(value, (str, int, float, bool)):
+                meta_payload[key] = value
+            elif value is None:
+                meta_payload[key] = None
+
+    result: Dict[str, object] = {
         'course': course_value,
         'total_notes': total_notes_int,
         'measures': measures_payload,
         'duration_ms': duration_int,
     }
+    if notes_payload:
+        result['notes'] = notes_payload
+    if segments_payload:
+        result['segments'] = segments_payload
+    if meta_payload:
+        result['meta'] = meta_payload
+    return result
 
 
 @dataclass
@@ -1676,6 +1765,8 @@ class TjaImportRecord:
     audio_mtime_ns: Optional[int]
     audio_size: Optional[int]
     music_type: Optional[str]
+    playlist_url: Optional[str]
+    playlist_path: Optional[str]
     diagnostics: List[str]
     title: str
     title_ja: Optional[str]
@@ -1956,6 +2047,21 @@ def _resolve_category_mode(category_title: Optional[str]) -> str:
 def _normalise_course_token(value: str) -> str:
     token = re.sub(r"[\s\-_]", "", value.upper())
     return token
+
+
+def _base_course_token(value: str) -> str:
+    token = (value or "").split(":", 1)[0]
+    return token or value
+
+
+def _is_dojo_course_token(token: str) -> bool:
+    base = _base_course_token(token)
+    return base in DOJO_COURSE_TOKENS
+
+
+def _is_special_playlist_course(token: str) -> bool:
+    base = _base_course_token(token)
+    return base in SPECIAL_PLAYLIST_COURSE_TOKENS
 
 
 def _detect_taste_marker(path: Path) -> Optional[str]:
@@ -2343,33 +2449,41 @@ def _parse_tja_strict(
                             state.default_bpm = bpm_value
         elif key_upper == "COURSE":
             raw_course_value = value_stripped.strip()
-            raw_course_lower = raw_course_value.casefold()
             special_mode: Optional[str] = None
             special_display: Optional[str] = None
             canonical_override: Optional[str] = None
 
-            if raw_course_lower.startswith("tower"):
+            normalised_token = _normalise_course_token(raw_course_value)
+            base_token = _base_course_token(normalised_token)
+
+            if base_token == "TOWER":
                 canonical_override = "oni"
                 special_mode = "tower"
-                special_display = "tower"
-            elif raw_course_lower.startswith("dan"):
-                canonical_override = "oni"
-                special_mode = "dan"
-                special_display = "dan"
+                special_display = raw_course_value or "tower"
+            elif base_token == "DAN":
+                special_mode = "dandojo"
+                special_display = raw_course_value or "dandojo"
+            elif base_token in {"DOJO", "KYUU"}:
+                special_mode = "dojo"
+                special_display = raw_course_value or "dojo"
 
-            normalised_token = _normalise_course_token(raw_course_value)
-            if normalised_token in DOJO_COURSE_TOKENS:
+            if _is_dojo_course_token(normalised_token):
                 canonical_lower = "dojo"
+                initial_mode = special_mode or ("dandojo" if base_token == "DAN" else "dojo")
+                display_value = special_display or raw_course_value or "dojo"
                 active_course = CourseInfo(
                     canonical=canonical_lower,
                     raw_name=raw_course_value,
                     normalised=normalised_token,
-                    mode="dojo",
+                    mode=initial_mode,
+                    display_course=display_value,
                 )
                 parsed.courses.append(active_course)
                 parsed.has_dojo_course = True
                 parsed.charts[canonical_lower] = active_course
             else:
+                if base_token == "TOWER":
+                    parsed.has_dojo_course = True
                 canonical, token, issue = _resolve_course(raw_course_value, path=path)
                 if canonical_override:
                     canonical = canonical_override
@@ -2399,10 +2513,11 @@ def _parse_tja_strict(
                         active_course.normalised = token
                         if special_mode:
                             active_course.mode = special_mode
-                            active_course.display_course = special_display
-                        elif active_course.mode not in {"dojo"}:
+                            if special_display:
+                                active_course.display_course = special_display
+                        elif active_course.mode not in {"dojo", "dandojo"}:
                             active_course.mode = "standard"
-                            if active_course.display_course in {"tower", "dan"}:
+                            if active_course.display_course in {"tower", "dan", "dandojo"}:
                                 active_course.display_course = None
                     else:
                         active_course = CourseInfo(
@@ -2419,11 +2534,11 @@ def _parse_tja_strict(
                         active_course.add_issue(issue)
                     if special_mode and active_course.mode != special_mode:
                         active_course.mode = special_mode
-                    elif not special_mode and active_course.mode in {"tower", "dan"}:
+                    elif not special_mode and active_course.mode in {"tower", "dan", "dandojo"}:
                         active_course.mode = "standard"
                     if special_display and active_course.display_course != special_display:
                         active_course.display_course = special_display
-                    elif not special_display and active_course.display_course in {"tower", "dan"}:
+                    elif not special_display and active_course.display_course in {"tower", "dan", "dandojo"}:
                         active_course.display_course = None
         elif key_upper == "LEVEL" and active_course:
             try:
@@ -3797,12 +3912,255 @@ class SongScanner:
                 LOGGER.debug('Failed to register storage title recovery callback', exc_info=True)
         self._seed_legacy_scanner_ids()
 
+    def _parse_tja_playlist(
+        self,
+        playlist_path: Path,
+        *,
+        base_course: Optional[CourseInfo] = None,
+    ) -> Optional[PlaylistAggregate]:
+        try:
+            resolved_playlist = playlist_path.resolve()
+        except FileNotFoundError:
+            LOGGER.warning('Playlist missing: %s', playlist_path)
+            return None
+
+        try:
+            resolved_playlist.relative_to(self._songs_root)
+        except ValueError:
+            LOGGER.warning('Playlist outside songs directory: %s', resolved_playlist)
+            return None
+
+        try:
+            playlist_text = resolved_playlist.read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            LOGGER.warning('Failed to read playlist %s', resolved_playlist, exc_info=True)
+            return None
+
+        entries: List[str] = []
+        for raw_line in playlist_text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            token = stripped.split('#', 1)[0].strip()
+            if token:
+                entries.append(token)
+
+        playlist_relative = resolved_playlist.relative_to(self._songs_root).as_posix()
+
+        aggregate_measures: List[Dict[str, object]] = []
+        aggregate_segments: List[Dict[str, object]] = []
+        aggregate_issues: List[str] = []
+        total_notes = 0
+        total_hit_notes = 0
+        total_measures = 0
+        total_duration = 0
+        offset_ms = 0
+
+        if not entries:
+            aggregate_issues.append('playlist-empty')
+
+        preference_tokens: List[str] = []
+        if base_course is not None:
+            for candidate in (
+                base_course.display_course,
+                base_course.raw_name,
+                base_course.normalised,
+                base_course.canonical,
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    preference_tokens.append(candidate.strip().casefold())
+        preference_tokens.extend(['oni', 'ura', 'hard', 'normal', 'easy'])
+
+        for entry in entries:
+            candidate_path = (resolved_playlist.parent / entry).resolve()
+            try:
+                candidate_path.relative_to(self._songs_root)
+            except ValueError:
+                LOGGER.warning('Playlist segment outside songs directory: %s', candidate_path)
+                aggregate_issues.append('playlist-segment-outside-root')
+                continue
+
+            if not candidate_path.is_file():
+                LOGGER.warning('Playlist segment missing: %s', candidate_path)
+                aggregate_issues.append('playlist-segment-missing')
+                continue
+
+            if candidate_path.suffix.lower() != '.tja':
+                aggregate_issues.append('playlist-segment-unsupported')
+                continue
+
+            try:
+                segment_parsed = parse_tja(candidate_path)
+            except Exception:
+                LOGGER.warning('Failed to parse playlist segment %s', candidate_path, exc_info=True)
+                aggregate_issues.append('playlist-segment-parse-failed')
+                continue
+
+            segment_charts, _ = self._build_chart_records(
+                segment_parsed,
+                candidate_path,
+                category_mode='standard',
+                playlist_path=None,
+            )
+
+            selectable = [chart for chart in segment_charts if isinstance(chart, ChartRecord)]
+            if not selectable:
+                aggregate_issues.append('playlist-segment-no-chart')
+                continue
+
+            def _segment_score(chart: ChartRecord) -> Tuple[int, int, int]:
+                tokens: Set[str] = set()
+                for token_source in (
+                    chart.course,
+                    chart.display_course,
+                    chart.normalised,
+                    chart.raw_course,
+                ):
+                    if isinstance(token_source, str) and token_source.strip():
+                        tokens.add(token_source.strip().casefold())
+                match_index = len(preference_tokens)
+                for idx, preferred in enumerate(preference_tokens):
+                    if preferred in tokens:
+                        match_index = idx
+                        break
+                validity_rank = 0 if chart.valid else 1
+                notes_rank = -chart.total_notes if chart.total_notes else 0
+                return (match_index, validity_rank, notes_rank)
+
+            selected = min(selectable, key=_segment_score)
+            chart_data_copy = _clone_chart_data(selected.chart_data)
+            if not chart_data_copy:
+                aggregate_issues.append('playlist-segment-missing-chart-data')
+                continue
+
+            measures_source = chart_data_copy.get('measures')
+            if not isinstance(measures_source, list):
+                measures_source = []
+
+            adjusted_measures: List[Dict[str, object]] = []
+            for measure in measures_source:
+                if not isinstance(measure, Mapping):
+                    continue
+                measure_copy = dict(measure)
+                start_value = measure_copy.get('start_ms')
+                try:
+                    start_int = int(start_value)
+                except (TypeError, ValueError):
+                    start_int = 0
+                measure_copy['start_ms'] = start_int + offset_ms
+
+                notes_payload: List[Dict[str, object]] = []
+                for note in measure_copy.get('notes', []) or []:
+                    if not isinstance(note, Mapping):
+                        continue
+                    note_copy = dict(note)
+                    try:
+                        note_copy['at'] = int(note_copy.get('at', 0)) + offset_ms
+                    except (TypeError, ValueError):
+                        note_copy['at'] = offset_ms
+                    notes_payload.append(note_copy)
+                if notes_payload:
+                    measure_copy['notes'] = notes_payload
+
+                longs_payload: List[Dict[str, object]] = []
+                for long_note in measure_copy.get('longs', []) or []:
+                    if not isinstance(long_note, Mapping):
+                        continue
+                    long_copy = dict(long_note)
+                    try:
+                        long_copy['at'] = int(long_copy.get('at', 0)) + offset_ms
+                    except (TypeError, ValueError):
+                        long_copy['at'] = offset_ms
+                    end_value = long_copy.get('end_at')
+                    try:
+                        long_copy['end_at'] = int(end_value) + offset_ms
+                    except (TypeError, ValueError):
+                        if end_value is not None:
+                            long_copy.pop('end_at', None)
+                    longs_payload.append(long_copy)
+                if longs_payload:
+                    measure_copy['longs'] = longs_payload
+
+                adjusted_measures.append(measure_copy)
+
+            aggregate_measures.extend(adjusted_measures)
+
+            segment_duration = chart_data_copy.get('duration_ms', 0)
+            try:
+                duration_int = int(segment_duration)
+            except (TypeError, ValueError):
+                duration_int = 0
+            if duration_int <= 0:
+                duration_int = 0
+                for measure in adjusted_measures:
+                    start_val = measure.get('start_ms') or 0
+                    duration_val = measure.get('duration_ms') or 0
+                    try:
+                        measure_end = int(start_val) + int(duration_val)
+                    except (TypeError, ValueError):
+                        continue
+                    if measure_end > duration_int + offset_ms:
+                        duration_int = measure_end - offset_ms
+
+            segment_relative = candidate_path.relative_to(self._songs_root).as_posix()
+            segment_info = {
+                'title': segment_parsed.title or segment_parsed.subtitle or selected.raw_course or selected.course,
+                'course': selected.course,
+                'display_course': selected.display_course or selected.raw_course,
+                'total_notes': selected.total_notes,
+                'hit_notes': selected.hit_notes,
+                'duration_ms': duration_int,
+                'offset_ms': offset_ms,
+                'tja_path': segment_relative,
+            }
+            aggregate_segments.append(segment_info)
+
+            total_notes += selected.total_notes or 0
+            total_hit_notes += selected.hit_notes or 0
+            total_measures += selected.measures or 0
+            total_duration += duration_int
+            offset_ms += duration_int
+
+        if not aggregate_measures:
+            aggregate_issues.append('playlist-no-segments')
+
+        notes_flat: List[Dict[str, object]] = []
+        for measure in aggregate_measures:
+            for note in measure.get('notes', []) or []:
+                if isinstance(note, Mapping):
+                    notes_flat.append(dict(note))
+
+        chart_course = base_course.canonical if base_course and base_course.canonical else 'oni'
+        aggregate_chart_data: Dict[str, object] = {
+            'course': chart_course,
+            'total_notes': total_notes,
+            'measures': aggregate_measures,
+            'duration_ms': total_duration,
+            'notes': notes_flat,
+            'meta': {
+                'segments': aggregate_segments,
+                'playlist_path': playlist_relative,
+            },
+            'segments': aggregate_segments,
+        }
+
+        return PlaylistAggregate(
+            chart_data=aggregate_chart_data,
+            total_notes=total_notes,
+            hit_notes=total_hit_notes,
+            measures=total_measures,
+            duration_ms=total_duration,
+            segments=aggregate_segments,
+            issues=aggregate_issues,
+        )
+
     def _build_chart_records(
         self,
         parsed: ParsedTJA,
         tja_path: Path,
         *,
         category_mode: str = "standard",
+        playlist_path: Optional[Path] = None,
     ) -> Tuple[List[ChartRecord], List[str]]:
         records: List[ChartRecord] = []
         import_issues: List[str] = []
@@ -3842,11 +4200,44 @@ class SongScanner:
 
         category_mode = (category_mode or "standard").strip().casefold()
 
+        def _derive_rank_value(
+            course: CourseInfo,
+            *,
+            display_hint: Optional[str] = None,
+        ) -> Optional[str]:
+            rank_candidates: Sequence[Optional[str]] = (
+                display_hint,
+                course.display_course,
+                course.raw_name,
+                course.normalised,
+            )
+            for candidate in rank_candidates:
+                if not isinstance(candidate, str):
+                    continue
+                cleaned_rank = _normalise_space_runs(
+                    _clean_metadata_value(candidate)
+                )
+                if cleaned_rank:
+                    return cleaned_rank
+            return None
+
         for course in parsed.courses:
             course_name = course.canonical
             coerced = False
             issues = list(course.issues)
             mode = course.mode or "standard"
+
+            if playlist_path is not None and mode in {"tower", "dandojo"}:
+                aggregate = self._parse_tja_playlist(playlist_path, base_course=course)
+                if aggregate is not None:
+                    course.chart_data = aggregate.chart_data
+                    course.total_notes = aggregate.total_notes
+                    course.hit_notes = aggregate.hit_notes
+                    course.measures = aggregate.measures
+                    course.segments = aggregate.segments
+                    for issue in aggregate.issues:
+                        course.add_issue(issue)
+                    issues = list(course.issues)
 
             if course_name == "Unknown" and mode == "standard":
                 if self._coerce_unknown_course:
@@ -3929,25 +4320,42 @@ class SongScanner:
 
             if category_mode == "tower":
                 output_mode = "tower"
-                output_display_course = "tower"
+                output_display_course = (
+                    display_course or course.raw_name or "tower"
+                )
             elif category_mode == "dandojo":
                 output_mode = "dandojo"
-                output_display_course = "dandojo"
-                rank_candidates: Sequence[Optional[str]] = (
-                    display_course,
-                    course.raw_name,
-                    course.normalised,
+                output_display_course = (
+                    display_course or course.raw_name or "dandojo"
                 )
-                for candidate in rank_candidates:
-                    if not isinstance(candidate, str):
-                        continue
-                    cleaned_rank = _normalise_space_runs(_clean_metadata_value(candidate))
-                    if cleaned_rank:
-                        rank_value = cleaned_rank
-                        break
+                rank_value = _derive_rank_value(
+                    course, display_hint=output_display_course
+                )
             else:
-                if mode in {"tower", "dan", "dojo"}:
+                if mode == "dan":
+                    output_mode = "dandojo"
+                elif mode in {"tower", "dojo", "dandojo"}:
+                    output_mode = mode
+                else:
                     output_mode = "standard"
+
+                if output_mode == "tower":
+                    output_display_course = (
+                        display_course or course.raw_name or "tower"
+                    )
+                elif output_mode == "dojo":
+                    output_display_course = (
+                        display_course or course.raw_name or "dojo"
+                    )
+                elif output_mode == "dandojo":
+                    output_display_course = (
+                        display_course or course.raw_name or "dandojo"
+                    )
+                    rank_value = _derive_rank_value(
+                        course, display_hint=output_display_course
+                    )
+                else:
+                    output_display_course = display_course
 
             record = ChartRecord(
                 course=course_name,
@@ -4029,6 +4437,8 @@ class SongScanner:
         audio_mtime_ns: Optional[int],
         audio_size: Optional[int],
         music_type: Optional[str],
+        playlist_path: Optional[Path] = None,
+        playlist_url: Optional[str] = None,
         diagnostics: List[str],
         category_id: int,
         category_title: str,
@@ -4039,6 +4449,7 @@ class SongScanner:
             parsed,
             tja_path,
             category_mode=category_mode,
+            playlist_path=playlist_path,
         )
         import_issues = list(chart_issues)
 
@@ -4097,6 +4508,13 @@ class SongScanner:
             except ValueError:
                 relative_audio = None
 
+        relative_playlist = None
+        if playlist_path:
+            try:
+                relative_playlist = playlist_path.resolve().relative_to(self._songs_root).as_posix()
+            except ValueError:
+                relative_playlist = None
+
         if not parsed.wave:
             import_issues.append('missing-wave')
         if not charts:
@@ -4129,6 +4547,8 @@ class SongScanner:
             audio_mtime_ns=audio_mtime_ns,
             audio_size=audio_size,
             music_type=music_type,
+            playlist_url=playlist_url,
+            playlist_path=relative_playlist,
             diagnostics=diagnostics if diagnostics else [],
             title=title_value,
             title_ja=title_ja_value,
@@ -4218,6 +4638,8 @@ class SongScanner:
                 audio_mtime_ns=payload.get('audio_mtime_ns'),
                 audio_size=payload.get('audio_size'),
                 music_type=payload.get('music_type'),
+                playlist_url=payload.get('playlist_url'),
+                playlist_path=payload.get('playlist_path'),
                 diagnostics=list(payload.get('diagnostics', [])),
                 title=str(payload.get('title', UNKNOWN_VALUE)),
                 title_ja=payload.get('title_ja'),
@@ -4863,9 +5285,13 @@ class SongScanner:
                 LOGGER.debug('Failed to prune unknown charts for %s', song_filter)
 
     def _select_base_record(self, records: List[TjaImportRecord]) -> TjaImportRecord:
-        def _score(record: TjaImportRecord) -> Tuple[int, int, bool]:
+        def _score(record: TjaImportRecord) -> Tuple[int, int, int, int, bool]:
+            special_modes = sum(1 for chart in record.charts if chart.mode != "standard")
             valid = sum(1 for chart in record.charts if chart.valid)
-            return (valid, len(record.charts), bool(record.audio_url))
+            chart_count = len(record.charts)
+            playlist_flag = 1 if record.playlist_path else 0
+            audio_flag = bool(record.audio_url)
+            return (special_modes, valid, chart_count, playlist_flag, audio_flag)
 
         return max(records, key=_score)
 
@@ -5196,6 +5622,23 @@ class SongScanner:
                         audio_name = PurePosixPath(normalised_audio).name
                         if audio_name:
                             assets_files.setdefault(audio_name, str(absolute_audio))
+            playlist_relative_value: Optional[str] = None
+            if isinstance(base.playlist_path, str):
+                playlist_relative_value = base.playlist_path
+            if playlist_relative_value:
+                normalised_playlist = _normalise_relative_path(playlist_relative_value)
+                if normalised_playlist:
+                    assets_payload['playlist_path'] = normalised_playlist
+                    try:
+                        absolute_playlist = (self._songs_root / normalised_playlist).resolve()
+                        absolute_playlist.relative_to(self._songs_root)
+                    except Exception:
+                        absolute_playlist = None
+                    if absolute_playlist is not None and absolute_playlist.is_file():
+                        assets_files.setdefault(normalised_playlist, str(absolute_playlist))
+                        playlist_name = PurePosixPath(normalised_playlist).name
+                        if playlist_name:
+                            assets_files.setdefault(playlist_name, str(absolute_playlist))
 
             if absolute_main_path is None and main_relative_path:
                 try:
@@ -5331,6 +5774,7 @@ class SongScanner:
                 difficulties[legacy] = bool(courses_doc.get(legacy))
 
         charts_payload = document.get('charts') if isinstance(document.get('charts'), list) else []
+        manifest_charts: List[Dict[str, object]] = []
         max_duration = 0
         for chart in charts_payload:
             if not isinstance(chart, dict):
@@ -5345,6 +5789,35 @@ class SongScanner:
                 duration_int = 0
             if duration_int > max_duration:
                 max_duration = duration_int
+
+            mode_value = str(chart.get('mode') or '').strip().casefold()
+            if mode_value not in {'tower', 'dandojo'}:
+                continue
+
+            cloned_chart_data = _clone_chart_data(chart_data)
+
+            manifest_chart: Dict[str, object] = {
+                'mode': chart.get('mode'),
+                'course': chart.get('course'),
+                'canonical_course': chart.get('canonical_course'),
+                'display_course': chart.get('display_course'),
+                'rank': chart.get('rank'),
+                'total_notes': chart.get('total_notes'),
+                'hit_notes': chart.get('hit_notes'),
+                'valid': chart.get('valid'),
+                'issues': list(chart.get('issues', [])) if isinstance(chart.get('issues'), Sequence) else [],
+                'chart_data': cloned_chart_data,
+            }
+
+            segments_source = chart.get('segments')
+            if isinstance(segments_source, list):
+                manifest_chart['segments'] = [
+                    dict(segment)
+                    for segment in segments_source
+                    if isinstance(segment, Mapping)
+                ]
+
+            manifest_charts.append(manifest_chart)
 
         if max_duration <= 0:
             duration_candidate = document.get('duration_ms')
@@ -5442,6 +5915,9 @@ class SongScanner:
             'sha1': sha1_combined,
             'parse_failed_at': _timestamp_seconds(parse_failed_at),
         }
+
+        if manifest_charts:
+            manifest_entry['charts'] = manifest_charts
 
         return manifest_entry
 
@@ -5793,10 +6269,49 @@ class SongScanner:
             base += '/'
         return base + rel_posix
 
-    def _detect_audio(self, tja_path: Path, parsed: ParsedTJA) -> Tuple[Optional[Path], List[str]]:
+    def _detect_audio(
+        self, tja_path: Path, parsed: ParsedTJA
+    ) -> Tuple[Optional[Path], Optional[Path], List[str]]:
         diagnostics: List[str] = []
 
-        def _find_hls_playlist() -> Optional[Path]:
+        def _classify_playlist_file(path: Path) -> str:
+            try:
+                with path.open('r', encoding='utf-8', errors='ignore') as handle:
+                    content = handle.read(16384)
+            except Exception:
+                return 'unknown'
+
+            segment_like = 0
+            audio_like = 0
+
+            for raw_line in content.splitlines():
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith('#'):
+                    if stripped.upper().startswith('#TAIKO-SEGMENT-PLAYLIST'):
+                        return 'segments'
+                    continue
+                token = stripped.split('#', 1)[0].split('?', 1)[0].strip()
+                lowered = token.casefold()
+                if not lowered:
+                    continue
+                if lowered.endswith('.tja') or '.tja' in lowered:
+                    segment_like += 1
+                elif lowered.endswith('.csv') or '.csv' in lowered:
+                    segment_like += 1
+                elif lowered.endswith('.ts') or lowered.endswith('.aac') or lowered.endswith('.mp3') or lowered.endswith('.ogg') or lowered.endswith('.m4a') or lowered.endswith('.opus'):
+                    audio_like += 1
+                elif lowered.endswith('.m3u8') or lowered.endswith('.t3u8'):
+                    audio_like += 1
+
+            if segment_like and segment_like >= audio_like:
+                return 'segments'
+            if audio_like and audio_like >= segment_like:
+                return 'audio'
+            return 'unknown'
+
+        def _iter_playlist_candidates() -> Iterable[Tuple[Path, str]]:
             candidates: List[Path] = []
             suffixes = ("*.t3u8", "*.m3u8")
             hls_dir = tja_path.parent / "HLS"
@@ -5814,21 +6329,35 @@ class SongScanner:
                     resolved.relative_to(self._songs_root)
                 except ValueError:
                     continue
-                if resolved.is_file():
-                    return resolved
-            return None
+                if not resolved.is_file():
+                    continue
+                semantics = _classify_playlist_file(resolved)
+                yield resolved, semantics
+
+        playlist_path: Optional[Path] = None
+        audio_path: Optional[Path] = None
 
         has_special_mode = parsed.has_dojo_course or any(
-            course.normalised in {"DAN", "DOJO", "KYUU"}
-            or course.mode in {"tower", "dan", "dojo"}
-            or (course.display_course in {"tower", "dan"} if course.display_course else False)
+            _is_special_playlist_course(course.normalised)
+            or course.mode in {"tower", "dan", "dojo", "dandojo"}
+            or (
+                isinstance(course.display_course, str)
+                and course.display_course.strip().casefold()
+                in {"tower", "dan", "dandojo"}
+            )
             for course in parsed.courses
         )
 
-        if has_special_mode:
-            playlist = _find_hls_playlist()
-            if playlist is not None:
-                return playlist, diagnostics
+        for resolved, semantics in _iter_playlist_candidates():
+            if semantics == 'segments':
+                if playlist_path is None:
+                    playlist_path = resolved
+            elif semantics == 'audio':
+                if audio_path is None:
+                    audio_path = resolved
+            else:
+                if audio_path is None:
+                    audio_path = resolved
 
         if parsed.wave:
             candidate = (tja_path.parent / parsed.wave).resolve()
@@ -5838,31 +6367,63 @@ class SongScanner:
                 diagnostics.append('wave-outside-root')
             else:
                 if candidate.is_file():
-                    if has_special_mode and candidate.suffix.lower() not in {".t3u8", ".m3u8"}:
-                        playlist = _find_hls_playlist()
-                        if playlist is not None:
-                            return playlist, diagnostics
-                    return candidate, diagnostics
-                diagnostics.append('wave-missing')
+                    suffix = candidate.suffix.lower()
+                    if suffix in {'.t3u8', '.m3u8'}:
+                        semantics = _classify_playlist_file(candidate)
+                        if semantics == 'segments':
+                            if playlist_path is None:
+                                playlist_path = candidate
+                        elif semantics == 'audio':
+                            if audio_path is None:
+                                audio_path = candidate
+                        else:
+                            if has_special_mode and playlist_path is None:
+                                playlist_path = candidate
+                            if audio_path is None:
+                                audio_path = candidate
+                    else:
+                        audio_path = candidate
+                else:
+                    diagnostics.append('wave-missing')
 
-        if has_special_mode:
-            playlist = _find_hls_playlist()
-            if playlist is not None:
-                return playlist, diagnostics
         candidates = sorted(
             [p for p in tja_path.parent.iterdir() if p.is_file()],
             key=lambda p: p.name.lower(),
         )
-        for audio_path in candidates:
-            resolved_audio = audio_path.resolve()
-            try:
-                resolved_audio.relative_to(self._songs_root)
-            except ValueError:
-                continue
-            if resolved_audio.suffix.lower() in SUPPORTED_AUDIO_EXTS:
-                return resolved_audio, diagnostics
-        diagnostics.append('no-audio')
-        return None, diagnostics
+        if audio_path is None:
+            for candidate in candidates:
+                resolved_audio = candidate.resolve()
+                try:
+                    resolved_audio.relative_to(self._songs_root)
+                except ValueError:
+                    continue
+                if resolved_audio.suffix.lower() in SUPPORTED_AUDIO_EXTS:
+                    audio_path = resolved_audio
+                    break
+
+        if playlist_path is None and has_special_mode:
+            for candidate in candidates:
+                if candidate.suffix.lower() not in {'.t3u8', '.m3u8'}:
+                    continue
+                try:
+                    resolved = candidate.resolve()
+                except FileNotFoundError:
+                    continue
+                try:
+                    resolved.relative_to(self._songs_root)
+                except ValueError:
+                    continue
+                if not resolved.is_file():
+                    continue
+                semantics = _classify_playlist_file(resolved)
+                if semantics == 'segments':
+                    playlist_path = resolved
+                    break
+
+        if audio_path is None and playlist_path is None:
+            diagnostics.append('no-audio')
+
+        return audio_path, playlist_path, diagnostics
 
     def _determine_category(self, tja_path: Path) -> Tuple[int, str]:
         try:
@@ -6504,6 +7065,10 @@ class SongScanner:
 
             if state_doc is not None and not needs_processing:
                 stored_audio_path = state_doc.get('audio_path') if isinstance(state_doc.get('audio_path'), str) else None
+                if not stored_audio_path:
+                    playlist_stored = state_doc.get('playlist_path')
+                    if isinstance(playlist_stored, str) and playlist_stored:
+                        stored_audio_path = playlist_stored
                 if stored_audio_path:
                     audio_candidate = (self._songs_root / stored_audio_path).resolve()
                     if audio_candidate.exists():
@@ -6599,7 +7164,8 @@ class SongScanner:
                         self._metrics.increment('tja_skipped_unknown_course_total', parsed.skipped_unknown_course)
                     if parsed.has_dojo_course:
                         self._metrics.increment('tja_dojo_parsed_total')
-                    audio_path, diagnostics = self._detect_audio(tja_path, parsed)
+                    audio_path, playlist_path, detect_diagnostics = self._detect_audio(tja_path, parsed)
+                    diagnostics.extend(detect_diagnostics)
                     tja_bytes = tja_path.read_bytes()
                     file_hash = md5_bytes(tja_bytes)
                     file_sha1 = hashlib.sha1(tja_bytes).hexdigest()
@@ -6607,10 +7173,20 @@ class SongScanner:
                     fingerprint = parsed.fingerprint
 
                     audio_url = None
+                    playlist_url = None
                     music_type = None
                     audio_hash = None
                     audio_mtime_ns = None
                     audio_size = None
+                    playlist_relative: Optional[Path] = None
+                    if playlist_path is not None:
+                        try:
+                            playlist_relative = playlist_path.resolve().relative_to(self._songs_root)
+                        except ValueError:
+                            diagnostics.append('playlist-outside-root')
+                            playlist_relative = None
+                        else:
+                            playlist_url = self._build_url(playlist_relative)
                     if audio_path:
                         try:
                             relative_audio = audio_path.resolve().relative_to(self._songs_root)
@@ -6626,6 +7202,22 @@ class SongScanner:
                             audio_stat = audio_path.stat()
                             audio_mtime_ns = getattr(audio_stat, 'st_mtime_ns', int(audio_stat.st_mtime * 1_000_000_000))
                             audio_size = audio_stat.st_size
+                    elif playlist_relative is not None and playlist_path is not None:
+                        audio_url = playlist_url
+                        music_type = playlist_path.suffix.lower().lstrip('.')
+                        try:
+                            playlist_bytes = playlist_path.read_bytes()
+                        except Exception:
+                            pass
+                        else:
+                            audio_hash = md5_bytes(playlist_bytes)
+                            playlist_stat = playlist_path.stat()
+                            audio_mtime_ns = getattr(
+                                playlist_stat,
+                                'st_mtime_ns',
+                                int(playlist_stat.st_mtime * 1_000_000_000),
+                            )
+                            audio_size = playlist_stat.st_size
 
                     category_id, category_title = self._determine_category(tja_path)
                     local_category_slug: Optional[str] = None
@@ -6676,6 +7268,8 @@ class SongScanner:
                         audio_mtime_ns=audio_mtime_ns,
                         audio_size=audio_size,
                         music_type=music_type,
+                        playlist_path=playlist_path,
+                        playlist_url=playlist_url,
                         diagnostics=diagnostics,
                         category_id=category_id,
                         category_title=category_title,

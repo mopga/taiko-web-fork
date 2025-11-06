@@ -586,6 +586,8 @@ class TestSongsScanner(unittest.TestCase):
             audio_mtime_ns=None,
             audio_size=None,
             music_type=None,
+            playlist_url=None,
+            playlist_path=None,
             diagnostics=[],
             title="Sample",
             title_ja=None,
@@ -1605,6 +1607,93 @@ LEVEL:7
         self.assertIn('audio_url', paths)
         self.assertTrue(paths['audio_url'].endswith('.t3u8'))
 
+    def test_parse_tja_playlist_aggregates_segments(self):
+        tmp_dir = Path(self._tmp_dir())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        songs_dir = tmp_dir / "songs"
+        playlist_dir = songs_dir / "Dojo"
+        playlist_dir.mkdir(parents=True, exist_ok=True)
+
+        segment_one = playlist_dir / "segment_one.tja"
+        segment_two = playlist_dir / "segment_two.tja"
+        playlist_path = playlist_dir / "segments.t3u8"
+
+        segment_one.write_text("\n".join([
+            "TITLE:Segment One",
+            "COURSE:Oni",
+            "LEVEL:5",
+            "BPM:120",
+            "#START",
+            "1111,",
+            "0000,",
+            "#END",
+        ]), encoding="utf-8")
+
+        segment_two.write_text("\n".join([
+            "TITLE:Segment Two",
+            "COURSE:Oni",
+            "LEVEL:6",
+            "BPM:150",
+            "#START",
+            "2222,",
+            "3333,",
+            "#END",
+        ]), encoding="utf-8")
+
+        playlist_path.write_text("\n".join([
+            "#EXTM3U",
+            "segment_one.tja",
+            "segment_two.tja",
+        ]), encoding="utf-8")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        aggregate = scanner._parse_tja_playlist(playlist_path)
+        self.assertIsNotNone(aggregate)
+        chart_aggregate = aggregate
+
+        seg1_parsed = parse_tja(segment_one)
+        seg1_records, _ = scanner._build_chart_records(seg1_parsed, segment_one)
+        seg1_chart = next(chart for chart in seg1_records if chart.course == 'oni')
+
+        seg2_parsed = parse_tja(segment_two)
+        seg2_records, _ = scanner._build_chart_records(seg2_parsed, segment_two)
+        seg2_chart = next(chart for chart in seg2_records if chart.course == 'oni')
+
+        expected_total_notes = (seg1_chart.total_notes or 0) + (seg2_chart.total_notes or 0)
+        self.assertEqual(chart_aggregate.total_notes, expected_total_notes)
+        self.assertEqual(chart_aggregate.chart_data.get('total_notes'), expected_total_notes)
+        self.assertEqual(chart_aggregate.measures, (seg1_chart.measures or 0) + (seg2_chart.measures or 0))
+        self.assertGreater(chart_aggregate.duration_ms, 0)
+
+        notes_payload = chart_aggregate.chart_data.get('notes') or []
+        self.assertTrue(notes_payload)
+
+        meta_payload = chart_aggregate.chart_data.get('meta') or {}
+        self.assertIn('segments', meta_payload)
+        segments_payload = meta_payload.get('segments') or []
+        self.assertEqual(len(segments_payload), 2)
+        self.assertEqual(segments_payload[0].get('offset_ms'), 0)
+        self.assertEqual(
+            segments_payload[1].get('offset_ms'),
+            segments_payload[0].get('duration_ms'),
+        )
+        expected_duration = sum(int(segment.get('duration_ms', 0)) for segment in segments_payload)
+        self.assertEqual(chart_aggregate.duration_ms, expected_duration)
+        self.assertEqual(
+            chart_aggregate.chart_data.get('segments'),
+            segments_payload,
+        )
+
+        playlist_relative = playlist_path.relative_to(songs_dir).as_posix()
+        self.assertEqual(meta_payload.get('playlist_path'), playlist_relative)
+
     def test_scan_imports_dan_chart_in_mvp_mode(self):
         tmp_dir = Path(self._tmp_dir())
         songs_dir = tmp_dir / "songs"
@@ -1642,6 +1731,59 @@ LEVEL:7
         self.assertEqual(chart.get('mode'), 'standard')
         self.assertTrue(chart.get('valid'))
         self.assertIn('mapped-course', chart.get('issues', []))
+
+    def test_parse_tja_recognises_dan_and_tower_courses(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        songs_dir.mkdir(parents=True, exist_ok=True)
+
+        dan_tja = songs_dir / "dan_course.tja"
+        dan_tja.write_text("\n".join([
+            "TITLE:Dan Course",
+            "COURSE:DAN:Gold",
+            "LEVEL:1",
+            "#START",
+            "1111,",
+            "#END",
+        ]), encoding="utf-8")
+
+        tower_tja = songs_dir / "tower_course.tja"
+        tower_tja.write_text("\n".join([
+            "TITLE:Tower Course",
+            "COURSE:TOWER",
+            "LEVEL:2",
+            "#START",
+            "2222,",
+            "#END",
+        ]), encoding="utf-8")
+
+        dan_parsed = parse_tja(dan_tja)
+        self.assertTrue(dan_parsed.has_dojo_course)
+        self.assertTrue(dan_parsed.courses)
+        dan_course = dan_parsed.courses[0]
+        self.assertEqual(dan_course.mode, 'dandojo')
+        self.assertEqual(dan_course.canonical, 'dojo')
+        self.assertEqual(dan_course.display_course, 'DAN:Gold')
+
+        tower_parsed = parse_tja(tower_tja)
+        self.assertTrue(tower_parsed.has_dojo_course)
+        self.assertTrue(tower_parsed.courses)
+        tower_course = tower_parsed.courses[0]
+        self.assertEqual(tower_course.mode, 'tower')
+        self.assertEqual(tower_course.canonical, 'oni')
+        self.assertEqual(tower_course.display_course, 'TOWER')
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+        self.assertEqual(summary['errors'], 0)
+        self.assertEqual(scanner._metrics._counters['tja_dojo_parsed_total'], 2)
 
     def test_concurrent_upsert_same_chart(self):
         db = _DummyDB()
@@ -3015,6 +3157,8 @@ LEVEL:7
             audio_mtime_ns=None,
             audio_size=None,
             music_type=None,
+            playlist_url=None,
+            playlist_path=None,
             diagnostics=[],
             title="Oni Title",
             title_ja=None,
@@ -3050,6 +3194,8 @@ LEVEL:7
             audio_mtime_ns=None,
             audio_size=None,
             music_type=None,
+            playlist_url=None,
+            playlist_path=None,
             diagnostics=[],
             title="Fallback Title",
             title_ja=None,
@@ -3088,6 +3234,8 @@ LEVEL:7
             audio_mtime_ns=None,
             audio_size=None,
             music_type=None,
+            playlist_url=None,
+            playlist_path=None,
             diagnostics=[],
             title="Normalize Test",
             title_ja=None,
