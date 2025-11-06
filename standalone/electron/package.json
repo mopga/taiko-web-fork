@@ -10,9 +10,11 @@
   "scripts": {
     "dev": "cross-env ELECTRON_DEV=1 electron .",
     "start": "electron .",
-    "build": "electron-builder --dir",
-    "dist:win": "electron-builder --win --dir",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "build:backend": "python ../packaging/build_backend.py",
+    "build:desktop": "npm run build:backend && electron-builder -mwl",
+    "build:win": "npm run build:backend && electron-builder --win nsis zip",
+    "build:mac": "npm run build:backend && electron-builder --mac dmg zip"
   },
   "build": {
     "appId": "com.taikoweb.desktop",
@@ -47,16 +49,34 @@
       }
     ],
     "win": {
+      "icon": "../assets/launcher/app.ico",
       "target": [
         {
-          "target": "dir",
-          "arch": [
-            "x64"
-          ]
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["x64"]
         }
       ],
-      "icon": "../assets/launcher/app.ico",
-      "artifactName": "TaikoWeb-${version}-win-unpacked"
+      "artifactName": "TaikoWeb-${version}-${os}-${arch}.${ext}",
+      "publisherName": "Taiko Web",
+      "nsis": {
+        "oneClick": false,
+        "perMachine": false,
+        "allowElevation": true,
+        "allowToChangeInstallationDirectory": true
+      }
+    },
+    "mac": {
+      "icon": "../assets/launcher/app.icns",
+      "category": "public.app-category.games",
+      "target": [
+        { "target": "dmg" },
+        { "target": "zip" }
+      ],
+      "artifactName": "TaikoWeb-${version}-${os}-${arch}.${ext}"
     }
   },
   "devDependencies": {

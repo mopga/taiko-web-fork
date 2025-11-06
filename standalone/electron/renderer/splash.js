@@ -4,6 +4,7 @@
   const songsElement = document.getElementById('songs-info');
   const portElement = document.getElementById('port-info');
   const chooseButton = document.getElementById('choose-songs');
+  const quitButton = document.getElementById('quit-app');
   const splashElement = document.querySelector('.splash');
   const mascotElement = document.getElementById('mascot');
 
@@ -35,9 +36,15 @@
     if (text && text.length > 0) {
       detailElement.hidden = false;
       detailElement.textContent = text;
+      if (quitButton) {
+        quitButton.hidden = false;
+      }
     } else {
       detailElement.hidden = true;
       detailElement.textContent = '';
+      if (quitButton) {
+        quitButton.hidden = true;
+      }
     }
   }
 
@@ -54,6 +61,12 @@
         setDetail(message);
       } else {
         setDetail('');
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'detail')) {
+      const message = payload.detail;
+      if (typeof message === 'string' && message.length > 0) {
+        setDetail(message);
       }
     }
     if (songsElement && Object.prototype.hasOwnProperty.call(payload, 'songsPath')) {
@@ -89,6 +102,14 @@
       chooseButton.disabled = true;
     }
     chooseButton.addEventListener('click', handleChooseSongsClick);
+  }
+
+  if (quitButton) {
+    quitButton.addEventListener('click', () => {
+      if (window.desktop && typeof window.desktop.requestQuit === 'function') {
+        window.desktop.requestQuit();
+      }
+    });
   }
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
