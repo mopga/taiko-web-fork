@@ -1627,10 +1627,17 @@ LEVEL:7
         self.assertEqual(chart.get('mode'), 'dandojo')
         self.assertTrue(chart['valid'])
         paths = inserted.get('paths', {})
-        self.assertFalse(paths.get('audio_url'))
+        self.assertEqual(
+            paths.get('audio_url'),
+            '/songs/Dojo/Second Dan/HLS/dojo.t3u8',
+        )
         chart_meta = chart.get('chart_data', {}).get('meta', {})
         self.assertTrue(chart_meta.get('is_playlist_course'))
         self.assertEqual(chart_meta.get('playlist_path'), 'Dojo/Second Dan/HLS/dojo.t3u8')
+        self.assertEqual(
+            chart_meta.get('playlist_url'),
+            '/songs/Dojo/Second Dan/HLS/dojo.t3u8',
+        )
         segments_meta = chart_meta.get('segments') or []
         self.assertTrue(segments_meta)
 

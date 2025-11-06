@@ -5579,13 +5579,6 @@ class SongScanner:
         combined_hash = md5_text("|".join(sorted(record.tja_hash for record in records)))
         combined_fingerprint = md5_text("|".join(sorted(record.fingerprint for record in records)))
 
-        playlist_course_present = any(
-            isinstance(entry.get('chart_data'), Mapping)
-            and isinstance(entry['chart_data'].get('meta'), Mapping)
-            and entry['chart_data']['meta'].get('is_playlist_course')
-            for entry in charts_payload
-        )
-
         title_lang = {
             'ja': base.title_ja or base.title,
             'en': None,
@@ -5601,7 +5594,7 @@ class SongScanner:
             'ko': None,
         }
 
-        enabled = bool(audio_url) or playlist_course_present
+        enabled = bool(audio_url)
 
         primary_chart = _select_primary_chart_entry(charts_payload)
         primary_course = ""
@@ -7398,7 +7391,6 @@ class SongScanner:
                         playlist_relative is not None
                         and playlist_path is not None
                         and playlist_url
-                        and not has_special_mode
                     ):
                         audio_url = playlist_url
                         music_type = playlist_path.suffix.lower().lstrip('.')

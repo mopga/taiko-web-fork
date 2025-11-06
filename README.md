@@ -128,12 +128,16 @@ playlist the exported chart entries include additional metadata:
 - `meta.playlist_path` – relative filesystem path (POSIX-style) to the detected
   playlist within the `songs/` directory.
 - `meta.playlist_url` – HTTP URL for the playlist file under `songs_baseurl`.
+- `audio_url` (top-level as well as `paths.audio_url`) – continues to point to
+  the same playlist URL so the web client can keep streaming the HLS manifest
+  exactly as before.
 
 Each aggregated chart also exposes `meta.segments` with per-segment timing,
-source chart paths, and WAVE filenames. The desktop front-end uses this
-structure to fetch `/api/tower/chart` and `/api/dan/chart`, then sequentially
-loads the segment audio so Tower/Dan courses play back in full without relying
-on a single playlist file in the `audio_url` field.
+source chart paths, and WAVE filenames. The desktop front-end calls
+`/api/tower/chart` or `/api/dan/chart` when `meta.is_playlist_course` is
+present, then sequentially loads and schedules the segment audio described by
+`meta.segments`. This keeps the desktop behaviour in sync with playlist
+aggregation while preserving HLS playback on the web via `audio_url`.
 
 ### Prereqs
 - Python 3.10+ (verified on 3.11/3.12)

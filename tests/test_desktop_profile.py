@@ -512,15 +512,15 @@ def test_desktop_uppercase_playlist_detection(tmp_path, monkeypatch):
     entries = list(song_store.find({}))
     tower_entry = next((doc for doc in entries if doc.get('assets', {}).get('playlist_path') == 'UpperCaseTower/segments.T3U8'), None)
     assert tower_entry is not None
-    paths = tower_entry.get('paths', {}) or {}
-    assert not paths.get('audio_url')
+    assets = tower_entry.get('assets', {}) or {}
+    assert assets.get('wave') == 'segments.T3U8'
 
     charts = tower_entry.get('charts') or []
     assert charts
     chart_meta = charts[0].get('chart_data', {}).get('meta', {})
     assert chart_meta.get('is_playlist_course') is True
     assert chart_meta.get('playlist_path') == 'UpperCaseTower/segments.T3U8'
-    assert chart_meta.get('playlist_url')
+    assert chart_meta.get('playlist_url') == '/songs/UpperCaseTower/segments.T3U8'
 
     client = app_module.app.test_client()
     response = client.get(
@@ -533,7 +533,7 @@ def test_desktop_uppercase_playlist_detection(tmp_path, monkeypatch):
     chart_data = payload["chart_data"]
     assert chart_data.get("meta", {}).get("is_playlist_course") is True
     assert chart_data.get("meta", {}).get("playlist_path") == "UpperCaseTower/segments.T3U8"
-    assert chart_data.get("meta", {}).get("playlist_url")
+    assert chart_data.get("meta", {}).get("playlist_url") == '/songs/UpperCaseTower/segments.T3U8'
     segments = chart_data.get("meta", {}).get("segments") or []
     assert segments
     assert segments[0].get("audio") == "tower_one.ogg"
@@ -1144,8 +1144,8 @@ def test_desktop_scanner_handles_dojo_and_tower(tmp_path, monkeypatch):
     dojo_files = dojo_assets.get('files') or {}
     assert isinstance(dojo_files, dict)
     assert any(
-        (isinstance(key, str) and key.endswith('.t3u8'))
-        or (isinstance(value, str) and value.endswith('.t3u8'))
+        (isinstance(key, str) and key.lower().endswith('.t3u8'))
+        or (isinstance(value, str) and value.lower().endswith('.t3u8'))
         for key, value in dojo_files.items()
     )
 
@@ -1157,8 +1157,8 @@ def test_desktop_scanner_handles_dojo_and_tower(tmp_path, monkeypatch):
     tower_files = tower_assets.get('files') or {}
     assert isinstance(tower_files, dict)
     assert any(
-        (isinstance(key, str) and key.endswith('.m3u8'))
-        or (isinstance(value, str) and value.endswith('.m3u8'))
+        (isinstance(key, str) and key.lower().endswith('.m3u8'))
+        or (isinstance(value, str) and value.lower().endswith('.m3u8'))
         for key, value in tower_files.items()
     )
 
