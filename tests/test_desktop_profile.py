@@ -397,6 +397,7 @@ def test_desktop_dojo_and_tower_chart_endpoints(tmp_path, monkeypatch):
         if (chart.get('mode') or '').strip().lower() == 'dandojo'
     )
     assert dojo_chart_entry.get('chart_data', {}).get('meta', {}).get('segments')
+    assert dojo_chart_entry.get('chart_mode') == 'dandojo'
     rank_token = str(
         dojo_chart_entry.get('display_course')
         or dojo_chart_entry.get('rank')
@@ -422,6 +423,7 @@ def test_desktop_dojo_and_tower_chart_endpoints(tmp_path, monkeypatch):
         if (chart.get('mode') or '').strip().lower() == 'tower'
     )
     assert tower_chart_entry.get('chart_data', {}).get('meta', {}).get('segments')
+    assert tower_chart_entry.get('chart_mode') == 'tower'
     course_token = str(
         tower_chart_entry.get('canonical_course')
         or tower_chart_entry.get('course')
@@ -441,18 +443,19 @@ def test_desktop_dojo_and_tower_chart_endpoints(tmp_path, monkeypatch):
     assert dan_chart.get("meta", {}).get("segments")
     assert dan_chart.get("meta", {}).get("playlist_path") == "DojoSample/dojo_segments.t3u8"
 
-    tower_response = client.get(
-        "/api/tower/chart",
-        query_string={"title": "Tower Sample", "course": course_token},
-    )
-    assert tower_response.status_code == 200
-    tower_payload = tower_response.get_json()
-    assert tower_payload["status"] == "ok"
-    tower_chart = tower_payload["chart_data"]
-    assert tower_chart["duration_ms"] > 0
-    assert tower_chart["notes"]
-    assert tower_chart.get("meta", {}).get("segments")
-    assert tower_chart.get("meta", {}).get("playlist_path") == "TowerSample/tower_segments.t3u8"
+    for query_course in {course_token, '1'}:
+        tower_response = client.get(
+            "/api/tower/chart",
+            query_string={"title": "Tower Sample", "course": query_course, "mode": "tower"},
+        )
+        assert tower_response.status_code == 200
+        tower_payload = tower_response.get_json()
+        assert tower_payload["status"] == "ok"
+        tower_chart = tower_payload["chart_data"]
+        assert tower_chart["duration_ms"] > 0
+        assert tower_chart["notes"]
+        assert tower_chart.get("meta", {}).get("segments")
+        assert tower_chart.get("meta", {}).get("playlist_path") == "TowerSample/tower_segments.t3u8"
 
 
 def test_desktop_uppercase_playlist_detection(tmp_path, monkeypatch):

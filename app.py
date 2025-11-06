@@ -52,6 +52,12 @@ from flask_wtf.csrf import CSRFProtect, generate_csrf, CSRFError
 from ffmpy import FFmpeg
 from redis import Redis
 
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 if TYPE_CHECKING:
     from pymongo import MongoClient
 

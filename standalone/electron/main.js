@@ -7,6 +7,8 @@ const net = require('net');
 const { spawn } = require('child_process');
 const treeKill = require('tree-kill');
 
+const DEV_APP_ROOT = path.resolve(__dirname, '..', '..');
+
 const APP_ID = 'com.taikoweb.desktop';
 const DEFAULT_PORT = 8000;
 const HEALTH_TIMEOUT_MS = 30_000;
@@ -32,6 +34,35 @@ let lastStatusPayload = {
   songsPath: selectedSongsPath,
   errorMessage: null,
 };
+
+function getAppRoot() {
+  if (app.isPackaged) {
+    return path.dirname(process.execPath);
+  }
+  return DEV_APP_ROOT;
+}
+
+function getSongsOverridePath() {
+  if (!selectedSongsPath) {
+    return null;
+  }
+  if (!songsLinkPath) {
+    return selectedSongsPath;
+  }
+  const normalizedSelected = path.normalize(selectedSongsPath);
+  const normalizedLink = path.normalize(songsLinkPath);
+  if (normalizedSelected === normalizedLink) {
+    return null;
+  }
+  try {
+    if (!fs.existsSync(normalizedSelected)) {
+      return null;
+    }
+  } catch (error) {
+    return null;
+  }
+  return normalizedSelected;
+}
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -73,7 +104,10 @@ async function chooseSongsDirectory() {
     const selectedPath = result.filePaths[0];
     const appliedPath = applySongsDirectory(selectedPath, info);
     updateStatus(`Папка песен: ${appliedPath}`);
-    if (backendReady && backendUrl) {
+    const shouldRestart = backendProcess !== null || backendReady || starting;
+    if (shouldRestart) {
+      await restartBackend('songs-dir-change');
+    } else if (backendReady && backendUrl) {
       await runSongsScan();
     }
     return { canceled: false, path: appliedPath };
@@ -374,14 +408,25 @@ async function resolvePort() {
 }
 
 function spawnBackend(executable, workingDir, dataDir, port) {
+  const currentSongsPath = getCurrentSongsPath();
+  const overrideSongsDir = getSongsOverridePath();
+
   const env = {
     ...process.env,
     RUN_PROFILE: 'desktop',
     PORT: String(port),
     DATA_DIR: dataDir,
-    SONGS_DIR: selectedSongsPath ?? '',
+    SONGS_DIR: overrideSongsDir ?? currentSongsPath ?? '',
     LOG_LEVEL: process.env.LOG_LEVEL ?? 'info',
+    TAIKO_APP_ROOT: getAppRoot(),
+    PYTHONIOENCODING: 'utf-8',
   };
+
+  if (overrideSongsDir) {
+    env.TAIKO_SONGS_DIR = overrideSongsDir;
+  } else {
+    delete env.TAIKO_SONGS_DIR;
+  }
 
   const args = ['--host', '127.0.0.1', '--port', String(port)];
   const captureLogs = true; // always capture to file; forward to console in dev
@@ -900,5 +945,25 @@ function stopBackend() {
   emitStatus();
 
   return gracefulShutdown(child);
+}
+
+async function restartBackend(reason = 'manual') {
+  try {
+    updateStatus('Перезапускаем сервер…');
+  } catch (error) {
+    // ignore status update failures during shutdown
+  }
+
+  await stopBackend();
+
+  const waitIntervalMs = 100;
+  const maxWaitMs = 5_000;
+  let waited = 0;
+  while (starting && waited < maxWaitMs) {
+    await delay(waitIntervalMs);
+    waited += waitIntervalMs;
+  }
+
+  startBackendFlow();
 }
 

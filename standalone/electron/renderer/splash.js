@@ -9,21 +9,26 @@
   const mascotElement = document.getElementById('mascot');
 
   function setAssetImages() {
+    const fallbackBackground = new URL('../assets/launcher/title-screen.png', window.location.href).href;
+    const fallbackMascot = new URL('../assets/launcher/dancing-don.gif', window.location.href).href;
+
     if (splashElement) {
-      splashElement.style.backgroundImage = "url('../assets/launcher/title-screen.png')";
+      splashElement.style.backgroundImage = `url('${fallbackBackground}')`;
     }
     if (mascotElement) {
-      mascotElement.src = '../assets/launcher/dancing-don.gif';
+      mascotElement.src = fallbackMascot;
     }
+
     if (!window.desktop || typeof window.desktop.getAssetUrl !== 'function') {
       return;
     }
-    const backgroundUrl = window.desktop.getAssetUrl('launcher/title-screen.png');
+
+    const backgroundUrl = window.desktop.getAssetUrl('launcher', 'title-screen.png');
     if (backgroundUrl && splashElement) {
       splashElement.style.backgroundImage = `url('${backgroundUrl}')`;
     }
 
-    const mascotUrl = window.desktop.getAssetUrl('launcher/dancing-don.gif');
+    const mascotUrl = window.desktop.getAssetUrl('launcher', 'dancing-don.gif');
     if (mascotUrl && mascotElement) {
       mascotElement.src = mascotUrl;
     }

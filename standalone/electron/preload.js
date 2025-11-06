@@ -22,15 +22,41 @@ function onStatusUpdate(callback) {
   };
 }
 
-function resolveAssetPath(relativePath) {
-  if (typeof relativePath !== 'string' || relativePath.length === 0) {
+function resolveAssetPath(...segments) {
+  const parts = [];
+
+  const pushSegment = (segment) => {
+    if (typeof segment !== 'string') {
+      return;
+    }
+    const token = segment.trim();
+    if (token.length > 0) {
+      parts.push(token);
+    }
+  };
+
+  const flatten = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(flatten);
+      return;
+    }
+    pushSegment(value);
+  };
+
+  segments.forEach(flatten);
+
+  if (parts.length === 0) {
     return null;
   }
-  return path.join(assetsBase, relativePath);
+
+  return path.join(assetsBase, ...parts);
 }
 
-function getAssetUrl(relativePath) {
-  const assetPath = resolveAssetPath(relativePath);
+function getAssetUrl(primary, ...rest) {
+  const assetPath =
+    rest.length === 0 && typeof primary === 'string' && primary.includes('/')
+      ? resolveAssetPath(primary.split(/[\\/]+/))
+      : resolveAssetPath(primary, rest);
   if (!assetPath) {
     return null;
   }

@@ -2,7 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from typing import Mapping, Optional, Sequence
+
+_NUMERIC_ALIASES = {
+    "easy": {"5"},
+    "normal": {"4"},
+    "hard": {"3"},
+    "oni": {"1"},
+    "ura": {"2"},
+}
+
+_SPECIAL_ALIASES = {
+    "ama-kuchi": {"oni", "1"},
+    "amakuchi": {"oni", "1"},
+    "kara-kuchi": {"ura", "2"},
+    "karakuchi": {"ura", "2"},
+}
 
 
 def _canonical_mode_token(mode: object) -> str:
@@ -14,20 +30,60 @@ def _canonical_mode_token(mode: object) -> str:
     return token
 
 
+def _extend_aliases(seed: str, destination: set[str]) -> None:
+    queue = [seed]
+    seen: set[str] = set()
+
+    while queue:
+        token = queue.pop(0)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        destination.add(token)
+
+        aliases: set[str] = set()
+        aliases.update(_NUMERIC_ALIASES.get(token, set()))
+        aliases.update(_SPECIAL_ALIASES.get(token, set()))
+
+        compact = re.sub(r"[\s_\-]+", "", token)
+        if compact and compact not in seen:
+            aliases.add(compact)
+
+        digit_aliases = {match.lstrip('0') or '0' for match in re.findall(r"\d+", token)}
+        aliases.update(digit_aliases)
+
+        for alias in aliases:
+            if not alias:
+                continue
+            normalised = alias.strip().casefold()
+            if normalised and normalised not in seen:
+                queue.append(normalised)
+
+
 def normalise_course_tokens(chart: Mapping[str, object]) -> set[str]:
     tokens: set[str] = set()
+
+    def _queue_token(raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        cleaned = raw.strip()
+        if not cleaned:
+            return
+        _extend_aliases(cleaned.casefold(), tokens)
+
     for key in ("course", "canonical_course", "display_course", "raw_course"):
-        value = chart.get(key)
-        if isinstance(value, str) and value:
-            tokens.add(value.strip().casefold())
-    mode_value = _canonical_mode_token(chart.get("mode"))
+        _queue_token(chart.get(key))
+
+    mode_value = _canonical_mode_token(chart.get("chart_mode") or chart.get("mode"))
     if mode_value:
-        tokens.add(mode_value)
+        _extend_aliases(mode_value, tokens)
+
     rank_value = chart.get("rank")
     if isinstance(rank_value, str) and rank_value.strip():
-        tokens.add(rank_value.strip().casefold())
+        _queue_token(rank_value)
     elif isinstance(rank_value, (int, float)):
-        tokens.add(str(rank_value).strip().casefold())
+        _queue_token(str(rank_value))
+
     return {token for token in tokens if token}
 
 
@@ -58,7 +114,7 @@ def select_best_chart(
     }
 
     def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int, int]:
-        mode_value = _canonical_mode_token(chart.get("mode"))
+        mode_value = _canonical_mode_token(chart.get("chart_mode") or chart.get("mode"))
         mode_priority = prefer_mode_order.get(mode_value, len(prefer_mode_tokens))
 
         score = 0
