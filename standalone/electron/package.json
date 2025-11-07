@@ -20,6 +20,7 @@
     "appId": "com.taikoweb.desktop",
     "productName": "Taiko no Desk",
     "asar": true,
+    "artifactName": "taiko-no-desk-${version}-${os}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -67,7 +68,7 @@
         }
       ],
       "executableName": "TaikoNoDesk",
-      "artifactName": "Taiko no Desk-${version}.${ext}",
+      "artifactName": "taiko-no-desk-${version}-${os}.${ext}",
       "publisherName": "Taiko Web"
     },
     "mac": {
@@ -77,7 +78,7 @@
         { "target": "dmg" },
         { "target": "zip" }
       ],
-      "artifactName": "Taiko no Desk-${version}.${ext}"
+      "artifactName": "taiko-no-desk-${version}-${os}.${ext}"
     }
   },
   "devDependencies": {

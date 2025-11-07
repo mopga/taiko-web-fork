@@ -3108,6 +3108,36 @@ def route_api_modes():
     _MODES_MANIFEST_CACHE['expires_at'] = now + ttl_seconds
     LOGGER.info('modes-manifest: count=%d', len(manifest.get('modes', [])))
     return jsonify(manifest)
+def _extract_playlist_path(chart: Mapping[str, object]) -> Optional[str]:
+    if not isinstance(chart, Mapping):
+        return None
+
+    def _normalise_playlist(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            token = value.strip()
+            if token:
+                return token
+        return None
+
+    meta_candidates: list[Mapping[str, object]] = []
+    chart_data = chart.get('chart_data')
+    if isinstance(chart_data, Mapping):
+        meta_payload = chart_data.get('meta')
+        if isinstance(meta_payload, Mapping):
+            meta_candidates.append(meta_payload)
+    chart_meta = chart.get('meta')
+    if isinstance(chart_meta, Mapping):
+        meta_candidates.append(chart_meta)
+    assets_meta = chart.get('assets')
+    if isinstance(assets_meta, Mapping):
+        meta_candidates.append(assets_meta)
+
+    for candidate in meta_candidates:
+        playlist_value = candidate.get('playlist_path') or candidate.get('playlist')
+        playlist_path = _normalise_playlist(playlist_value)
+        if playlist_path:
+            return playlist_path
+    return None
 
 
 @app.route(basedir + 'api/tower/chart')
@@ -3164,6 +3194,24 @@ def route_api_tower_chart():
             selected_song = song
             best_chart = chart
             break
+
+    if (
+        best_chart is not None
+        and isinstance(best_chart, Mapping)
+        and (best_chart.get('mode') or '').strip().casefold() in {'tower', 'dandojo'}
+    ):
+        playlist_path = _extract_playlist_path(best_chart)
+        has_playlist = isinstance(playlist_path, str) and playlist_path.strip().lower().endswith('.t3u8')
+        if not has_playlist:
+            fallback_entry, fallback_song, fallback_chart = _attempt_selection(('standard',))
+            if fallback_entry and fallback_song and fallback_chart:
+                selected_entry = fallback_entry
+                selected_song = fallback_song
+                best_chart = fallback_chart
+            elif not selected_entry or not selected_song:
+                selected_entry = None
+                selected_song = None
+                best_chart = None
 
     if selected_entry is None or selected_song is None or best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404

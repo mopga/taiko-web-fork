@@ -9,14 +9,16 @@
   const mascotElement = document.getElementById('mascot');
 
   function setAssetImages() {
-    const getAssetUrl = window.desktop && typeof window.desktop.getAssetUrl === 'function'
-      ? window.desktop.getAssetUrl.bind(window.desktop)
+    const desktopApi = window.desktop;
+    const getAssetUrl = desktopApi && typeof desktopApi.getAssetUrl === 'function'
+      ? desktopApi.getAssetUrl.bind(desktopApi)
       : null;
 
     const backgroundUrl = getAssetUrl ? getAssetUrl('launcher', 'title-screen.png') : null;
     if (splashElement) {
       if (backgroundUrl) {
-        splashElement.style.backgroundImage = `url('${backgroundUrl}')`;
+        const safeBackgroundUrl = String(backgroundUrl).replace(/"/g, '\\"');
+        splashElement.style.backgroundImage = `url("${safeBackgroundUrl}")`;
       } else {
         splashElement.style.removeProperty('background-image');
       }
@@ -117,9 +119,24 @@
     });
   }
 
-  if (window.desktop && typeof window.desktop.onStatus === 'function') {
-    window.desktop.onStatus(updateStatus);
+  function refreshAssetImages(attempt = 0) {
+    setAssetImages();
+    const desktopReady = window.desktop && typeof window.desktop.getAssetUrl === 'function';
+    if (!desktopReady && attempt < 10) {
+      window.setTimeout(() => refreshAssetImages(attempt + 1), 250);
+    }
   }
 
-  setAssetImages();
+  if (window.desktop && typeof window.desktop.onStatus === 'function') {
+    window.desktop.onStatus((payload) => {
+      refreshAssetImages();
+      updateStatus(payload);
+    });
+  }
+
+  window.addEventListener('focus', () => {
+    setAssetImages();
+  });
+
+  refreshAssetImages();
 })();

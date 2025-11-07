@@ -85,7 +85,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: taiko-web-desktop-${{ steps.ver.outputs.version }}-windows
+          name: taiko-no-desk-${{ steps.ver.outputs.version }}-windows
           path: |
             standalone/electron/dist/*.exe
             standalone/electron/dist/*.zip
@@ -97,10 +97,49 @@ jobs:
         if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: taiko-web-desktop-${{ steps.ver.outputs.version }}-macos
+          name: taiko-no-desk-${{ steps.ver.outputs.version }}-macos
           path: |
             standalone/electron/dist/*.dmg
             standalone/electron/dist/*.zip
           if-no-files-found: warn
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' && github.ref_type == 'tag'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release payload
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find release-artifacts -type f \( -name 'taiko-no-desk-*.exe' -o -name 'taiko-no-desk-*.zip' -o -name 'taiko-no-desk-*.dmg' \) -print -exec cp {} release/ \;
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "RELEASE_NOTES.md is missing" >&2
+            exit 1
+          fi
+          cp RELEASE_NOTES.md release/RELEASE_NOTES.md
+          ls -al release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release/RELEASE_NOTES.md
+          files: |
+            release/taiko-no-desk-*.exe
+            release/taiko-no-desk-*.zip
+            release/taiko-no-desk-*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 
