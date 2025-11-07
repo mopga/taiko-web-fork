@@ -3207,6 +3207,8 @@ def route_api_tower_chart():
     prefer_modes = tuple(base_prefer_modes)
     candidates = _lookup_song_candidates_by_title(title, mode_filter='tower')
     if not candidates:
+        candidates = _lookup_song_candidates_by_title(title)
+    if not candidates:
         normalised_title = _normalize_chart_title_base(title)
         error_message = {
             'status': 'error',

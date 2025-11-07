@@ -540,6 +540,83 @@ class SongsApiTestCase(unittest.TestCase):
                 self.assertIsInstance(measures, list)
                 self.assertTrue(measures)
 
+    def test_tower_chart_falls_back_to_standard_candidates(self):
+        manifest_entries = [
+            {
+                '_id': 'tower-fallback',
+                'id': 'tower-fallback',
+                'title': 'Taiko Tower 8 Example',
+                'title_lc': 'taiko tower 8 example',
+                'charts': [
+                    {
+                        'mode': 'standard',
+                        'course': 'oni',
+                        'display_course': 'Example',
+                        'chart_data': {
+                            'duration_ms': 800,
+                            'measures': [
+                                {
+                                    'notes': [
+                                        {
+                                            'type': 'don',
+                                            'time': 0,
+                                        }
+                                    ]
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+        manifest_meta = {
+            '_id': '__meta__',
+            'manifest_checksum': 'tower-check',
+            'manifest_entry_checksum': 'tower-entry',
+            'songs_count_after': 1,
+        }
+        songs_docs = [
+            {
+                'scanner_stable_id': 'tower-fallback',
+                'id': 222,
+                'title': 'Taiko Tower 8 Example',
+                'charts': [
+                    {
+                        'mode': 'standard',
+                        'course': 'oni',
+                        'display_course': 'Example',
+                        'chart_data': {
+                            'duration_ms': 805,
+                            'measures': [
+                                {
+                                    'notes': [
+                                        {
+                                            'type': 'don',
+                                            'time': 0,
+                                        }
+                                    ]
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            response = self.client.get(
+                '/api/tower/chart?title=Taiko+Tower+8+Example&course=oni'
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload['status'], 'ok')
+            measures = payload['chart_data']['measures']
+            self.assertIsInstance(measures, list)
+            self.assertGreater(len(measures), 0)
+
+            miss = self.client.get('/api/tower/chart?title=Missing+Tower&course=oni')
+            self.assertEqual(miss.status_code, 404)
+
     def test_dan_chart_lookup_and_caching_desktop(self):
         manifest_entries = [
             {
