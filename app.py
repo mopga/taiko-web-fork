@@ -915,6 +915,13 @@ def _casefold_chart_title(value: str) -> str:
     return _normalize_chart_title_base(value).casefold()
 
 
+def _dash_normalize_chart_title(value: str) -> str:
+    base = _normalize_chart_title_base(value)
+    casefolded = base.casefold()
+    collapsed = re.sub(r'[-_\s]+', '-', casefolded)
+    return collapsed.strip('-')
+
+
 def _loose_chart_title(value: str) -> str:
     base = _normalize_chart_title_base(value)
     stripped = ''.join(
@@ -1005,6 +1012,7 @@ def _match_entry_by_title(
     entry: Mapping[str, object],
     target_casefold: str,
     target_loose: str,
+    target_dash: str,
 ) -> Optional[int]:
     best_rank: Optional[int] = None
     for value, source in _iter_song_title_candidates(entry):
@@ -1016,6 +1024,12 @@ def _match_entry_by_title(
                 if rank == 0:
                     break
             continue
+        dash_normalized = _dash_normalize_chart_title(value)
+        if target_dash and dash_normalized and dash_normalized == target_dash:
+            rank = 1 if 'alias' not in source else 2
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+            continue
         loose_value = _loose_chart_title(value)
         if target_loose and loose_value and loose_value == target_loose:
             rank = 2 if 'alias' not in source else 3
@@ -1026,6 +1040,8 @@ def _match_entry_by_title(
 
 def _lookup_song_candidates_by_title(
     title: str,
+    *,
+    mode_filter: Optional[str] = None,
 ) -> list[tuple[int, dict[str, object], dict[str, object]]]:
     store = _get_manifest_store()
     if store is None:
@@ -1036,8 +1052,11 @@ def _lookup_song_candidates_by_title(
         app.logger.debug('Failed to enumerate songs manifest entries for title lookup', exc_info=True)
         cursor = []
 
-    target_casefold = _casefold_chart_title(title)
-    target_loose = _loose_chart_title(title)
+    title_value = (title or '').strip()
+    target_casefold = _casefold_chart_title(title_value)
+    target_loose = _loose_chart_title(title_value)
+    target_dash = _dash_normalize_chart_title(title_value)
+    mode_token = _normalize_chart_mode(mode_filter) if mode_filter else ''
     matches: list[tuple[int, dict[str, object], dict[str, object]]] = []
     seen_ids: set[str] = set()
 
@@ -1045,7 +1064,9 @@ def _lookup_song_candidates_by_title(
         if not isinstance(raw_entry, Mapping):
             continue
         entry = dict(raw_entry)
-        rank = _match_entry_by_title(entry, target_casefold, target_loose)
+        if mode_token and not _entry_has_chart_mode(entry, mode_token):
+            continue
+        rank = _match_entry_by_title(entry, target_casefold, target_loose, target_dash)
         if rank is None:
             continue
         stable_id = entry.get('id') or entry.get('_id')
@@ -1078,6 +1099,8 @@ def _lookup_song_candidates_by_title(
                 )
         if song_doc is None:
             song_doc = entry
+        elif mode_token and not _entry_has_chart_mode(song_doc, mode_token):
+            continue
         matches.append((rank, entry, dict(song_doc)))
 
     matches.sort(
@@ -1109,6 +1132,31 @@ def _resolve_song_charts(
                 if isinstance(chart, Mapping):
                     charts.append(dict(chart))
     return charts
+
+
+def _normalize_chart_mode(mode: Optional[str]) -> str:
+    if not isinstance(mode, str):
+        return ''
+    token = mode.strip().casefold()
+    if token in {'dan', 'dojo'}:
+        return 'dandojo'
+    return token
+
+
+def _entry_has_chart_mode(entry: Mapping[str, object], mode_token: str) -> bool:
+    if not mode_token:
+        return True
+    charts_payload = entry.get('charts')
+    if isinstance(charts_payload, Sequence) and not isinstance(charts_payload, (str, bytes, bytearray)):
+        for chart in charts_payload:
+            if not isinstance(chart, Mapping):
+                continue
+            mode_value = _normalize_chart_mode(str(chart.get('mode') or ''))
+            if not mode_value:
+                mode_value = _normalize_chart_mode(str(chart.get('chart_mode') or ''))
+            if mode_value == mode_token:
+                return True
+    return False
 
 
 def _maybe_handle_desktop_etag(etag: Optional[str]) -> Optional[Response]:
@@ -3153,8 +3201,13 @@ def route_api_tower_chart():
     if mode_param in {'dan', 'dojo'}:
         mode_param = 'dandojo'
 
-    prefer_modes = (mode_param,) if mode_param else ('tower', 'dandojo')
-    candidates = _lookup_song_candidates_by_title(title)
+    base_prefer_modes: list[str] = ['tower', 'dandojo']
+    if mode_param and mode_param not in {'tower', 'dandojo'}:
+        base_prefer_modes.insert(0, mode_param)
+    prefer_modes = tuple(base_prefer_modes)
+    candidates = _lookup_song_candidates_by_title(title, mode_filter='tower')
+    if not candidates:
+        candidates = _lookup_song_candidates_by_title(title)
     if not candidates:
         normalised_title = _normalize_chart_title_base(title)
         error_message = {
@@ -3209,7 +3262,7 @@ def route_api_tower_chart():
         return True
 
     initial_modes = tuple(prefer_modes) if isinstance(prefer_modes, Sequence) else tuple()
-    initial_filter_modes: object = initial_modes or ('tower', 'dandojo')
+    initial_filter_modes: object = ('tower',)
 
     if not _set_selection(*_attempt_selection(initial_modes, initial_filter_modes)):
         if not _set_selection(*_attempt_selection((), None)):
@@ -3357,7 +3410,7 @@ def route_api_dan_chart():
     rank_param = rank_raw.casefold()
 
     prefer_modes = (mode_param,) if mode_param else ('dandojo',)
-    candidates = _lookup_song_candidates_by_title(title)
+    candidates = _lookup_song_candidates_by_title(title, mode_filter='dandojo')
     if not candidates:
         normalised_title = _normalize_chart_title_base(title)
         error_message = {

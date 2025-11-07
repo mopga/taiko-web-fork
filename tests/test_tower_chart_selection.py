@@ -189,8 +189,11 @@ def test_tower_chart_route_falls_back_to_standard_chart(monkeypatch, mode_query)
     candidate_entry = {'id': 'tower-song', 'title': 'Tower Song', 'charts': []}
     candidate_song = {'title': 'Tower Song', 'charts': [fallback_chart]}
 
-    def _fake_lookup(title):
+    def _fake_lookup(title, *, mode_filter=None):
         assert title
+        # Ensure the lookup receives the expected tower mode filter on the first attempt.
+        if mode_filter is not None:
+            assert mode_filter in {None, 'tower'}
         return [(0, candidate_entry, candidate_song)]
 
     def _fake_resolve(song, entry):
@@ -250,8 +253,10 @@ def test_tower_chart_route_prefers_standard_when_playlist_missing(monkeypatch):
     candidate_entry = {'id': 'tower-song', 'title': 'Tower Song'}
     candidate_song = {'title': 'Tower Song', 'charts': [tower_chart, standard_chart]}
 
-    def _fake_lookup(title):
+    def _fake_lookup(title, *, mode_filter=None):
         assert title
+        if mode_filter is not None:
+            assert mode_filter in {None, 'tower'}
         return [(0, candidate_entry, candidate_song)]
 
     def _fake_resolve(song, entry):

@@ -30,6 +30,11 @@ from songs_scanner import (
     parse_tja,
     RedisLeaderLock,
 )
+from tests._helpers import load_app_module
+from tests.test_app_songs_api import (
+    _ManifestCollection as _APITestManifestCollection,
+    _SongsCollection as _APITestSongsCollection,
+)
 
 
 class _DummyUpdateResult:
@@ -3231,6 +3236,99 @@ LEVEL:7
         self.assertEqual(chart_data.get('total_notes'), note_count)
         self.assertEqual(chart.get('total_notes'), note_count)
         self.assertGreater(chart_data.get('duration_ms', 0), 0)
+
+    def test_scanner_inserts_tower_without_audio_and_api_serves_chart(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        track_dir = songs_dir / "Taiko Tower 09"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        tja_path = track_dir / "Taiko Tower 9 Kara-kuchi.tja"
+        tja_path.write_text(
+            "\n".join(
+                [
+                    "TITLE:Taiko Tower 9 Kara-kuchi",
+                    "COURSE:Tower",
+                    "LEVEL:9",
+                    "WAVE:tower.ogg",
+                    "BPM:150",
+                    "#START",
+                    "11110000,",
+                    "#END",
+                ]
+            ),
+            encoding='utf-8',
+        )
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        mode_summary = summary.get('inserted_by_mode') or {}
+        self.assertEqual(mode_summary.get('tower'), 1)
+        self.assertEqual(len(db.songs.inserted), 1)
+
+        inserted = db.songs.inserted[0]
+        self.assertTrue(inserted.get('enabled'))
+        charts = inserted.get('charts', [])
+        self.assertEqual(len(charts), 1)
+        chart = charts[0]
+        self.assertEqual(chart.get('mode'), 'tower')
+        chart_data = chart.get('chart_data') or {}
+        measures = chart_data.get('measures')
+        self.assertIsInstance(measures, list)
+        self.assertTrue(measures)
+        self.assertIn('missing-audio', inserted.get('import_issues', []))
+
+        taiko_app = load_app_module()
+        client = taiko_app.app.test_client()
+
+        manifest_entries = [
+            {
+                '_id': inserted.get('scanner_stable_id'),
+                'id': inserted.get('scanner_stable_id'),
+                'title': inserted.get('title'),
+                'title_lc': (inserted.get('title') or '').casefold(),
+                'charts': [dict(chart)],
+            }
+        ]
+        manifest_meta = {
+            '_id': '__meta__',
+            'manifest_checksum': 'tower-test',
+            'manifest_entry_checksum': 'tower-entry',
+            'songs_count_after': 1,
+        }
+        songs_docs = [dict(inserted)]
+
+        queries = [
+            '/api/tower/chart?title=Taiko+Tower+9+Kara-kuchi&course=oni',
+            '/api/tower/chart?title=Taiko+Tower+9+Kara%20kuchi&course=oni',
+            '/api/tower/chart?title=Taiko+Tower+9+Kara-kuchi&course=oni&mode=tower',
+        ]
+
+        manifest_patch = mock.patch.multiple(
+            taiko_app,
+            _get_manifest_store=mock.Mock(
+                return_value=_APITestManifestCollection(manifest_entries, manifest_meta)
+            ),
+            db=mock.Mock(songs=_APITestSongsCollection(songs_docs)),
+        )
+
+        with manifest_patch, mock.patch.object(taiko_app, 'CATALOG_SOURCE', 'mongo'):
+            for url in queries:
+                response = client.get(url)
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                chart_payload = payload.get('chart_data', {})
+                result_measures = chart_payload.get('measures')
+                self.assertIsInstance(result_measures, list)
+                self.assertTrue(result_measures)
 
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
         db = _DummyDB()
