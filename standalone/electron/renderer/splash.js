@@ -8,121 +8,24 @@
   const splashElement = document.querySelector('.splash');
   const mascotElement = document.getElementById('mascot');
 
-  function resolveAssetSegments(values) {
-    const parts = [];
-    const push = (value) => {
-      if (typeof value !== 'string') {
-        return;
-      }
-      const token = value.trim();
-      if (token) {
-        parts.push(token);
-      }
-    };
-    const flatten = (segment) => {
-      if (Array.isArray(segment)) {
-        segment.forEach(flatten);
-        return;
-      }
-      push(segment);
-    };
-    values.forEach(flatten);
-    return parts;
-  }
-
-  function encodeAssetPath(segments) {
-    return segments
-      .map((segment) =>
-        segment
-          .split('/')
-          .map((token) => encodeURIComponent(token))
-          .join('/')
-      )
-      .join('/');
-  }
-
-  function buildUrlFromBase(baseUrl, segments) {
-    if (!baseUrl || typeof baseUrl !== 'string') {
+  function resolveAssetUrl(...segments) {
+    const desktopApi = window.desktop;
+    if (!desktopApi || typeof desktopApi.getAssetUrl !== 'function') {
       return null;
     }
     try {
-      const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-      const encodedPath = encodeAssetPath(segments);
-      const candidate = new URL(encodedPath, normalizedBase);
-      return candidate.href;
+      const url = desktopApi.getAssetUrl(...segments);
+      return typeof url === 'string' && url.length > 0 ? url : null;
     } catch (error) {
       return null;
     }
-  }
-
-  function fallbackAssetUrl(segments) {
-    const desktopApi = window.desktop;
-    const debugAssets = desktopApi && desktopApi.debugAssets;
-    if (!debugAssets) {
-      return null;
-    }
-
-    const attempted = new Set();
-    const attemptBaseUrl = (baseUrl) => {
-      if (!baseUrl || attempted.has(baseUrl)) {
-        return null;
-      }
-      attempted.add(baseUrl);
-      return buildUrlFromBase(baseUrl, segments);
-    };
-
-    if (Array.isArray(debugAssets.bases)) {
-      for (const base of debugAssets.bases) {
-        if (!base || typeof base.url !== 'string') {
-          continue;
-        }
-        const result = attemptBaseUrl(base.url);
-        if (result) {
-          return result;
-        }
-      }
-    }
-
-    if (typeof debugAssets.activeBaseUrl === 'string') {
-      const activeResult = attemptBaseUrl(debugAssets.activeBaseUrl);
-      if (activeResult) {
-        return activeResult;
-      }
-    }
-
-    return null;
-  }
-
-  function resolveAssetUrl(...segments) {
-    const parts = resolveAssetSegments(segments);
-    if (!parts.length) {
-      return null;
-    }
-    const desktopApi = window.desktop;
-    const getAssetUrl =
-      desktopApi && typeof desktopApi.getAssetUrl === 'function'
-        ? desktopApi.getAssetUrl.bind(desktopApi)
-        : null;
-    let assetUrl = null;
-    if (getAssetUrl) {
-      try {
-        assetUrl = getAssetUrl(...parts);
-      } catch (error) {
-        assetUrl = null;
-      }
-    }
-    if (assetUrl) {
-      return assetUrl;
-    }
-    return fallbackAssetUrl(parts);
   }
 
   function setAssetImages() {
     const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
     if (splashElement) {
       if (backgroundUrl) {
-        const safeBackgroundUrl = String(backgroundUrl).replace(/"/g, '\\"');
-        splashElement.style.backgroundImage = `url("${safeBackgroundUrl}")`;
+        splashElement.style.backgroundImage = `url("${backgroundUrl}")`;
       } else {
         splashElement.style.removeProperty('background-image');
       }

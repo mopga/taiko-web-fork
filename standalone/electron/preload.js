@@ -128,7 +128,14 @@ function getAssetUrl(primary, ...rest) {
   if (!assetPath) {
     return null;
   }
-  return pathToFileURL(assetPath).href;
+  try {
+    if (fs.existsSync(assetPath)) {
+      return pathToFileURL(assetPath).href;
+    }
+  } catch (error) {
+    return null;
+  }
+  return null;
 }
 
 const debugAssets = Object.freeze({
