@@ -8,26 +8,47 @@ const packagedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'assets')
     : null;
+const unpackedAssetsBase =
+  process.resourcesPath && typeof process.resourcesPath === 'string'
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'assets')
+    : null;
 const devAssetsBase = path.join(__dirname, '..', 'assets');
 
 const assetBases = [];
+const assetBaseSet = new Set();
 
 const pushAssetBase = (kind, fsPath) => {
   if (!fsPath) {
     return;
   }
   const resolved = path.resolve(fsPath);
+  if (assetBaseSet.has(resolved)) {
+    return;
+  }
+  try {
+    if (!fs.existsSync(resolved)) {
+      return;
+    }
+  } catch (error) {
+    return;
+  }
   const entry = {
     kind,
     fsPath: resolved,
     url: pathToFileURL(resolved).href,
   };
   assetBases.push(entry);
+  assetBaseSet.add(resolved);
   return entry;
 };
 
-if (isPackaged && packagedAssetsBase) {
-  pushAssetBase('packaged', packagedAssetsBase);
+if (isPackaged) {
+  if (packagedAssetsBase) {
+    pushAssetBase('packaged', packagedAssetsBase);
+  }
+  if (unpackedAssetsBase) {
+    pushAssetBase('unpacked', unpackedAssetsBase);
+  }
 }
 
 if (!isPackaged || process.env.ELECTRON_DEV === '1' || assetBases.length === 0) {
