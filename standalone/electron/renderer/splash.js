@@ -30,32 +30,66 @@
     return parts;
   }
 
+  function encodeAssetPath(segments) {
+    return segments
+      .map((segment) =>
+        segment
+          .split('/')
+          .map((token) => encodeURIComponent(token))
+          .join('/')
+      )
+      .join('/');
+  }
+
+  function buildUrlFromBase(baseUrl, segments) {
+    if (!baseUrl || typeof baseUrl !== 'string') {
+      return null;
+    }
+    try {
+      const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+      const encodedPath = encodeAssetPath(segments);
+      const candidate = new URL(encodedPath, normalizedBase);
+      return candidate.href;
+    } catch (error) {
+      return null;
+    }
+  }
+
   function fallbackAssetUrl(segments) {
     const desktopApi = window.desktop;
     const debugAssets = desktopApi && desktopApi.debugAssets;
-    if (!debugAssets || !Array.isArray(debugAssets.bases)) {
+    if (!debugAssets) {
       return null;
     }
-    for (const base of debugAssets.bases) {
-      if (!base || typeof base.url !== 'string') {
-        continue;
+
+    const attempted = new Set();
+    const attemptBaseUrl = (baseUrl) => {
+      if (!baseUrl || attempted.has(baseUrl)) {
+        return null;
       }
-      try {
-        const baseUrl = base.url.endsWith('/') ? base.url : `${base.url}/`;
-        const encodedPath = segments
-          .map((segment) =>
-            segment
-              .split('/')
-              .map((token) => encodeURIComponent(token))
-              .join('/')
-          )
-          .join('/');
-        const candidate = new URL(encodedPath, baseUrl);
-        return candidate.href;
-      } catch (error) {
-        // Ignore and continue to the next base candidate.
+      attempted.add(baseUrl);
+      return buildUrlFromBase(baseUrl, segments);
+    };
+
+    if (Array.isArray(debugAssets.bases)) {
+      for (const base of debugAssets.bases) {
+        if (!base || typeof base.url !== 'string') {
+          continue;
+        }
+        const result = attemptBaseUrl(base.url);
+        if (result) {
+          return result;
+        }
       }
     }
+
+    if (typeof debugAssets.activeBaseUrl === 'string') {
+      const activeResult = attemptBaseUrl(debugAssets.activeBaseUrl);
+      if (activeResult) {
+        return activeResult;
+      }
+    }
+
     return null;
   }
 
@@ -69,11 +103,16 @@
       desktopApi && typeof desktopApi.getAssetUrl === 'function'
         ? desktopApi.getAssetUrl.bind(desktopApi)
         : null;
+    let assetUrl = null;
     if (getAssetUrl) {
-      const assetUrl = getAssetUrl(...parts);
-      if (assetUrl) {
-        return assetUrl;
+      try {
+        assetUrl = getAssetUrl(...parts);
+      } catch (error) {
+        assetUrl = null;
       }
+    }
+    if (assetUrl) {
+      return assetUrl;
     }
     return fallbackAssetUrl(parts);
   }
@@ -187,7 +226,7 @@
   function refreshAssetImages(attempt = 0) {
     setAssetImages();
     const desktopReady = window.desktop && typeof window.desktop.getAssetUrl === 'function';
-    if (!desktopReady && attempt < 10) {
+    if (!desktopReady && attempt < 40) {
       window.setTimeout(() => refreshAssetImages(attempt + 1), 250);
     }
   }

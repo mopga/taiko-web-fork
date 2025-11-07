@@ -57,6 +57,12 @@
 #ifnexist SOURCE_DIR + "\\" + BACKEND_EXE
   #error "Backend executable missing at " + SOURCE_DIR + "\\" + BACKEND_EXE
 #endif
+#ifnexist SOURCE_DIR + "\\resources\\assets\\launcher\\title-screen.png"
+  #error "Launcher background missing at " + SOURCE_DIR + "\\resources\\assets\\launcher\\title-screen.png"
+#endif
+#ifnexist SOURCE_DIR + "\\resources\\assets\\launcher\\dancing-don.gif"
+  #error "Launcher mascot missing at " + SOURCE_DIR + "\\resources\\assets\\launcher\\dancing-don.gif"
+#endif
 
 [Setup]
 AppId={#APP_ID}
