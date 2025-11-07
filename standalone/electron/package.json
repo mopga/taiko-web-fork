@@ -11,15 +11,17 @@
     "dev": "cross-env ELECTRON_DEV=1 electron .",
     "start": "electron .",
     "lint": "eslint .",
+    "set-version": "node ./scripts/set-version.js",
     "build:backend": "python ../packaging/build_backend.py",
-    "build:desktop": "npm run build:backend && electron-builder -mwl",
-    "build:win": "npm run build:backend && electron-builder --win nsis zip",
-    "build:mac": "npm run build:backend && electron-builder --mac dmg zip"
+    "build:desktop": "npm run build:backend && electron-builder -mwl --publish always",
+    "build:win": "npm run build:backend && electron-builder --win nsis zip --publish always",
+    "build:mac": "npm run build:backend && electron-builder --mac dmg zip --publish always"
   },
   "build": {
     "appId": "com.taikoweb.desktop",
     "productName": "Taiko no Desk",
     "asar": true,
+    "artifactName": "taiko-no-desk-${version}-${os}.${ext}",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -67,7 +69,7 @@
         }
       ],
       "executableName": "TaikoNoDesk",
-      "artifactName": "Taiko no Desk-${version}.${ext}",
+      "artifactName": "taiko-no-desk-${version}-${os}.${ext}",
       "publisherName": "Taiko Web"
     },
     "mac": {
@@ -77,7 +79,7 @@
         { "target": "dmg" },
         { "target": "zip" }
       ],
-      "artifactName": "Taiko no Desk-${version}.${ext}"
+      "artifactName": "taiko-no-desk-${version}-${os}.${ext}"
     }
   },
   "devDependencies": {

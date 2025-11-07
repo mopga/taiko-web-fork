@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Mapping, Optional, Sequence
+from collections.abc import Sequence
+from typing import Mapping, Optional
 
 _NUMERIC_ALIASES = {
     "easy": {"5"},
@@ -87,10 +88,35 @@ def normalise_course_tokens(chart: Mapping[str, object]) -> set[str]:
     return {token for token in tokens if token}
 
 
+def _normalise_filter_tokens(filter_mode: object) -> tuple[str, ...]:
+    tokens: list[str] = []
+
+    def _append_token(raw: object) -> None:
+        token = _canonical_mode_token(raw)
+        if token and token not in tokens:
+            tokens.append(token)
+
+    def _queue(value: object) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            _append_token(value)
+            return
+        if isinstance(value, Sequence):
+            for item in value:
+                _queue(item)
+            return
+        _append_token(str(value))
+
+    _queue(filter_mode)
+    return tuple(tokens)
+
+
 def select_best_chart(
     charts: Optional[Sequence[Mapping[str, object]]],
     course: Optional[str] = None,
     prefer_modes: Sequence[object] = ("tower", "dandojo"),
+    filter_mode: object = None,
 ) -> Optional[Mapping[str, object]]:
     """Return the preferred chart for the provided course token."""
 
@@ -106,6 +132,8 @@ def select_best_chart(
         if token
     )
 
+    filter_mode_tokens = _normalise_filter_tokens(filter_mode)
+
     best_chart: Optional[Mapping[str, object]] = None
     best_priority: Optional[tuple[int, int, int]] = None
 
@@ -113,8 +141,12 @@ def select_best_chart(
         token: idx for idx, token in enumerate(prefer_mode_tokens)
     }
 
-    def _score_chart(index: int, chart: Mapping[str, object]) -> tuple[int, int, int]:
-        mode_value = _canonical_mode_token(chart.get("chart_mode") or chart.get("mode"))
+    def _score_chart(
+        index: int, chart: Mapping[str, object], mode_value: Optional[str] = None
+    ) -> tuple[int, int, int]:
+        mode_value = mode_value or _canonical_mode_token(
+            chart.get("chart_mode") or chart.get("mode")
+        )
         mode_priority = prefer_mode_order.get(mode_value, len(prefer_mode_tokens))
 
         score = 0
@@ -147,14 +179,21 @@ def select_best_chart(
                 continue
             filtered.append((index, chart))
 
-    candidates = filtered if filtered else [
-        (index, chart)
-        for index, chart in enumerate(charts)
-        if isinstance(chart, Mapping)
-    ]
+    candidates = (
+        filtered
+        if filtered
+        else [
+            (index, chart)
+            for index, chart in enumerate(charts)
+            if isinstance(chart, Mapping)
+        ]
+    )
 
     for index, chart in candidates:
-        priority = _score_chart(index, chart)
+        mode_value = _canonical_mode_token(chart.get("chart_mode") or chart.get("mode"))
+        if filter_mode_tokens and mode_value not in filter_mode_tokens:
+            continue
+        priority = _score_chart(index, chart, mode_value)
         if best_priority is None or priority < best_priority:
             best_priority = priority
             best_chart = chart
