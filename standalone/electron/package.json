@@ -4,6 +4,10 @@
   "description": "Electron launcher for Taiko Web with bundled backend server",
   "author": "Taiko Web Contributors",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mopga/taiko-web-fork"
+  },
   "private": true,
   "main": "main.js",
   "productName": "Taiko no Desk",
@@ -22,6 +26,13 @@
     "productName": "Taiko no Desk",
     "asar": true,
     "artifactName": "taiko-no-desk-${version}-${os}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "mopga",
+        "repo": "taiko-web-fork"
+      }
+    ],
     "directories": {
       "output": "dist",
       "buildResources": "build"
