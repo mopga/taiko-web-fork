@@ -889,11 +889,33 @@ class TestSongsScanner(unittest.TestCase):
 
         self.assertEqual(len(parsed.courses), 1)
         chart = parsed.courses[0]
-        self.assertEqual(chart.total_notes, 6)
-        self.assertEqual(chart.hit_notes, 6)
-        self.assertEqual(chart.measures, 2)
+        self.assertEqual(chart.total_notes, 3)
+        self.assertEqual(chart.hit_notes, 3)
+        self.assertEqual(chart.measures, 1)
         self.assertEqual(chart.unknown_directives, 0)
         self.assertEqual(parsed.unknown_directives, 0)
+
+    def test_parse_tja_tower_branch_prefers_master_path(self):
+        fixture_path = Path(__file__).parent / "data" / "tower" / "Taiko Tower 2 Kara-kuchi.tja"
+        parsed = parse_tja(fixture_path)
+
+        self.assertIn("oni", parsed.charts)
+        chart = parsed.charts["oni"]
+        self.assertEqual(chart.mode, "tower")
+        self.assertEqual(chart.canonical, "oni")
+
+        chart_data = chart.chart_data or {}
+        self.assertIsInstance(chart_data, dict)
+        self.assertEqual(chart_data.get('course'), 'oni')
+
+        measures = chart_data.get('measures')
+        self.assertIsInstance(measures, list)
+        self.assertTrue(measures)
+        note_count = sum(len(measure.get('notes', [])) for measure in measures if isinstance(measure, dict))
+        self.assertGreater(note_count, 0)
+        self.assertEqual(chart.total_notes, note_count)
+        self.assertEqual(chart_data.get('total_notes'), note_count)
+        self.assertGreater(chart_data.get('duration_ms', 0), 0)
 
     def test_parse_tja_dan_downcasts_to_standard_course(self):
         tmp_dir = Path(self._tmp_dir())
@@ -3170,6 +3192,45 @@ LEVEL:7
         self.assertGreater(chart['hit_notes'], 0)
         self.assertEqual(chart['total_notes'], chart['hit_notes'])
         self.assertTrue(chart.get('first_note_preview', '').startswith(('1110', '1011')))
+
+    def test_scanner_persists_chart_data_for_branching_tower(self):
+        tmp_dir = Path(self._tmp_dir())
+        songs_dir = tmp_dir / "songs"
+        track_dir = songs_dir / "Taiko Tower 02"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        fixture = Path(__file__).parent / "data" / "tower" / "Taiko Tower 2 Kara-kuchi.tja"
+        target_tja = track_dir / fixture.name
+        shutil.copy(fixture, target_tja)
+        (track_dir / "Taiko Tower 2 Kara-kuchi.mp3").write_bytes(b"tower-audio")
+
+        db = _DummyDB()
+        scanner = SongScanner(
+            db=db,
+            songs_dir=songs_dir,
+            songs_baseurl="/songs/",
+            ignore_globs=None,
+        )
+
+        summary = scanner.scan(full=True)
+
+        self.assertEqual(summary['inserted'], 1)
+        self.assertEqual(len(db.songs.inserted), 1)
+        inserted = db.songs.inserted[0]
+        self.assertEqual(len(inserted['charts']), 1)
+        chart = inserted['charts'][0]
+        self.assertEqual(chart.get('course'), 'oni')
+        self.assertEqual(chart.get('mode'), 'tower')
+        chart_data = chart.get('chart_data')
+        self.assertIsInstance(chart_data, dict)
+        measures = chart_data.get('measures')
+        self.assertIsInstance(measures, list)
+        self.assertTrue(measures)
+        note_count = sum(len(measure.get('notes', [])) for measure in measures if isinstance(measure, dict))
+        self.assertGreater(note_count, 0)
+        self.assertEqual(chart_data.get('total_notes'), note_count)
+        self.assertEqual(chart.get('total_notes'), note_count)
+        self.assertGreater(chart_data.get('duration_ms', 0), 0)
 
     def test_determine_group_key_prefers_audio_hash_and_folder(self):
         db = _DummyDB()

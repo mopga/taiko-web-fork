@@ -1,0 +1,30 @@
+// Sample Tower chart fixture with branching
+TITLE:Taiko Tower 2 Kara-kuchi
+SUBTITLE:--Metronome Track 2
+BPM:150
+WAVE:Taiko Tower 2 Kara-kuchi.mp3
+OFFSET:-1.5
+DEMOSTART:4.0
+COURSE:Tower
+LEVEL:7
+SCOREINIT:3500
+SCOREDIFF:650
+
+#START
+#MEASURE 4/4
+#BRANCHSTART p,-2,-1
+#N
+0000,
+#BRANCHSWITCH
+#E
+1111,
+#BRANCHSWITCH
+#M
+1234,
+#SCROLL 1.5
+4321,
+#BRANCHEND
+#MEASURE 3/4
+#BPMCHANGE 160
+111,
+#END

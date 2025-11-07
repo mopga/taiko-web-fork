@@ -1591,6 +1591,9 @@ class _CourseParseState:
     active_long: Optional[Dict[str, object]] = None
     final_metrics: Optional[ChartMetrics] = None
     offset_applied: bool = False
+    branch_active: bool = False
+    branch_selection: Optional[str] = None
+    branch_current: Optional[str] = None
 
 
 def _clone_chart_data(chart: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -2188,6 +2191,29 @@ def _parse_tja_strict(
             course_states[id(course)] = state
         return state
 
+    def _resolve_branch_selection(course: CourseInfo, payload: str) -> str:
+        if course.mode == "tower":
+            return "M"
+        tokens = [token.strip().casefold() for token in payload.split(",") if token.strip()]
+        for token in tokens:
+            if token == "p":
+                return "N"
+            if token == "-2":
+                return "E"
+            if token == "-1":
+                return "M"
+        return "N"
+
+    def _branch_accepts_notes(course: CourseInfo) -> bool:
+        state = _state_for(course)
+        if not state.branch_active:
+            return True
+        selection = state.branch_selection or "N"
+        current = state.branch_current
+        if not current:
+            return False
+        return current.upper() == selection.upper()
+
     def _reset_measure_buffers(course: CourseInfo) -> None:
         state = _state_for(course)
         state.measure_tokens.clear()
@@ -2705,90 +2731,136 @@ def _parse_tja_strict(
                     active_course.branch = True
                     if directive.startswith("#BRANCHSTART"):
                         active_course.branch_sections.add("START")
+                        if parsing_notes and current_notes_course:
+                            state = _state_for(current_notes_course)
+                            if state.measure_tokens:
+                                _commit_pending_measure(current_notes_course)
+                            state.branch_active = True
+                            state.branch_selection = _resolve_branch_selection(
+                                current_notes_course, directive_payload
+                            )
+                            state.branch_current = None
+                            state.active_long = None
+                    elif directive == "#BRANCHSWITCH" and parsing_notes and current_notes_course:
+                        state = _state_for(current_notes_course)
+                        if state.branch_active:
+                            if _branch_accepts_notes(current_notes_course) and state.measure_tokens:
+                                _commit_pending_measure(current_notes_course)
+                            state.branch_current = None
+                            state.active_long = None
+                    elif directive == "#BRANCHEND" and parsing_notes and current_notes_course:
+                        state = _state_for(current_notes_course)
+                        if state.branch_active and _branch_accepts_notes(current_notes_course) and state.measure_tokens:
+                            _commit_pending_measure(current_notes_course)
+                        if state.branch_active:
+                            state.branch_active = False
+                            state.branch_current = None
+                            state.branch_selection = None
+                            state.active_long = None
                     handled_directive = True
                 elif directive in {"#N", "#E", "#M"}:
                     active_course.branch_sections.add(directive[1:])
+                    if parsing_notes and current_notes_course:
+                        state = _state_for(current_notes_course)
+                        if state.branch_active:
+                            if _branch_accepts_notes(current_notes_course) and state.measure_tokens:
+                                _commit_pending_measure(current_notes_course)
+                            state.branch_current = directive[1:]
+                            if _branch_accepts_notes(current_notes_course):
+                                _reset_measure_buffers(current_notes_course)
+                            else:
+                                state.measure_tokens.clear()
+                                state.pending_total_notes = 0
+                                state.pending_hit_notes = 0
+                                state.pending_has_notes = False
+                            state.active_long = None
                     handled_directive = True
             if parsing_notes and current_notes_course:
                 state = _state_for(current_notes_course)
                 if directive == "#NEXTSONG":
-                    _flush_pending_notes(current_notes_course)
-                    if current_notes_course.mode == "dojo":
-                        _end_segment(current_notes_course)
+                    if _branch_accepts_notes(current_notes_course):
+                        _flush_pending_notes(current_notes_course)
+                        if current_notes_course.mode == "dojo":
+                            _end_segment(current_notes_course)
                     handled_directive = True
                 elif directive == "#GOGOSTART":
-                    if current_notes_course.mode == "dojo":
-                        if state.current_segment is None:
-                            _start_segment(current_notes_course, _current_audio())
-                        state.gogo_start = state.measure_index
+                    if _branch_accepts_notes(current_notes_course):
+                        if current_notes_course.mode == "dojo":
+                            if state.current_segment is None:
+                                _start_segment(current_notes_course, _current_audio())
+                            state.gogo_start = state.measure_index
                     handled_directive = True
                 elif directive == "#GOGOEND":
-                    if current_notes_course.mode == "dojo":
-                        _close_gogo(current_notes_course)
+                    if _branch_accepts_notes(current_notes_course):
+                        if current_notes_course.mode == "dojo":
+                            _close_gogo(current_notes_course)
                     handled_directive = True
                 elif directive == "#BPMCHANGE":
                     handled_directive = True
-                    if state.measure_tokens:
-                        _commit_pending_measure(current_notes_course)
-                    bpm_value = None
-                    if directive_payload:
-                        try:
-                            bpm_value = float(directive_payload.split()[0])
-                        except ValueError:
-                            bpm_value = None
-                    if bpm_value is not None:
-                        state.current_bpm = bpm_value
-                        if state.default_bpm is None:
-                            state.default_bpm = bpm_value
-                        state.measure_bpm = state.current_bpm
-                    if current_notes_course.mode == "dojo":
-                        if state.current_segment is None:
-                            _start_segment(current_notes_course, _current_audio())
+                    if _branch_accepts_notes(current_notes_course):
+                        if state.measure_tokens:
+                            _commit_pending_measure(current_notes_course)
+                        bpm_value = None
+                        if directive_payload:
+                            try:
+                                bpm_value = float(directive_payload.split()[0])
+                            except ValueError:
+                                bpm_value = None
                         if bpm_value is not None:
-                            state.current_segment.setdefault('bpm_map', []).append(
-                                {'measure': state.measure_index, 'value': bpm_value}
-                            )
+                            state.current_bpm = bpm_value
+                            if state.default_bpm is None:
+                                state.default_bpm = bpm_value
+                            state.measure_bpm = state.current_bpm
+                        if current_notes_course.mode == "dojo":
+                            if state.current_segment is None:
+                                _start_segment(current_notes_course, _current_audio())
+                            if bpm_value is not None:
+                                state.current_segment.setdefault('bpm_map', []).append(
+                                    {'measure': state.measure_index, 'value': bpm_value}
+                                )
                 elif directive == "#SCROLL":
                     handled_directive = True
-                    if state.measure_tokens:
-                        _commit_pending_measure(current_notes_course)
-                    scroll_value = _parse_float(directive_payload.split()[0]) if directive_payload else None
-                    if scroll_value is not None:
-                        state.current_scroll = scroll_value
-                        state.measure_scroll = scroll_value
+                    if _branch_accepts_notes(current_notes_course):
+                        if state.measure_tokens:
+                            _commit_pending_measure(current_notes_course)
+                        scroll_value = _parse_float(directive_payload.split()[0]) if directive_payload else None
+                        if scroll_value is not None:
+                            state.current_scroll = scroll_value
+                            state.measure_scroll = scroll_value
                 elif directive == "#MEASURE":
                     handled_directive = True
-                    if state.measure_tokens:
-                        _commit_pending_measure(current_notes_course)
-                    fraction = directive_payload or ""
-                    if "/" in fraction:
-                        numerator_str, denominator_str = fraction.split("/", 1)
-                        try:
-                            numerator_fraction = Fraction(numerator_str.strip())
-                            denominator_fraction = Fraction(denominator_str.strip())
-                        except (ValueError, ZeroDivisionError):
-                            numerator_fraction = None
-                            denominator_fraction = None
-                        if (
-                            numerator_fraction is not None
-                            and denominator_fraction is not None
-                            and denominator_fraction != 0
-                        ):
-                            ratio_fraction = numerator_fraction / denominator_fraction
-                            state.current_measure_ratio = float(ratio_fraction)
-                            state.measure_ratio_for_measure = state.current_measure_ratio
+                    if _branch_accepts_notes(current_notes_course):
+                        if state.measure_tokens:
+                            _commit_pending_measure(current_notes_course)
+                        fraction = directive_payload or ""
+                        if "/" in fraction:
+                            numerator_str, denominator_str = fraction.split("/", 1)
+                            try:
+                                numerator_fraction = Fraction(numerator_str.strip())
+                                denominator_fraction = Fraction(denominator_str.strip())
+                            except (ValueError, ZeroDivisionError):
+                                numerator_fraction = None
+                                denominator_fraction = None
                             if (
-                                numerator_fraction.denominator == 1
-                                and denominator_fraction.denominator == 1
+                                numerator_fraction is not None
+                                and denominator_fraction is not None
+                                and denominator_fraction != 0
                             ):
-                                state.current_measure_numerator = numerator_fraction.numerator
-                                state.current_measure_denominator = denominator_fraction.numerator
-                            else:
-                                simplified = ratio_fraction.limit_denominator(4096)
-                                state.current_measure_numerator = simplified.numerator
-                                state.current_measure_denominator = simplified.denominator
-                            state.measure_time_sig_numerator = state.current_measure_numerator
-                            state.measure_time_sig_denominator = state.current_measure_denominator
+                                ratio_fraction = numerator_fraction / denominator_fraction
+                                state.current_measure_ratio = float(ratio_fraction)
+                                state.measure_ratio_for_measure = state.current_measure_ratio
+                                if (
+                                    numerator_fraction.denominator == 1
+                                    and denominator_fraction.denominator == 1
+                                ):
+                                    state.current_measure_numerator = numerator_fraction.numerator
+                                    state.current_measure_denominator = denominator_fraction.numerator
+                                else:
+                                    simplified = ratio_fraction.limit_denominator(4096)
+                                    state.current_measure_numerator = simplified.numerator
+                                    state.current_measure_denominator = simplified.denominator
+                                state.measure_time_sig_numerator = state.current_measure_numerator
+                                state.measure_time_sig_denominator = state.current_measure_denominator
                 elif directive in SAFE_NOTE_DIRECTIVES:
                     handled_directive = True
                 elif directive.startswith("#EXAM"):
@@ -2808,6 +2880,9 @@ def _parse_tja_strict(
                 tokens = stripped_comments.split(",")
                 saw_digits = False
                 state = _state_for(current_notes_course)
+                if not _branch_accepts_notes(current_notes_course):
+                    state.block_line_count += 1
+                    continue
                 state.block_line_count += 1
                 for index, token in enumerate(tokens):
                     cleaned = NOTE_TOKEN_CLEAN_RE.sub("", token)

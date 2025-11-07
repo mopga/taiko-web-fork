@@ -18,6 +18,16 @@ resolved playlist path on the chart metadata. The aggregated chart contains a
 so that `/api/dan-chart` and `/api/tower-chart` callers receive the same
 payloads as the web profile.
 
+### Tower chart structure
+
+Tower `.tja` charts rely on branching to expose difficulty previews while the
+game always plays the Master branch. Every Tower chart must provide a
+`#BRANCHSTART` block with `#N`, `#E`, and `#M` sections where the `#M` segment
+contains the canonical gameplay notes. The scanner parses all three branches
+but only persists the `#M` measures for API consumers (the remaining branches
+are treated as visual aids for the in-game tower). Charts that omit the master
+branch cannot be scanned successfully.
+
 Keep playlist and audio files inside the configured `songs_root`. The scanner
 validates every referenced path and ignores entries that escape this directory
 so desktop packaging (including Electron builds) remains self-contained.
