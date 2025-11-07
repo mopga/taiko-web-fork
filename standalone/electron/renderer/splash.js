@@ -90,26 +90,70 @@
     }
   }
 
-  function setAssetImages() {
-    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+  const ASSET_RETRY_LIMIT = 40;
+  const ASSET_RETRY_DELAY = 250;
+  const ASSET_INITIAL_DELAY = 50;
+
+  let appliedBackgroundUrl = null;
+  let appliedMascotUrl = null;
+  let assetRetryTimer = null;
+  let assetsResolved = false;
+  let assetRetryCompleted = false;
+
+  function applyAssetImages(backgroundUrl, mascotUrl) {
+    appliedBackgroundUrl = typeof backgroundUrl === 'string' && backgroundUrl.length > 0 ? backgroundUrl : null;
+    appliedMascotUrl = typeof mascotUrl === 'string' && mascotUrl.length > 0 ? mascotUrl : null;
+    assetsResolved = Boolean(appliedBackgroundUrl && appliedMascotUrl);
+
     if (splashElement) {
-      if (backgroundUrl) {
-        splashElement.style.backgroundImage = `url("${backgroundUrl}")`;
+      if (appliedBackgroundUrl) {
+        splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
       } else {
         splashElement.style.removeProperty('background-image');
       }
     }
 
-    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
     if (mascotElement) {
-      if (mascotUrl) {
-        mascotElement.src = mascotUrl;
+      if (appliedMascotUrl) {
+        mascotElement.src = appliedMascotUrl;
         mascotElement.hidden = false;
       } else {
         mascotElement.removeAttribute('src');
         mascotElement.hidden = true;
       }
     }
+  }
+
+  function scheduleAssetRetry(attempt) {
+    const delay = attempt === 0 ? ASSET_INITIAL_DELAY : ASSET_RETRY_DELAY;
+    assetRetryTimer = window.setTimeout(() => {
+      const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+      const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+
+      if (backgroundUrl && mascotUrl) {
+        applyAssetImages(backgroundUrl, mascotUrl);
+        assetRetryTimer = null;
+        assetRetryCompleted = true;
+        return;
+      }
+
+      if (attempt + 1 >= ASSET_RETRY_LIMIT) {
+        assetRetryTimer = null;
+        assetRetryCompleted = true;
+        return;
+      }
+
+      scheduleAssetRetry(attempt + 1);
+    }, delay);
+  }
+
+  function startAssetRetry() {
+    if (assetRetryTimer !== null) {
+      window.clearTimeout(assetRetryTimer);
+      assetRetryTimer = null;
+    }
+    assetRetryCompleted = false;
+    scheduleAssetRetry(0);
   }
 
   function setDetail(text) {
@@ -225,14 +269,16 @@
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
-      refreshAssetImages();
       updateStatus(payload);
+      if (!assetsResolved && assetRetryTimer === null && !assetRetryCompleted) {
+        startAssetRetry();
+      }
     });
   }
 
   window.addEventListener('focus', () => {
-    setAssetImages();
+    applyAssetImages(appliedBackgroundUrl, appliedMascotUrl);
   });
 
-  refreshAssetImages();
+  startAssetRetry();
 })();
