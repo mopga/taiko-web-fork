@@ -116,19 +116,25 @@ function resolveAssetPath(...segments) {
     }
   }
 
-  const base = candidates[0];
-  return base ? path.join(base.fsPath, ...parts) : null;
+  return null;
 }
 
 function getAssetUrl(primary, ...rest) {
   const assetPath =
     rest.length === 0 && typeof primary === 'string' && primary.includes('/')
-      ? resolveAssetPath(primary.split(/[\\/]+/))
-      : resolveAssetPath(primary, rest);
+      ? resolveAssetPath(...primary.split(/[\\/]+/))
+      : resolveAssetPath(primary, ...rest);
   if (!assetPath) {
     return null;
   }
-  return pathToFileURL(assetPath).href;
+  try {
+    if (fs.existsSync(assetPath)) {
+      return pathToFileURL(assetPath).href;
+    }
+  } catch (error) {
+    return null;
+  }
+  return null;
 }
 
 const debugAssets = Object.freeze({
