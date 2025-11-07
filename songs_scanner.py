@@ -206,6 +206,7 @@ def _apply_empty_summary_defaults(
 def empty_scan_summary(*, reason: str = 'empty_library', fs_checksum: Optional[str] = None) -> Dict[str, object]:
     summary: Dict[str, object] = {}
     _apply_empty_summary_defaults(summary, reason=reason, fs_checksum=fs_checksum)
+    summary['inserted_by_mode'] = {'std': 0, 'dan': 0, 'tower': 0}
     return summary
 
 
@@ -2600,11 +2601,11 @@ def _parse_tja_strict(
                         active_course.add_issue(issue)
                     if special_mode and active_course.mode != special_mode:
                         active_course.mode = special_mode
-                    elif not special_mode and active_course.mode in {"tower", "dan", "dandojo"}:
+                    elif not special_mode and active_course.mode in {"dan", "dandojo"}:
                         active_course.mode = "standard"
                     if special_display and active_course.display_course != special_display:
                         active_course.display_course = special_display
-                    elif not special_display and active_course.display_course in {"tower", "dan", "dandojo"}:
+                    elif not special_display and active_course.display_course in {"dan", "dandojo"}:
                         active_course.display_course = None
         elif key_upper == "LEVEL" and active_course:
             try:
@@ -4028,6 +4029,14 @@ class SongScanner:
                 LOGGER.debug('Failed to register storage title recovery callback', exc_info=True)
         self._seed_legacy_scanner_ids()
 
+    @staticmethod
+    def _chart_is_tower(entry: Mapping[str, object]) -> bool:
+        mode_value = str(entry.get('mode') or '').strip().casefold()
+        if mode_value == 'tower':
+            return True
+        chart_mode_value = str(entry.get('chart_mode') or '').strip().casefold()
+        return chart_mode_value == 'tower'
+
     def _parse_tja_playlist(
         self,
         playlist_path: Path,
@@ -5319,6 +5328,8 @@ class SongScanner:
                 summary['errors'] += 1
                 return None
 
+            self._increment_inserted_mode_summary(summary, charts_payload)
+
         needs_refresh = inserted or key in dirty_groups
 
         if needs_refresh:
@@ -5678,7 +5689,12 @@ class SongScanner:
             'ko': None,
         }
 
-        enabled = bool(audio_url)
+        has_tower_chart = any(
+            isinstance(chart_entry, Mapping) and self._chart_is_tower(chart_entry)
+            for chart_entry in charts_payload
+        )
+
+        enabled = bool(audio_url) or has_tower_chart
 
         primary_chart = _select_primary_chart_entry(charts_payload)
         primary_course = ""
@@ -5962,13 +5978,56 @@ class SongScanner:
                     document['difficulties'] = {'oni': {'valid': True}}
         return document
 
+    def _increment_inserted_mode_summary(
+        self,
+        summary: Dict[str, object],
+        charts_payload: Sequence[Mapping[str, object]],
+    ) -> None:
+        counters_raw = summary.setdefault(
+            'inserted_by_mode',
+            {'std': 0, 'dan': 0, 'tower': 0},
+        )
+        if not isinstance(counters_raw, dict):
+            counters_raw = {'std': 0, 'dan': 0, 'tower': 0}
+            summary['inserted_by_mode'] = counters_raw
+
+        def _normalise_mode(entry: Mapping[str, object]) -> str:
+            raw_mode = str(entry.get('mode') or '').strip().casefold()
+            if not raw_mode:
+                raw_mode = str(entry.get('chart_mode') or '').strip().casefold()
+            if raw_mode == 'tower':
+                return 'tower'
+            if raw_mode in {'dandojo', 'dan', 'dojo'}:
+                return 'dan'
+            return 'std'
+
+        for chart_entry in charts_payload:
+            if not isinstance(chart_entry, Mapping):
+                continue
+            bucket = _normalise_mode(chart_entry)
+            if bucket not in counters_raw:
+                continue
+            counters_raw[bucket] = int(counters_raw.get(bucket, 0)) + 1
+
     def _build_manifest_entry(
         self,
         document: Dict[str, object],
         records: List[TjaImportRecord],
         record_meta: Dict[str, Dict[str, object]],
     ) -> Optional[Dict[str, object]]:
+        raw_charts_value = document.get('charts')
         if not document.get('enabled', True):
+            if isinstance(raw_charts_value, Sequence):
+                if any(
+                    isinstance(chart_entry, Mapping)
+                    and self._chart_is_tower(chart_entry)
+                    for chart_entry in raw_charts_value
+                ):
+                    LOGGER.info(
+                        'skip_tower=missing-audio title=%s stable_id=%s',
+                        document.get('title'),
+                        document.get('scanner_stable_id') or document.get('id'),
+                    )
             return None
         stable_id = document.get('scanner_stable_id') or document.get('id')
         if not isinstance(stable_id, str) or not stable_id:
@@ -5996,7 +6055,7 @@ class SongScanner:
             else:
                 difficulties[legacy] = bool(courses_doc.get(legacy))
 
-        charts_payload = document.get('charts') if isinstance(document.get('charts'), list) else []
+        charts_payload = raw_charts_value if isinstance(raw_charts_value, list) else []
         manifest_charts: List[Dict[str, object]] = []
         max_duration = 0
         for chart in charts_payload:
@@ -6004,6 +6063,12 @@ class SongScanner:
                 continue
             chart_data = chart.get('chart_data')
             if not isinstance(chart_data, dict):
+                if self._chart_is_tower(chart):
+                    LOGGER.info(
+                        'skip_tower=parse-failed title=%s stable_id=%s reason=missing-chart-data',
+                        document.get('title'),
+                        stable_id,
+                    )
                 continue
             duration_val = chart_data.get('duration_ms')
             try:
@@ -6749,11 +6814,20 @@ class SongScanner:
                     errors_value = int(max(active_summary.get('errors', 0), error_count))
                     songs_before = _coerce_int(summary.get('songs_count_before')) or 0
                     songs_after = _coerce_int(summary.get('songs_count_after')) or 0
+                    mode_counts_raw = summary.get('inserted_by_mode') if isinstance(summary.get('inserted_by_mode'), Mapping) else None
+                    if isinstance(mode_counts_raw, Mapping):
+                        mode_snapshot = {
+                            'std': int(mode_counts_raw.get('std', 0)),
+                            'dan': int(mode_counts_raw.get('dan', 0)),
+                            'tower': int(mode_counts_raw.get('tower', 0)),
+                        }
+                    else:
+                        mode_snapshot = {'std': 0, 'dan': 0, 'tower': 0}
                     SUMMARY_LOGGER.info(
                         "Song scan summary: mode=%s leader=%s single_node=%s fast_path=%s reason=%s "
                         "found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d "
                         "recovered_titles=%d songs_before=%d songs_after=%d duration=%.3fs "
-                        "checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d",
+                        "checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d inserted_by_mode=%s",
                         mode_str,
                         bool(active_summary.get('leader')),
                         bool(active_summary.get('single_node', self._single_node_mode)),
@@ -6773,6 +6847,7 @@ class SongScanner:
                         str(active_summary.get('fs_checksum', '-')),
                         str(active_summary.get('manifest_checksum', '-')),
                         int(active_summary.get('files_count', 0)),
+                        mode_snapshot,
                     )
                     SUMMARY_LOGGER.info(
                         "scan: mode=%s found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d duration=%.3fs checksum=%s fs_checksum=%s manifest_checksum=%s files_count=%d elapsed=%.3fs",
@@ -6841,6 +6916,7 @@ class SongScanner:
             'errors': 0,
             'skipped': 0,
         }
+        summary['inserted_by_mode'] = {'std': 0, 'dan': 0, 'tower': 0}
         _apply_empty_summary_defaults(summary)
         summary['single_node'] = self._single_node_mode
         self._active_summary = summary
@@ -8233,11 +8309,21 @@ class SongScanner:
             duration_value = float(duration_seconds) if duration_seconds is not None else 0.0
         except (TypeError, ValueError):
             duration_value = 0.0
+        mode_counts = summary.get('inserted_by_mode') if isinstance(summary.get('inserted_by_mode'), Mapping) else None
+        if isinstance(mode_counts, Mapping):
+            mode_snapshot = {
+                'std': int(mode_counts.get('std', 0)),
+                'dan': int(mode_counts.get('dan', 0)),
+                'tower': int(mode_counts.get('tower', 0)),
+            }
+        else:
+            mode_snapshot = {'std': 0, 'dan': 0, 'tower': 0}
+
         SUMMARY_LOGGER.info(
             'Song scan summary: pid=%d leader=%s single_node=%s fast_path=%s reason=%s '
             'found=%d inserted=%d updated=%d disabled=%d errors=%d skipped=%d '
             'recovered_titles=%d songs_before=%d songs_after=%d duration=%.3fs '
-            'files_count=%d manifest_documents=%d',
+            'files_count=%d manifest_documents=%d inserted_by_mode=%s',
             os.getpid(),
             leader,
             self._single_node_mode,
@@ -8255,6 +8341,7 @@ class SongScanner:
             duration_value,
             files_count_value,
             manifest_documents_value,
+            mode_snapshot,
         )
 
     def _count_enabled_songs(self) -> Optional[int]:

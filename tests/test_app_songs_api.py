@@ -470,6 +470,76 @@ class SongsApiTestCase(unittest.TestCase):
                 self.assertEqual(follow.status_code, 304)
                 self.assertEqual(follow.data, b'')
 
+    def test_tower_chart_title_normalization_variants(self):
+        manifest_entries = [
+            {
+                '_id': 'tower-kara',
+                'id': 'tower-kara',
+                'title': 'Taiko Tower 9 Kara-kuchi',
+                'title_lc': 'taiko tower 9 kara-kuchi',
+                'charts': [
+                    {
+                        'mode': 'tower',
+                        'course': 'oni',
+                        'display_course': 'Kara-kuchi',
+                        'chart_data': {
+                            'duration_ms': 900,
+                            'measures': [
+                                {
+                                    'notes': [{'type': 'don', 'time': 0}],
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+        manifest_meta = {
+            '_id': '__meta__',
+            'manifest_checksum': 'tower-check',
+            'manifest_entry_checksum': 'tower-entry',
+            'songs_count_after': 1,
+        }
+        songs_docs = [
+            {
+                'scanner_stable_id': 'tower-kara',
+                'id': 111,
+                'title': 'Taiko Tower 9 Kara-kuchi',
+                'charts': [
+                    {
+                        'mode': 'tower',
+                        'course': 'oni',
+                        'display_course': 'Kara-kuchi',
+                        'chart_data': {
+                            'duration_ms': 920,
+                            'measures': [
+                                {
+                                    'notes': [{'type': 'don', 'time': 0}],
+                                }
+                            ],
+                        },
+                    }
+                ],
+                'valid_chart_count': 1,
+                'is_playable': True,
+            }
+        ]
+
+        queries = [
+            '/api/tower/chart?title=Taiko+Tower+9+Kara-kuchi&course=oni',
+            '/api/tower/chart?title=Taiko+Tower+9+Kara%20kuchi&course=oni',
+            '/api/tower/chart?title=Taiko+Tower+9+Kara-kuchi&course=oni&mode=tower',
+        ]
+
+        with self._patch_collections(manifest_entries, manifest_meta, songs_docs):
+            for url in queries:
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                measures = payload['chart_data'].get('measures')
+                self.assertIsInstance(measures, list)
+                self.assertTrue(measures)
+
     def test_dan_chart_lookup_and_caching_desktop(self):
         manifest_entries = [
             {
