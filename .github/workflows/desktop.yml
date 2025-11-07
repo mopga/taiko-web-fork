@@ -13,6 +13,8 @@ jobs:
   build:
     name: Build Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +55,7 @@ jobs:
       - name: Compute version
         id: ver
         run: |
-          PKG_VERSION=$(jq -r .version standalone/electron/package.json)
+          PKG_VERSION=$(node -p "require('./standalone/electron/package.json').version")
           if git describe --tags --abbrev=0 >/dev/null 2>&1; then
             TAG=$(git describe --tags --abbrev=0)
             VERSION="$TAG"
@@ -63,6 +65,13 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Apply desktop version
+        working-directory: standalone/electron
+        env:
+          DESKTOP_APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          npm run set-version -- "$DESKTOP_APP_VERSION"
+
       - name: Build backend (PyInstaller)
         run: |
           python standalone/packaging/build_backend.py
@@ -70,6 +79,8 @@ jobs:
       - name: Build Electron (Windows)
         if: matrix.os == 'windows-latest'
         working-directory: standalone/electron
+        env:
+          DESKTOP_APP_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           npm run build:win
 
@@ -78,6 +89,7 @@ jobs:
         working-directory: standalone/electron
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          DESKTOP_APP_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           npm run build:mac
 

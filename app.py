@@ -3167,33 +3167,53 @@ def route_api_tower_chart():
     selected_song: Optional[Mapping[str, object]] = None
     best_chart: Optional[Mapping[str, object]] = None
 
-    def _attempt_selection(mode_preferences: Sequence[object]) -> tuple[Optional[Mapping[str, object]], Optional[Mapping[str, object]], Optional[Mapping[str, object]]]:
+    def _canonical_mode(value: object) -> str:
+        if not isinstance(value, str):
+            return ''
+        token = value.strip().casefold()
+        if token in {'dan', 'dojo'}:
+            return 'dandojo'
+        return token
+
+    def _attempt_selection(
+        mode_preferences: Sequence[object],
+        filter_modes: object = None,
+    ) -> tuple[
+        Optional[Mapping[str, object]],
+        Optional[Mapping[str, object]],
+        Optional[Mapping[str, object]],
+    ]:
         for _, entry, song in candidates:
             charts = _resolve_song_charts(song, entry)
-            chart = select_best_chart(charts, course_param, prefer_modes=mode_preferences)
+            chart = select_best_chart(
+                charts,
+                course_param,
+                prefer_modes=mode_preferences,
+                filter_mode=filter_modes,
+            )
             if chart is not None:
                 return entry, song, chart
         return None, None, None
 
-    mode_attempts: list[Sequence[object]] = []
+    def _set_selection(
+        entry: Optional[Mapping[str, object]],
+        song: Optional[Mapping[str, object]],
+        chart: Optional[Mapping[str, object]],
+    ) -> bool:
+        nonlocal selected_entry, selected_song, best_chart
+        if entry is None or song is None or chart is None:
+            return False
+        selected_entry = entry
+        selected_song = song
+        best_chart = chart
+        return True
+
     initial_modes = tuple(prefer_modes) if isinstance(prefer_modes, Sequence) else tuple()
-    mode_attempts.append(initial_modes)
-    mode_attempts.append(())
-    mode_attempts.append(('standard',))
+    initial_filter_modes: object = initial_modes or ('tower', 'dandojo')
 
-    seen_modes: set[tuple[object, ...]] = set()
-
-    for mode_preferences in mode_attempts:
-        key = tuple(mode_preferences)
-        if key in seen_modes:
-            continue
-        seen_modes.add(key)
-        entry, song, chart = _attempt_selection(mode_preferences)
-        if entry is not None and song is not None and chart is not None:
-            selected_entry = entry
-            selected_song = song
-            best_chart = chart
-            break
+    if not _set_selection(*_attempt_selection(initial_modes, initial_filter_modes)):
+        if not _set_selection(*_attempt_selection((), None)):
+            _set_selection(*_attempt_selection(('standard',), ('standard',)))
 
     if (
         best_chart is not None
@@ -3203,15 +3223,34 @@ def route_api_tower_chart():
         playlist_path = _extract_playlist_path(best_chart)
         has_playlist = isinstance(playlist_path, str) and playlist_path.strip().lower().endswith('.t3u8')
         if not has_playlist:
-            fallback_entry, fallback_song, fallback_chart = _attempt_selection(('standard',))
-            if fallback_entry and fallback_song and fallback_chart:
+            excluded_modes = {'tower', 'dandojo'}
+            fallback_entry, fallback_song, fallback_chart = _attempt_selection((), None)
+            fallback_mode = _canonical_mode(
+                (fallback_chart or {}).get('chart_mode')
+                or (fallback_chart or {}).get('mode')
+            )
+            if (
+                fallback_entry
+                and fallback_song
+                and fallback_chart
+                and fallback_mode not in excluded_modes
+            ):
                 selected_entry = fallback_entry
                 selected_song = fallback_song
                 best_chart = fallback_chart
-            elif not selected_entry or not selected_song:
-                selected_entry = None
-                selected_song = None
-                best_chart = None
+            else:
+                fallback_entry, fallback_song, fallback_chart = _attempt_selection(
+                    ('standard',),
+                    ('standard',),
+                )
+                if fallback_entry and fallback_song and fallback_chart:
+                    selected_entry = fallback_entry
+                    selected_song = fallback_song
+                    best_chart = fallback_chart
+                elif not selected_entry or not selected_song:
+                    selected_entry = None
+                    selected_song = None
+                    best_chart = None
 
     if selected_entry is None or selected_song is None or best_chart is None:
         return jsonify({'status': 'error', 'message': 'chart_not_found'}), 404

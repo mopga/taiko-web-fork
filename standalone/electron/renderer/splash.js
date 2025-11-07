@@ -8,13 +8,78 @@
   const splashElement = document.querySelector('.splash');
   const mascotElement = document.getElementById('mascot');
 
-  function setAssetImages() {
-    const desktopApi = window.desktop;
-    const getAssetUrl = desktopApi && typeof desktopApi.getAssetUrl === 'function'
-      ? desktopApi.getAssetUrl.bind(desktopApi)
-      : null;
+  function resolveAssetSegments(values) {
+    const parts = [];
+    const push = (value) => {
+      if (typeof value !== 'string') {
+        return;
+      }
+      const token = value.trim();
+      if (token) {
+        parts.push(token);
+      }
+    };
+    const flatten = (segment) => {
+      if (Array.isArray(segment)) {
+        segment.forEach(flatten);
+        return;
+      }
+      push(segment);
+    };
+    values.forEach(flatten);
+    return parts;
+  }
 
-    const backgroundUrl = getAssetUrl ? getAssetUrl('launcher', 'title-screen.png') : null;
+  function fallbackAssetUrl(segments) {
+    const desktopApi = window.desktop;
+    const debugAssets = desktopApi && desktopApi.debugAssets;
+    if (!debugAssets || !Array.isArray(debugAssets.bases)) {
+      return null;
+    }
+    for (const base of debugAssets.bases) {
+      if (!base || typeof base.url !== 'string') {
+        continue;
+      }
+      try {
+        const baseUrl = base.url.endsWith('/') ? base.url : `${base.url}/`;
+        const encodedPath = segments
+          .map((segment) =>
+            segment
+              .split('/')
+              .map((token) => encodeURIComponent(token))
+              .join('/')
+          )
+          .join('/');
+        const candidate = new URL(encodedPath, baseUrl);
+        return candidate.href;
+      } catch (error) {
+        // Ignore and continue to the next base candidate.
+      }
+    }
+    return null;
+  }
+
+  function resolveAssetUrl(...segments) {
+    const parts = resolveAssetSegments(segments);
+    if (!parts.length) {
+      return null;
+    }
+    const desktopApi = window.desktop;
+    const getAssetUrl =
+      desktopApi && typeof desktopApi.getAssetUrl === 'function'
+        ? desktopApi.getAssetUrl.bind(desktopApi)
+        : null;
+    if (getAssetUrl) {
+      const assetUrl = getAssetUrl(...parts);
+      if (assetUrl) {
+        return assetUrl;
+      }
+    }
+    return fallbackAssetUrl(parts);
+  }
+
+  function setAssetImages() {
+    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
     if (splashElement) {
       if (backgroundUrl) {
         const safeBackgroundUrl = String(backgroundUrl).replace(/"/g, '\\"');
@@ -24,7 +89,7 @@
       }
     }
 
-    const mascotUrl = getAssetUrl ? getAssetUrl('launcher', 'dancing-don.gif') : null;
+    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
     if (mascotElement) {
       if (mascotUrl) {
         mascotElement.src = mascotUrl;

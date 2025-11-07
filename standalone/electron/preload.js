@@ -1,12 +1,43 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
 const isPackaged = __dirname.includes('app.asar');
-const assetsBase =
-  process.env.ELECTRON_DEV === '1' || !isPackaged
-    ? path.join(__dirname, '..', 'assets')
-    : path.join(process.resourcesPath, 'assets');
+const packagedAssetsBase =
+  process.resourcesPath && typeof process.resourcesPath === 'string'
+    ? path.join(process.resourcesPath, 'assets')
+    : null;
+const devAssetsBase = path.join(__dirname, '..', 'assets');
+
+const assetBases = [];
+
+const pushAssetBase = (kind, fsPath) => {
+  if (!fsPath) {
+    return;
+  }
+  const resolved = path.resolve(fsPath);
+  const entry = {
+    kind,
+    fsPath: resolved,
+    url: pathToFileURL(resolved).href,
+  };
+  assetBases.push(entry);
+  return entry;
+};
+
+if (isPackaged && packagedAssetsBase) {
+  pushAssetBase('packaged', packagedAssetsBase);
+}
+
+if (!isPackaged || process.env.ELECTRON_DEV === '1' || assetBases.length === 0) {
+  if (fs.existsSync(devAssetsBase)) {
+    pushAssetBase('dev', devAssetsBase);
+  }
+}
+
+const assetsBase = assetBases.length > 0 ? assetBases[0].fsPath : devAssetsBase;
+const assetsBaseUrl = assetBases.length > 0 ? assetBases[0].url : pathToFileURL(assetsBase).href;
 
 function onStatusUpdate(callback) {
   if (typeof callback !== 'function') {
@@ -49,7 +80,23 @@ function resolveAssetPath(...segments) {
     return null;
   }
 
-  return path.join(assetsBase, ...parts);
+  const candidates = assetBases.length
+    ? assetBases
+    : [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }];
+
+  for (const base of candidates) {
+    const candidatePath = path.join(base.fsPath, ...parts);
+    try {
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    } catch (error) {
+      // Ignore file access errors and continue to other bases.
+    }
+  }
+
+  const base = candidates[0];
+  return base ? path.join(base.fsPath, ...parts) : null;
 }
 
 function getAssetUrl(primary, ...rest) {
@@ -63,9 +110,18 @@ function getAssetUrl(primary, ...rest) {
   return pathToFileURL(assetPath).href;
 }
 
+const debugAssets = Object.freeze({
+  isPackaged,
+  electronDev: process.env.ELECTRON_DEV === '1',
+  activeBase: assetsBase,
+  activeBaseUrl: assetsBaseUrl,
+  bases: assetBases.map((base) => ({ ...base })),
+});
+
 contextBridge.exposeInMainWorld('desktop', {
   onStatus: onStatusUpdate,
   requestQuit: () => ipcRenderer.invoke('desktop:quit'),
   chooseSongsDir: () => ipcRenderer.invoke('desktop:chooseSongsDir'),
   getAssetUrl,
+  debugAssets,
 });

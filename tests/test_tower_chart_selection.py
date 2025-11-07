@@ -61,6 +61,22 @@ def test_select_best_chart_handles_empty_prefer_modes():
     assert best_chart is charts[0]
 
 
+def test_select_best_chart_respects_filter_mode():
+    charts = [
+        {"course": "Oni", "mode": "tower", "display_course": "tower"},
+        {"course": "Oni", "mode": "standard", "display_course": "oni"},
+    ]
+
+    best_chart = select_best_chart(
+        charts,
+        "oni",
+        prefer_modes=("tower", "dandojo"),
+        filter_mode=("standard",),
+    )
+
+    assert best_chart is charts[1]
+
+
 def test_select_best_chart_prefers_display_course_match():
     charts = [
         {"course": "Oni", "mode": "tower", "display_course": "oni"},
@@ -184,8 +200,8 @@ def test_tower_chart_route_falls_back_to_standard_chart(monkeypatch, mode_query)
 
     call_sequences: list[tuple[object, ...]] = []
 
-    def _fake_select(charts, course, prefer_modes=("tower", "dandojo")):
-        call_sequences.append(tuple(prefer_modes or ()))
+    def _fake_select(charts, course, prefer_modes=("tower", "dandojo"), filter_mode=None):
+        call_sequences.append((tuple(prefer_modes or ()), filter_mode))
         if prefer_modes:
             return None
         return charts[0] if charts else None
@@ -203,8 +219,8 @@ def test_tower_chart_route_falls_back_to_standard_chart(monkeypatch, mode_query)
     assert isinstance(payload['chart_data']['measures'], list)
     assert payload['mode'] == fallback_chart['mode']
     # Ensure the initial tower lookup was attempted before falling back to standard charts.
-    assert any(modes for modes in call_sequences)
-    assert tuple() in call_sequences
+    assert any(modes for modes, _ in call_sequences)
+    assert any(not modes and filter_mode is None for modes, filter_mode in call_sequences)
 
 
 def test_tower_chart_route_prefers_standard_when_playlist_missing(monkeypatch):
@@ -243,7 +259,7 @@ def test_tower_chart_route_prefers_standard_when_playlist_missing(monkeypatch):
         assert entry is candidate_entry
         return list(song.get('charts', []))
 
-    def _fake_select(charts, course, prefer_modes=("tower", "dandojo")):
+    def _fake_select(charts, course, prefer_modes=("tower", "dandojo"), filter_mode=None):
         if prefer_modes == ('standard',):
             return standard_chart
         return tower_chart
