@@ -8,7 +8,37 @@
   const splashElement = document.querySelector('.splash');
   const mascotElement = document.getElementById('mascot');
 
+  let appliedBackgroundUrl = null;
+  let appliedMascotUrl = null;
   let diagnosticsOverlayShown = false;
+
+  function applyAssetImages(backgroundUrl, mascotUrl) {
+    const nextBackgroundUrl =
+      typeof backgroundUrl === 'string' && backgroundUrl.length > 0 ? backgroundUrl : null;
+    const nextMascotUrl =
+      typeof mascotUrl === 'string' && mascotUrl.length > 0 ? mascotUrl : null;
+
+    appliedBackgroundUrl = nextBackgroundUrl;
+    appliedMascotUrl = nextMascotUrl;
+
+    if (splashElement) {
+      if (appliedBackgroundUrl) {
+        splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
+      } else {
+        splashElement.style.removeProperty('background-image');
+      }
+    }
+
+    if (mascotElement) {
+      if (appliedMascotUrl) {
+        mascotElement.src = appliedMascotUrl;
+        mascotElement.hidden = false;
+      } else {
+        mascotElement.removeAttribute('src');
+        mascotElement.hidden = true;
+      }
+    }
+  }
 
   function renderDiagnosticsOverlay(info) {
     if (diagnosticsOverlayShown) {
@@ -95,59 +125,12 @@
       typeof providedBackgroundUrl === 'undefined'
         ? resolveAssetUrl('launcher', 'title-screen.png')
         : providedBackgroundUrl;
-    if (splashElement) {
-      if (appliedBackgroundUrl) {
-        splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
-      } else {
-        splashElement.style.removeProperty('background-image');
-      }
-    }
-
     const mascotUrl =
       typeof providedMascotUrl === 'undefined'
         ? resolveAssetUrl('launcher', 'dancing-don.gif')
         : providedMascotUrl;
-    if (mascotElement) {
-      if (appliedMascotUrl) {
-        mascotElement.src = appliedMascotUrl;
-        mascotElement.hidden = false;
-      } else {
-        mascotElement.removeAttribute('src');
-        mascotElement.hidden = true;
-      }
-    }
-  }
 
-  function scheduleAssetRetry(attempt) {
-    const delay = attempt === 0 ? ASSET_INITIAL_DELAY : ASSET_RETRY_DELAY;
-    assetRetryTimer = window.setTimeout(() => {
-      const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
-      const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
-
-      if (backgroundUrl && mascotUrl) {
-        applyAssetImages(backgroundUrl, mascotUrl);
-        assetRetryTimer = null;
-        assetRetryCompleted = true;
-        return;
-      }
-
-      if (attempt + 1 >= ASSET_RETRY_LIMIT) {
-        assetRetryTimer = null;
-        assetRetryCompleted = true;
-        return;
-      }
-
-      scheduleAssetRetry(attempt + 1);
-    }, delay);
-  }
-
-  function startAssetRetry() {
-    if (assetRetryTimer !== null) {
-      window.clearTimeout(assetRetryTimer);
-      assetRetryTimer = null;
-    }
-    assetRetryCompleted = false;
-    scheduleAssetRetry(0);
+    applyAssetImages(backgroundUrl, mascotUrl);
   }
 
   function setDetail(text) {
@@ -242,16 +225,11 @@
   let assetRetryCompleted = false;
 
   function runAssetRetryIteration() {
+    if (assetRetryCompleted || assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      return;
+    }
+
     assetRetryTimeoutId = null;
-
-    if (assetRetryCompleted) {
-      return;
-    }
-
-    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
-      return;
-    }
-
     assetRetryAttempts += 1;
 
     const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
@@ -274,9 +252,7 @@
     assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_RETRY_INTERVAL);
   }
 
-  function refreshAssetImages(options = {}) {
-    const immediate = options && options.immediate === true;
-
+  function refreshAssetImages({ immediate = false } = {}) {
     if (assetRetryCompleted) {
       setAssetImages();
       return;
@@ -290,9 +266,6 @@
     }
 
     if (immediate) {
-      if (assetRetryAttempts === 0 && assetRetryTimeoutId !== null) {
-        return;
-      }
       if (assetRetryTimeoutId !== null) {
         window.clearTimeout(assetRetryTimeoutId);
         assetRetryTimeoutId = null;
@@ -326,39 +299,16 @@
     }
   }
 
-  const handleDiagnosticsResult = (result) => {
-    if (!result) {
-      return;
-    }
-    renderDiagnosticsOverlay(result);
-  };
-
-  if (window.desktop && typeof window.desktop.diagnoseAssets === 'function') {
-    try {
-      const result = window.desktop.diagnoseAssets();
-      if (result && typeof result.then === 'function') {
-        result.then(handleDiagnosticsResult).catch(() => undefined);
-      } else {
-        handleDiagnosticsResult(result);
-      }
-    } catch (error) {
-      // Ignore diagnostics errors to avoid breaking splash screen.
-    }
-  }
-
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
       refreshAssetImages({ immediate: true });
       updateStatus(payload);
-      if (!assetsResolved && assetRetryTimer === null && !assetRetryCompleted) {
-        startAssetRetry();
-      }
     });
   }
 
   window.addEventListener('focus', () => {
-    applyAssetImages(appliedBackgroundUrl, appliedMascotUrl);
+    setAssetImages(appliedBackgroundUrl, appliedMascotUrl);
   });
 
-  startAssetRetry();
+  refreshAssetImages();
 })();
