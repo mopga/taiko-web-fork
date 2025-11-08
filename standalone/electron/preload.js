@@ -50,16 +50,15 @@ const pushAssetBase = (kind, fsPath) => {
   return entry;
 };
 
-if (isPackaged) {
-  if (packagedAssetsBase) {
-    pushAssetBase('packaged', packagedAssetsBase);
-  }
-  if (unpackedAssetsBase) {
-    pushAssetBase('unpacked', unpackedAssetsBase);
-  }
+if (packagedAssetsBase) {
+  pushAssetBase('packaged', packagedAssetsBase);
+}
+if (unpackedAssetsBase) {
+  pushAssetBase('unpacked', unpackedAssetsBase);
 }
 
-if (!isPackaged || process.env.ELECTRON_DEV === '1' || assetBases.length === 0) {
+// Dev fallback: если базы выше не нашлись или явно dev-режим
+if (!assetBases.length || process.env.ELECTRON_DEV === '1') {
   if (fs.existsSync(devAssetsBase)) {
     pushAssetBase('dev', devAssetsBase);
   }
