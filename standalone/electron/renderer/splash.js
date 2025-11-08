@@ -339,3 +339,49 @@
     }
   });
 })();
+
+// ===== OSD DIAG =====
+(function () {
+  const append = (el) => (document.body ? document.body.appendChild(el)
+                                        : document.addEventListener('DOMContentLoaded', () => document.body.appendChild(el), { once:true }));
+
+  const box = document.createElement('div');
+  box.style.position = 'fixed';
+  box.style.left = '8px';
+  box.style.bottom = '8px';
+  box.style.background = 'rgba(0,0,0,0.7)';
+  box.style.color = '#fff';
+  box.style.font = '12px/1.3 monospace';
+  box.style.padding = '6px 8px';
+  box.style.borderRadius = '6px';
+  box.style.zIndex = '2147483647';
+  box.textContent = 'diag: boot...';
+  append(box);
+
+  const run = () => {
+    const api = window.desktop || {};
+    const bg = document.querySelector('.bg');
+    const url = api.getAssetUrl && api.getAssetUrl('launcher','title-screen.png');
+    const cs  = bg ? getComputedStyle(bg).backgroundImage : '(no .bg)';
+    box.textContent =
+      `isPackaged=${(api.diagnoseAssets && api.diagnoseAssets().isPackaged) ?? 'n/a'}\n` +
+      `assetsBase=${(api.diagnoseAssets && api.diagnoseAssets().assetsBase) ?? 'n/a'}\n` +
+      `url=${url ?? 'null'}\n` +
+      `computed=${cs}`;
+
+    // если URL есть — попробуем реальную загрузку как <img>
+    if (url) {
+      const img = new Image();
+      img.onload  = () => box.textContent += `\nimg: LOADED ✓`;
+      img.onerror = () => box.textContent += `\nimg: ERROR ✗`;
+      img.src = url;
+    }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run, { once:true });
+  } else {
+    run();
+  }
+})();
+
