@@ -6,26 +6,29 @@
     <link rel="stylesheet" href="splash.css" />
   </head>
   <body>
-    <div class="splash">
-      <div class="splash__overlay">
-        <img class="splash__mascot" id="mascot" alt="Загрузка" />
-        <div class="splash__status" id="status">Запускаем Taiko Web…</div>
-        <div class="splash__detail" id="status-detail" hidden></div>
-        <div class="splash__info" id="songs-info">Папка песен: —</div>
-        <div class="splash__info" id="port-info">Порт: —</div>
-        <div class="splash__actions">
-          <button class="splash__button" id="choose-songs" type="button">
-            Выбрать папку с песнями
-          </button>
-          <button class="splash__button" id="quit-app" type="button" hidden>
-            Выход
-          </button>
-        </div>
-        <div class="splash__progress" aria-hidden="true">
-          <div class="splash__progress-bar"></div>
+    <div class="splash-root">
+      <div class="bg" aria-hidden="true"></div>
+      <div class="content">
+        <div class="splash__overlay">
+          <img class="splash__mascot" id="mascot" alt="Загрузка" />
+          <div class="splash__status" id="status">Запускаем Taiko Web…</div>
+          <div class="splash__detail" id="status-detail" hidden></div>
+          <div class="splash__info" id="songs-info">Папка песен: —</div>
+          <div class="splash__info" id="port-info">Порт: —</div>
+          <div class="splash__actions">
+            <button class="splash__button" id="choose-songs" type="button">
+              Выбрать папку с песнями
+            </button>
+            <button class="splash__button" id="quit-app" type="button" hidden>
+              Выход
+            </button>
+          </div>
+          <div class="splash__progress" aria-hidden="true">
+            <div class="splash__progress-bar"></div>
+          </div>
         </div>
       </div>
     </div>
-    <script src="splash.js" defer></script>
+    <script src="splash.js"></script>
   </body>
 </html>
