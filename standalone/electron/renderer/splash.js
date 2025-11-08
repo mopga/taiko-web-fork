@@ -90,21 +90,11 @@
     }
   }
 
-  const ASSET_RETRY_LIMIT = 40;
-  const ASSET_RETRY_DELAY = 250;
-  const ASSET_INITIAL_DELAY = 50;
-
-  let appliedBackgroundUrl = null;
-  let appliedMascotUrl = null;
-  let assetRetryTimer = null;
-  let assetsResolved = false;
-  let assetRetryCompleted = false;
-
-  function applyAssetImages(backgroundUrl, mascotUrl) {
-    appliedBackgroundUrl = typeof backgroundUrl === 'string' && backgroundUrl.length > 0 ? backgroundUrl : null;
-    appliedMascotUrl = typeof mascotUrl === 'string' && mascotUrl.length > 0 ? mascotUrl : null;
-    assetsResolved = Boolean(appliedBackgroundUrl && appliedMascotUrl);
-
+  function setAssetImages(providedBackgroundUrl, providedMascotUrl) {
+    const backgroundUrl =
+      typeof providedBackgroundUrl === 'undefined'
+        ? resolveAssetUrl('launcher', 'title-screen.png')
+        : providedBackgroundUrl;
     if (splashElement) {
       if (appliedBackgroundUrl) {
         splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
@@ -113,6 +103,10 @@
       }
     }
 
+    const mascotUrl =
+      typeof providedMascotUrl === 'undefined'
+        ? resolveAssetUrl('launcher', 'dancing-don.gif')
+        : providedMascotUrl;
     if (mascotElement) {
       if (appliedMascotUrl) {
         mascotElement.src = appliedMascotUrl;
@@ -239,11 +233,96 @@
     });
   }
 
-  function refreshAssetImages(attempt = 0) {
-    setAssetImages();
-    const desktopReady = window.desktop && typeof window.desktop.getAssetUrl === 'function';
-    if (!desktopReady && attempt < 40) {
-      window.setTimeout(() => refreshAssetImages(attempt + 1), 250);
+  const ASSET_RETRY_LIMIT = 40;
+  const ASSET_RETRY_INTERVAL = 250;
+  const ASSET_INITIAL_DELAY = 50;
+
+  let assetRetryAttempts = 0;
+  let assetRetryTimeoutId = null;
+  let assetRetryCompleted = false;
+
+  function runAssetRetryIteration() {
+    assetRetryTimeoutId = null;
+
+    if (assetRetryCompleted) {
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      return;
+    }
+
+    assetRetryAttempts += 1;
+
+    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+
+    setAssetImages(backgroundUrl, mascotUrl);
+
+    const hasBackground = typeof backgroundUrl === 'string' && backgroundUrl.length > 0;
+    const hasMascot = typeof mascotUrl === 'string' && mascotUrl.length > 0;
+
+    if (hasBackground && hasMascot) {
+      assetRetryCompleted = true;
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      return;
+    }
+
+    assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_RETRY_INTERVAL);
+  }
+
+  function refreshAssetImages(options = {}) {
+    const immediate = options && options.immediate === true;
+
+    if (assetRetryCompleted) {
+      setAssetImages();
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      if (immediate) {
+        setAssetImages();
+      }
+      return;
+    }
+
+    if (immediate) {
+      if (assetRetryAttempts === 0 && assetRetryTimeoutId !== null) {
+        return;
+      }
+      if (assetRetryTimeoutId !== null) {
+        window.clearTimeout(assetRetryTimeoutId);
+        assetRetryTimeoutId = null;
+      }
+      runAssetRetryIteration();
+      return;
+    }
+
+    if (assetRetryTimeoutId === null) {
+      assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_INITIAL_DELAY);
+    }
+  }
+
+  const handleDiagnosticsResult = (result) => {
+    if (!result) {
+      return;
+    }
+    renderDiagnosticsOverlay(result);
+  };
+
+  if (window.desktop && typeof window.desktop.diagnoseAssets === 'function') {
+    try {
+      const result = window.desktop.diagnoseAssets();
+      if (result && typeof result.then === 'function') {
+        result.then(handleDiagnosticsResult).catch(() => undefined);
+      } else {
+        handleDiagnosticsResult(result);
+      }
+    } catch (error) {
+      // Ignore diagnostics errors to avoid breaking splash screen.
     }
   }
 
@@ -269,6 +348,7 @@
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
+      refreshAssetImages({ immediate: true });
       updateStatus(payload);
       if (!assetsResolved && assetRetryTimer === null && !assetRetryCompleted) {
         startAssetRetry();
