@@ -5,7 +5,7 @@
   const portElement = document.getElementById('port-info');
   const chooseButton = document.getElementById('choose-songs');
   const quitButton = document.getElementById('quit-app');
-  const splashElement = document.querySelector('.splash');
+  const splashElement = document.querySelector('.splash-root');
   const mascotElement = document.getElementById('mascot');
 
   let appliedBackgroundUrl = null;
@@ -21,11 +21,15 @@
     appliedBackgroundUrl = nextBackgroundUrl;
     appliedMascotUrl = nextMascotUrl;
 
-    if (splashElement) {
+    const bgElement = document.querySelector('.bg');
+    if (bgElement) {
       if (appliedBackgroundUrl) {
-        splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
+        bgElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
+        bgElement.style.backgroundSize = 'cover';
+        bgElement.style.backgroundPosition = 'center center';
+        bgElement.style.backgroundRepeat = 'no-repeat';
       } else {
-        splashElement.style.removeProperty('background-image');
+        bgElement.style.removeProperty('background-image');
       }
     }
 
@@ -311,4 +315,27 @@
   });
 
   refreshAssetImages();
+
+  // Гарантированно подставляем фон после готовности DOM и логируем URL
+  window.addEventListener('DOMContentLoaded', () => {
+    try {
+      const bg = document.querySelector('.bg');
+      const getUrl = window.desktop && window.desktop.getAssetUrl;
+      if (!bg || !getUrl) {
+        console.warn('[splash] bg or window.desktop.getAssetUrl is missing', { hasBG: !!bg, hasGet: !!getUrl });
+        return;
+      }
+      const url = getUrl('launcher', 'title-screen.png');
+      console.log('[splash] background url =', url);
+      if (url) {
+        bg.style.backgroundImage = `url("${url}")`;
+        // на всякий случай усилим «cover»/позицию (если в css не применилось)
+        bg.style.backgroundSize = 'cover';
+        bg.style.backgroundPosition = 'center center';
+        bg.style.backgroundRepeat = 'no-repeat';
+      }
+    } catch (e) {
+      console.error('[splash] failed to set background', e);
+    }
+  });
 })();

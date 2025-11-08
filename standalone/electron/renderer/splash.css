@@ -22,15 +22,26 @@ body {
   justify-content: stretch;
 }
 
-.splash {
+.splash-root {
   position: relative;
+  min-height: 100%;
   flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
+}
+
+.bg {
+  position: absolute;
+  inset: 0;
+  background: #000 no-repeat center / cover;
+  z-index: 0;
+  filter: brightness(0.35);
+}
+
+.content {
+  position: relative;
+  z-index: 1;
 }
 
 .splash__overlay {
