@@ -8,6 +8,75 @@
   const splashElement = document.querySelector('.splash');
   const mascotElement = document.getElementById('mascot');
 
+  let diagnosticsOverlayShown = false;
+
+  function renderDiagnosticsOverlay(info) {
+    if (diagnosticsOverlayShown) {
+      return;
+    }
+    if (!info || typeof info !== 'object') {
+      return;
+    }
+
+    const formatValue = (value) => {
+      if (value === null) {
+        return 'null';
+      }
+      if (typeof value === 'undefined') {
+        return 'undefined';
+      }
+      if (typeof value === 'string') {
+        return value;
+      }
+      try {
+        return JSON.stringify(value);
+      } catch (error) {
+        return String(value);
+      }
+    };
+
+    const titleInfo = info.resolved && typeof info.resolved === 'object' ? info.resolved.title : null;
+    const mascotInfo = info.resolved && typeof info.resolved === 'object' ? info.resolved.mascot : null;
+
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.left = '0';
+    overlay.style.right = '0';
+    overlay.style.bottom = '0';
+    overlay.style.padding = '4px 8px';
+    overlay.style.background = 'rgba(0, 0, 0, 0.7)';
+    overlay.style.color = '#ffffff';
+    overlay.style.fontSize = '12px';
+    overlay.style.fontFamily = 'monospace';
+    overlay.style.pointerEvents = 'none';
+    overlay.style.zIndex = '2147483647';
+    overlay.textContent =
+      `base=${formatValue(info.assetsBase)} | ` +
+      `title.path=${formatValue(titleInfo && typeof titleInfo === 'object' ? titleInfo.path : undefined)} ` +
+      `exists=${titleInfo && typeof titleInfo === 'object' && titleInfo.exists ? 'true' : 'false'} | ` +
+      `mascot.path=${formatValue(mascotInfo && typeof mascotInfo === 'object' ? mascotInfo.path : undefined)} ` +
+      `exists=${mascotInfo && typeof mascotInfo === 'object' && mascotInfo.exists ? 'true' : 'false'}`;
+
+    const appendOverlay = () => {
+      if (!document.body) {
+        return;
+      }
+      document.body.appendChild(overlay);
+    };
+
+    const finalize = () => {
+      diagnosticsOverlayShown = true;
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', appendOverlay, { once: true });
+      document.addEventListener('DOMContentLoaded', finalize, { once: true });
+    } else {
+      appendOverlay();
+      finalize();
+    }
+  }
+
   function resolveAssetUrl(...segments) {
     const desktopApi = window.desktop;
     if (!desktopApi || typeof desktopApi.getAssetUrl !== 'function') {
@@ -21,8 +90,11 @@
     }
   }
 
-  function setAssetImages() {
-    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+  function setAssetImages(providedBackgroundUrl, providedMascotUrl) {
+    const backgroundUrl =
+      typeof providedBackgroundUrl === 'undefined'
+        ? resolveAssetUrl('launcher', 'title-screen.png')
+        : providedBackgroundUrl;
     if (splashElement) {
       if (backgroundUrl) {
         splashElement.style.backgroundImage = `url("${backgroundUrl}")`;
@@ -31,7 +103,10 @@
       }
     }
 
-    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+    const mascotUrl =
+      typeof providedMascotUrl === 'undefined'
+        ? resolveAssetUrl('launcher', 'dancing-don.gif')
+        : providedMascotUrl;
     if (mascotElement) {
       if (mascotUrl) {
         mascotElement.src = mascotUrl;
@@ -126,17 +201,102 @@
     });
   }
 
-  function refreshAssetImages(attempt = 0) {
-    setAssetImages();
-    const desktopReady = window.desktop && typeof window.desktop.getAssetUrl === 'function';
-    if (!desktopReady && attempt < 40) {
-      window.setTimeout(() => refreshAssetImages(attempt + 1), 250);
+  const ASSET_RETRY_LIMIT = 40;
+  const ASSET_RETRY_INTERVAL = 250;
+  const ASSET_INITIAL_DELAY = 50;
+
+  let assetRetryAttempts = 0;
+  let assetRetryTimeoutId = null;
+  let assetRetryCompleted = false;
+
+  function runAssetRetryIteration() {
+    assetRetryTimeoutId = null;
+
+    if (assetRetryCompleted) {
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      return;
+    }
+
+    assetRetryAttempts += 1;
+
+    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+
+    setAssetImages(backgroundUrl, mascotUrl);
+
+    const hasBackground = typeof backgroundUrl === 'string' && backgroundUrl.length > 0;
+    const hasMascot = typeof mascotUrl === 'string' && mascotUrl.length > 0;
+
+    if (hasBackground && hasMascot) {
+      assetRetryCompleted = true;
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      return;
+    }
+
+    assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_RETRY_INTERVAL);
+  }
+
+  function refreshAssetImages(options = {}) {
+    const immediate = options && options.immediate === true;
+
+    if (assetRetryCompleted) {
+      setAssetImages();
+      return;
+    }
+
+    if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      if (immediate) {
+        setAssetImages();
+      }
+      return;
+    }
+
+    if (immediate) {
+      if (assetRetryAttempts === 0 && assetRetryTimeoutId !== null) {
+        return;
+      }
+      if (assetRetryTimeoutId !== null) {
+        window.clearTimeout(assetRetryTimeoutId);
+        assetRetryTimeoutId = null;
+      }
+      runAssetRetryIteration();
+      return;
+    }
+
+    if (assetRetryTimeoutId === null) {
+      assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_INITIAL_DELAY);
+    }
+  }
+
+  const handleDiagnosticsResult = (result) => {
+    if (!result) {
+      return;
+    }
+    renderDiagnosticsOverlay(result);
+  };
+
+  if (window.desktop && typeof window.desktop.diagnoseAssets === 'function') {
+    try {
+      const result = window.desktop.diagnoseAssets();
+      if (result && typeof result.then === 'function') {
+        result.then(handleDiagnosticsResult).catch(() => undefined);
+      } else {
+        handleDiagnosticsResult(result);
+      }
+    } catch (error) {
+      // Ignore diagnostics errors to avoid breaking splash screen.
     }
   }
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
-      refreshAssetImages();
+      refreshAssetImages({ immediate: true });
       updateStatus(payload);
     });
   }
