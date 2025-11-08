@@ -20,7 +20,7 @@ const unpackedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'app.asar.unpacked', 'assets')
     : null;
-const devAssetsBase = path.join(__dirname, '..', 'assets');
+const devAssetsBase = path.join(__dirname, '..', '..', 'assets');
 
 const assetBases = [];
 const assetBaseSet = new Set();
@@ -65,8 +65,15 @@ if (!isPackaged || process.env.ELECTRON_DEV === '1' || assetBases.length === 0) 
   }
 }
 
-const assetsBase = assetBases.length > 0 ? assetBases[0].fsPath : devAssetsBase;
-const assetsBaseUrl = assetBases.length > 0 ? assetBases[0].url : pathToFileURL(assetsBase).href;
+let assetsBase = null;
+let assetsBaseUrl = null;
+
+if (assetBases.length > 0) {
+  assetsBase = assetBases[0].fsPath;
+  assetsBaseUrl = assetBases[0].url;
+} else {
+  console.warn('[desktop:preload] No asset directories found; asset URLs will be unavailable.');
+}
 
 function onStatusUpdate(callback) {
   if (typeof callback !== 'function') {
@@ -109,9 +116,10 @@ function resolveAssetPath(...segments) {
     return null;
   }
 
-  const candidates = assetBases.length
-    ? assetBases
-    : [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }];
+  const fallbackBases = assetsBase && assetsBaseUrl
+    ? [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }]
+    : [];
+  const candidates = assetBases.length ? assetBases : fallbackBases;
 
   for (const base of candidates) {
     const candidatePath = path.join(base.fsPath, ...parts);
@@ -177,9 +185,10 @@ const createDiagnoseAssets = () => {
       ? electronApp.isPackaged
       : isPackaged;
 
-  const basesForReport = assetBases.length
-    ? assetBases
-    : [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }];
+  const fallbackBases = assetsBase && assetsBaseUrl
+    ? [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }]
+    : [];
+  const basesForReport = assetBases.length ? assetBases : fallbackBases;
 
   return {
     isPackaged: resolvedIsPackaged,
