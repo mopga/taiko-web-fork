@@ -13,6 +13,7 @@
   "productName": "Taiko no Desk",
   "scripts": {
     "dev": "cross-env ELECTRON_DEV=1 electron .",
+    "splash:dev": "electron ./standalone/electron/dev_splash_only.js",
     "start": "electron .",
     "lint": "eslint .",
     "set-version": "node ./scripts/set-version.js",
@@ -72,11 +73,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "executableName": "TaikoNoDesk",
@@ -87,15 +92,19 @@
       "icon": "../assets/launcher/app.icns",
       "category": "public.app-category.games",
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
       ],
       "artifactName": "taiko-no-desk-${version}-${os}.${ext}"
     }
   },
   "devDependencies": {
     "cross-env": "^7",
-    "electron": "^30",
+    "electron": "^30.5.1",
     "electron-builder": "^24",
     "eslint": "^9",
     "prettier": "^3"

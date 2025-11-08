@@ -90,6 +90,12 @@ ipcMain.handle('desktop:quit', async () => {
 
 ipcMain.handle('desktop:chooseSongsDir', () => chooseSongsDirectory());
 
+ipcMain.handle('desktop:log', (_e, s) => {
+  try {
+    fs.appendFileSync(path.join(app.getPath('userData'), 'desktop-splash.log'), `[${new Date().toISOString()}] ${s}\n`);
+  } catch {}
+});
+
 async function chooseSongsDirectory() {
   try {
     const info = ensureDataDirectory();
