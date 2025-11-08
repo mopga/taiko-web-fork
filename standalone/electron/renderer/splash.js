@@ -96,8 +96,8 @@
         ? resolveAssetUrl('launcher', 'title-screen.png')
         : providedBackgroundUrl;
     if (splashElement) {
-      if (backgroundUrl) {
-        splashElement.style.backgroundImage = `url("${backgroundUrl}")`;
+      if (appliedBackgroundUrl) {
+        splashElement.style.backgroundImage = `url("${appliedBackgroundUrl}")`;
       } else {
         splashElement.style.removeProperty('background-image');
       }
@@ -108,14 +108,46 @@
         ? resolveAssetUrl('launcher', 'dancing-don.gif')
         : providedMascotUrl;
     if (mascotElement) {
-      if (mascotUrl) {
-        mascotElement.src = mascotUrl;
+      if (appliedMascotUrl) {
+        mascotElement.src = appliedMascotUrl;
         mascotElement.hidden = false;
       } else {
         mascotElement.removeAttribute('src');
         mascotElement.hidden = true;
       }
     }
+  }
+
+  function scheduleAssetRetry(attempt) {
+    const delay = attempt === 0 ? ASSET_INITIAL_DELAY : ASSET_RETRY_DELAY;
+    assetRetryTimer = window.setTimeout(() => {
+      const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+      const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+
+      if (backgroundUrl && mascotUrl) {
+        applyAssetImages(backgroundUrl, mascotUrl);
+        assetRetryTimer = null;
+        assetRetryCompleted = true;
+        return;
+      }
+
+      if (attempt + 1 >= ASSET_RETRY_LIMIT) {
+        assetRetryTimer = null;
+        assetRetryCompleted = true;
+        return;
+      }
+
+      scheduleAssetRetry(attempt + 1);
+    }, delay);
+  }
+
+  function startAssetRetry() {
+    if (assetRetryTimer !== null) {
+      window.clearTimeout(assetRetryTimer);
+      assetRetryTimer = null;
+    }
+    assetRetryCompleted = false;
+    scheduleAssetRetry(0);
   }
 
   function setDetail(text) {
@@ -294,16 +326,39 @@
     }
   }
 
+  const handleDiagnosticsResult = (result) => {
+    if (!result) {
+      return;
+    }
+    renderDiagnosticsOverlay(result);
+  };
+
+  if (window.desktop && typeof window.desktop.diagnoseAssets === 'function') {
+    try {
+      const result = window.desktop.diagnoseAssets();
+      if (result && typeof result.then === 'function') {
+        result.then(handleDiagnosticsResult).catch(() => undefined);
+      } else {
+        handleDiagnosticsResult(result);
+      }
+    } catch (error) {
+      // Ignore diagnostics errors to avoid breaking splash screen.
+    }
+  }
+
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
       refreshAssetImages({ immediate: true });
       updateStatus(payload);
+      if (!assetsResolved && assetRetryTimer === null && !assetRetryCompleted) {
+        startAssetRetry();
+      }
     });
   }
 
   window.addEventListener('focus', () => {
-    setAssetImages();
+    applyAssetImages(appliedBackgroundUrl, appliedMascotUrl);
   });
 
-  refreshAssetImages();
+  startAssetRetry();
 })();
