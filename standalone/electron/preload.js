@@ -1,9 +1,17 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const electronModule = require('electron');
+const { contextBridge, ipcRenderer } = electronModule;
+const electronApp = electronModule.app;
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
 const isPackaged = __dirname.includes('app.asar');
+
+if (!Object.prototype.hasOwnProperty.call(process.env, 'ELECTRON_SPLASH_DIAG')) {
+  process.env.ELECTRON_SPLASH_DIAG = '1';
+}
+
+const enableSplashDiag = process.env.ELECTRON_SPLASH_DIAG === '1';
 const packagedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'assets')
@@ -145,10 +153,56 @@ const debugAssets = Object.freeze({
   bases: assetBases.map((base) => ({ ...base })),
 });
 
-contextBridge.exposeInMainWorld('desktop', {
+const createDiagnoseAssets = () => {
+  if (!enableSplashDiag) {
+    return null;
+  }
+
+  const resolveWithStatus = (...segments) => {
+    const filePath = resolveAssetPath(...segments);
+    if (!filePath) {
+      return { path: null, exists: false };
+    }
+    let exists = false;
+    try {
+      exists = fs.existsSync(filePath);
+    } catch (error) {
+      exists = false;
+    }
+    return { path: filePath, exists };
+  };
+
+  const resolvedIsPackaged =
+    electronApp && typeof electronApp.isPackaged === 'boolean'
+      ? electronApp.isPackaged
+      : isPackaged;
+
+  const basesForReport = assetBases.length
+    ? assetBases
+    : [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }];
+
+  return {
+    isPackaged: resolvedIsPackaged,
+    resourcesPath: process.resourcesPath,
+    assetsBase,
+    assetBases: basesForReport.map(({ kind, fsPath, url }) => ({ kind, fsPath, url })),
+    resolved: {
+      title: resolveWithStatus('launcher', 'title-screen.png'),
+      mascot: resolveWithStatus('launcher', 'dancing-don.gif'),
+    },
+  };
+};
+
+const desktopApi = {
   onStatus: onStatusUpdate,
   requestQuit: () => ipcRenderer.invoke('desktop:quit'),
   chooseSongsDir: () => ipcRenderer.invoke('desktop:chooseSongsDir'),
   getAssetUrl,
   debugAssets,
-});
+};
+
+if (enableSplashDiag) {
+  desktopApi.diagnoseAssets = () => createDiagnoseAssets();
+}
+
+contextBridge.exposeInMainWorld('desktop', desktopApi);
