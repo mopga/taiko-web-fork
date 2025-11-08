@@ -206,6 +206,7 @@ const desktopApi = {
   onStatus: onStatusUpdate,
   requestQuit: () => ipcRenderer.invoke('desktop:quit'),
   chooseSongsDir: () => ipcRenderer.invoke('desktop:chooseSongsDir'),
+  log: (msg) => ipcRenderer.invoke('desktop:log', msg),
   getAssetUrl,
   debugAssets,
 };

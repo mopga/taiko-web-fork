@@ -318,6 +318,11 @@
 
   // Гарантированно подставляем фон после готовности DOM и логируем URL
   window.addEventListener('DOMContentLoaded', () => {
+    const api = window.desktop;
+    api?.log?.(`[splash] __dirname=${typeof __dirname !== 'undefined' ? __dirname : 'n/a'} location=${location.href}`);
+    api?.log?.(`[splash] diagnose=${JSON.stringify(api?.diagnoseAssets?.(), null, 2)}`);
+    const url = api?.getAssetUrl?.('launcher', 'title-screen.png');
+    api?.log?.(`[splash] url=${url}`);
     try {
       const bg = document.querySelector('.bg');
       const getUrl = window.desktop && window.desktop.getAssetUrl;
@@ -325,10 +330,10 @@
         console.warn('[splash] bg or window.desktop.getAssetUrl is missing', { hasBG: !!bg, hasGet: !!getUrl });
         return;
       }
-      const url = getUrl('launcher', 'title-screen.png');
-      console.log('[splash] background url =', url);
-      if (url) {
-        bg.style.backgroundImage = `url("${url}")`;
+      const url2 = getUrl('launcher', 'title-screen.png');
+      console.log('[splash] background url =', url2);
+      if (url2) {
+        bg.style.backgroundImage = `url("${url2}")`;
         // на всякий случай усилим «cover»/позицию (если в css не применилось)
         bg.style.backgroundSize = 'cover';
         bg.style.backgroundPosition = 'center center';
