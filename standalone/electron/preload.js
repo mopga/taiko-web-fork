@@ -20,6 +20,10 @@ const unpackedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'app.asar.unpacked', 'assets')
     : null;
+// Дополнительные «железные» базы для инсталлятора на основе win-unpacked:
+const execDir = path.dirname(process.execPath || '');
+const altResourcesAssetsBase = execDir ? path.join(execDir, 'resources', 'assets') : null;
+const altFlatAssetsBase      = execDir ? path.join(execDir, 'assets')            : null;
 const devAssetsBase = path.join(__dirname, '..', '..', 'assets');
 
 const assetBases = [];
@@ -50,15 +54,14 @@ const pushAssetBase = (kind, fsPath) => {
   return entry;
 };
 
-if (packagedAssetsBase) {
-  pushAssetBase('packaged', packagedAssetsBase);
-}
-if (unpackedAssetsBase) {
-  pushAssetBase('unpacked', unpackedAssetsBase);
-}
+// Порядок важен: стандартные пути, затем альтернативы рядом с exe
+if (packagedAssetsBase)      pushAssetBase('packaged', packagedAssetsBase);
+if (unpackedAssetsBase)      pushAssetBase('unpacked', unpackedAssetsBase);
+if (altResourcesAssetsBase)  pushAssetBase('packaged-alt', altResourcesAssetsBase);
+if (altFlatAssetsBase)       pushAssetBase('packaged-alt', altFlatAssetsBase);
 
 // Dev fallback: если базы выше не нашлись или явно dev-режим
-if (!assetBases.length || process.env.ELECTRON_DEV === '1') {
+if (assetBases.length === 0 || process.env.ELECTRON_DEV === '1') {
   if (fs.existsSync(devAssetsBase)) {
     pushAssetBase('dev', devAssetsBase);
   }
