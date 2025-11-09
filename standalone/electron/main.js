@@ -96,6 +96,25 @@ ipcMain.handle('desktop:log', (_e, s) => {
   } catch {}
 });
 
+// Добавляем IPC handler для получения пути к ассетам
+ipcMain.handle('desktop:getAssetsPath', () => {
+  if (process.resourcesPath) {
+    const assetsPath = path.join(process.resourcesPath, 'assets');
+    if (fs.existsSync(assetsPath)) {
+      return assetsPath;
+    }
+  }
+  // Fallback: вычисляем путь вручную
+  if (process.execPath) {
+    const execDir = path.dirname(process.execPath);
+    const assetsPath = path.join(execDir, 'resources', 'assets');
+    if (fs.existsSync(assetsPath)) {
+      return assetsPath;
+    }
+  }
+  return null;
+});
+
 async function chooseSongsDirectory() {
   try {
     const info = ensureDataDirectory();

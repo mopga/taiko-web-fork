@@ -111,7 +111,32 @@
     }
   }
 
-  function resolveAssetUrl(...segments) {
+  async function resolveAssetUrl(...segments) {
+    const desktopApi = window.desktop;
+    if (!desktopApi || typeof desktopApi.getAssetUrl !== 'function') {
+      return null;
+    }
+    
+    // Сначала убедимся, что assetsBase инициализирован
+    if (desktopApi.ensureAssetsBase && typeof desktopApi.ensureAssetsBase === 'function') {
+      try {
+        await desktopApi.ensureAssetsBase();
+      } catch (error) {
+        // Игнорируем ошибки, продолжаем попытку
+      }
+    }
+    
+    try {
+      const url = desktopApi.getAssetUrl(...segments);
+      return typeof url === 'string' && url.length > 0 ? url : null;
+    } catch (error) {
+      console.error('[splash] Error resolving asset URL:', error);
+      return null;
+    }
+  }
+  
+  // Синхронная версия для обратной совместимости
+  function resolveAssetUrlSync(...segments) {
     const desktopApi = window.desktop;
     if (!desktopApi || typeof desktopApi.getAssetUrl !== 'function') {
       return null;
@@ -124,15 +149,16 @@
     }
   }
 
-  function setAssetImages(providedBackgroundUrl, providedMascotUrl) {
-    const backgroundUrl =
-      typeof providedBackgroundUrl === 'undefined'
-        ? resolveAssetUrl('launcher', 'title-screen.png')
-        : providedBackgroundUrl;
-    const mascotUrl =
-      typeof providedMascotUrl === 'undefined'
-        ? resolveAssetUrl('launcher', 'dancing-don.gif')
-        : providedMascotUrl;
+  async function setAssetImages(providedBackgroundUrl, providedMascotUrl) {
+    let backgroundUrl = providedBackgroundUrl;
+    let mascotUrl = providedMascotUrl;
+    
+    if (typeof providedBackgroundUrl === 'undefined') {
+      backgroundUrl = await resolveAssetUrl('launcher', 'title-screen.png');
+    }
+    if (typeof providedMascotUrl === 'undefined') {
+      mascotUrl = await resolveAssetUrl('launcher', 'dancing-don.gif');
+    }
 
     applyAssetImages(backgroundUrl, mascotUrl);
   }
@@ -228,7 +254,7 @@
   let assetRetryTimeoutId = null;
   let assetRetryCompleted = false;
 
-  function runAssetRetryIteration() {
+  async function runAssetRetryIteration() {
     if (assetRetryCompleted || assetRetryAttempts >= ASSET_RETRY_LIMIT) {
       return;
     }
@@ -236,10 +262,10 @@
     assetRetryTimeoutId = null;
     assetRetryAttempts += 1;
 
-    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
-    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+    const backgroundUrl = await resolveAssetUrl('launcher', 'title-screen.png');
+    const mascotUrl = await resolveAssetUrl('launcher', 'dancing-don.gif');
 
-    setAssetImages(backgroundUrl, mascotUrl);
+    await setAssetImages(backgroundUrl, mascotUrl);
 
     const hasBackground = typeof backgroundUrl === 'string' && backgroundUrl.length > 0;
     const hasMascot = typeof mascotUrl === 'string' && mascotUrl.length > 0;
@@ -250,21 +276,26 @@
     }
 
     if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
+      console.warn('[splash] Failed to load assets after', ASSET_RETRY_LIMIT, 'attempts');
       return;
     }
 
-    assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_RETRY_INTERVAL);
+    assetRetryTimeoutId = window.setTimeout(() => {
+      runAssetRetryIteration().catch(err => {
+        console.error('[splash] Error in asset retry iteration:', err);
+      });
+    }, ASSET_RETRY_INTERVAL);
   }
 
-  function refreshAssetImages({ immediate = false } = {}) {
+  async function refreshAssetImages({ immediate = false } = {}) {
     if (assetRetryCompleted) {
-      setAssetImages();
+      await setAssetImages();
       return;
     }
 
     if (assetRetryAttempts >= ASSET_RETRY_LIMIT) {
       if (immediate) {
-        setAssetImages();
+        await setAssetImages();
       }
       return;
     }
@@ -274,12 +305,16 @@
         window.clearTimeout(assetRetryTimeoutId);
         assetRetryTimeoutId = null;
       }
-      runAssetRetryIteration();
+      await runAssetRetryIteration();
       return;
     }
 
     if (assetRetryTimeoutId === null) {
-      assetRetryTimeoutId = window.setTimeout(runAssetRetryIteration, ASSET_INITIAL_DELAY);
+      assetRetryTimeoutId = window.setTimeout(() => {
+        runAssetRetryIteration().catch(err => {
+          console.error('[splash] Error in asset retry:', err);
+        });
+      }, ASSET_INITIAL_DELAY);
     }
   }
 
@@ -305,35 +340,45 @@
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
-      refreshAssetImages({ immediate: true });
+      refreshAssetImages({ immediate: true }).catch(err => {
+        console.error('[splash] Error refreshing assets on status update:', err);
+      });
       updateStatus(payload);
     });
   }
 
   window.addEventListener('focus', () => {
-    setAssetImages(appliedBackgroundUrl, appliedMascotUrl);
+    setAssetImages(appliedBackgroundUrl, appliedMascotUrl).catch(err => {
+      console.error('[splash] Error setting assets on focus:', err);
+    });
   });
 
   // Гарантированно подставляем фон после готовности DOM
-  function tryLoadAssetsOnReady() {
+  async function tryLoadAssetsOnReady() {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', tryLoadAssetsOnReady, { once: true });
+      document.addEventListener('DOMContentLoaded', () => {
+        tryLoadAssetsOnReady().catch(err => {
+          console.error('[splash] Error loading assets on DOM ready:', err);
+        });
+      }, { once: true });
       return;
     }
 
     // Попытка загрузить ассеты сразу при готовности DOM
-    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
-    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
+    const backgroundUrl = await resolveAssetUrl('launcher', 'title-screen.png');
+    const mascotUrl = await resolveAssetUrl('launcher', 'dancing-don.gif');
     
     if (backgroundUrl || mascotUrl) {
-      setAssetImages(backgroundUrl, mascotUrl);
+      await setAssetImages(backgroundUrl, mascotUrl);
     }
     
     // Запускаем механизм retry на случай если ассеты еще не готовы
-    refreshAssetImages();
+    await refreshAssetImages();
   }
 
   // Запускаем попытку загрузки
-  tryLoadAssetsOnReady();
+  tryLoadAssetsOnReady().catch(err => {
+    console.error('[splash] Error in initial asset load:', err);
+  });
 })();
 
