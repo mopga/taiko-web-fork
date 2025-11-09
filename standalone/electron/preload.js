@@ -37,39 +37,24 @@ if (!Object.prototype.hasOwnProperty.call(process.env, 'ELECTRON_SPLASH_DIAG')) 
 const enableSplashDiag = process.env.ELECTRON_SPLASH_DIAG === '1';
 
 // Определяем execDir один раз для всех путей
-const execDir = process.execPath && typeof process.execPath === 'string'
-  ? path.dirname(process.execPath)
-  : null;
-
-// Стандартные пути через process.resourcesPath (packaged режим)
-const packagedAssetsBase =
-  process.resourcesPath && typeof process.resourcesPath === 'string'
-    ? path.join(process.resourcesPath, 'assets')
+const execPathValue =
+  typeof process !== 'undefined' && process.execPath && typeof process.execPath === 'string'
+    ? process.execPath
     : null;
-const unpackedAssetsBase =
-  process.resourcesPath && typeof process.resourcesPath === 'string'
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'assets')
-    : null;
-
-// Альтернативные пути для win-unpacked и других инсталляторов
-// Эти пути проверяются относительно директории исполняемого файла
-const altResourcesAssetsBase = execDir ? path.join(execDir, 'resources', 'assets') : null;
-const altFlatAssetsBase = execDir ? path.join(execDir, 'assets') : null;
+const execDir = execPathValue ? path.dirname(execPathValue) : null;
 
 // Dev режим: путь относительно __dirname (для разработки)
 const devAssetsBase = path.join(__dirname, '..', '..', 'assets');
 
 const assetBases = [];
 const assetBaseSet = new Set();
+const assetBaseMap = new Map();
 
-const pushAssetBase = (kind, fsPath) => {
+const pushAssetBase = (kind, fsPath, options = {}) => {
   if (!fsPath) {
     return;
   }
   const resolved = path.resolve(fsPath);
-  if (assetBaseSet.has(resolved)) {
-    return;
-  }
   try {
     // Проверяем существование базовой директории
     if (!fs.existsSync(resolved)) {
@@ -88,44 +73,63 @@ const pushAssetBase = (kind, fsPath) => {
     fsPath: resolved,
     url: pathToFileURL(resolved).href,
   };
-  assetBases.push(entry);
+
+  if (assetBaseSet.has(resolved)) {
+    if (options.preferFront) {
+      const existing = assetBaseMap.get(resolved);
+      if (existing) {
+        const existingIndex = assetBases.indexOf(existing);
+        if (existingIndex >= 0) {
+          assetBases.splice(existingIndex, 1);
+        }
+      }
+      assetBases.unshift(entry);
+      assetBaseMap.set(resolved, entry);
+    }
+    return assetBaseMap.get(resolved) || null;
+  }
+
+  if (options.preferFront) {
+    assetBases.unshift(entry);
+  } else {
+    assetBases.push(entry);
+  }
   assetBaseSet.add(resolved);
+  assetBaseMap.set(resolved, entry);
   return entry;
 };
 
-// Порядок важен: стандартные пути, затем альтернативы рядом с exe
+// Порядок важен: стандартные пути, затем альтернативы рядом с exe и __dirname
 // Проверяем пути в порядке приоритета для максимальной совместимости
 
-// 1. Стандартный packaged путь (через process.resourcesPath)
-// Это основной путь для packaged приложений
-if (packagedAssetsBase) {
-  pushAssetBase('packaged', packagedAssetsBase);
+const resourcesPathValue =
+  typeof process !== 'undefined' && process.resourcesPath && typeof process.resourcesPath === 'string'
+    ? process.resourcesPath
+    : null;
+
+if (resourcesPathValue) {
+  pushAssetBase('packaged', path.join(resourcesPathValue, 'assets'));
 }
 
-// 2. Unpacked путь (для asar.unpacked)
-// Для случаев, когда ассеты находятся в app.asar.unpacked
-if (unpackedAssetsBase) {
-  pushAssetBase('unpacked', unpackedAssetsBase);
+if (resourcesPathValue) {
+  pushAssetBase('unpacked', path.join(resourcesPathValue, 'app.asar.unpacked', 'assets'));
 }
 
-// 3. Альтернативный путь через execDir/resources/assets
-// КРИТИЧЕСКИ ВАЖНО для win-unpacked билдов и инсталляторов
-// Проверяем этот путь независимо от process.resourcesPath,
-// так как в некоторых случаях process.resourcesPath может быть недоступен
-if (altResourcesAssetsBase) {
-  pushAssetBase('packaged-alt-resources', altResourcesAssetsBase);
+if (execDir) {
+  pushAssetBase('packaged-alt', path.join(execDir, 'resources', 'assets'));
 }
 
-// 4. Плоский путь через execDir/assets
-// Для некоторых инсталляторов, которые копируют ассеты напрямую в папку приложения
-if (altFlatAssetsBase) {
-  pushAssetBase('packaged-alt-flat', altFlatAssetsBase);
+if (execDir) {
+  pushAssetBase('packaged-alt', path.join(execDir, 'assets'));
 }
+
+pushAssetBase('dirname', path.resolve(__dirname, '..', 'assets'));
+pushAssetBase('dirname', path.resolve(__dirname, '..', '..', 'assets'));
 
 // Dev fallback: если базы выше не нашлись или явно dev-режим
 if (assetBases.length === 0 || process.env.ELECTRON_DEV === '1') {
   if (devAssetsBase && fs.existsSync(devAssetsBase)) {
-    pushAssetBase('dev', devAssetsBase);
+    pushAssetBase('dev', devAssetsBase, { preferFront: true });
   }
 }
 
@@ -133,15 +137,19 @@ if (assetBases.length === 0 || process.env.ELECTRON_DEV === '1') {
 if (enableSplashDiag && (assetBases.length === 0 || process.env.ELECTRON_DEV === '1')) {
   console.log('[desktop:preload] Asset path diagnosis:', {
     isPackaged,
-    execPath: process.execPath,
+    execPath: typeof process !== 'undefined' ? process.execPath : null,
     execDir,
-    resourcesPath: process.resourcesPath,
+    resourcesPath: typeof process !== 'undefined' ? process.resourcesPath : null,
+    dirname: __dirname,
+    assetBasesLength: assetBases.length,
     __dirname,
     checkedPaths: {
-      packagedAssetsBase,
-      unpackedAssetsBase,
-      altResourcesAssetsBase,
-      altFlatAssetsBase,
+      resourcesPathAssets: resourcesPathValue ? path.join(resourcesPathValue, 'assets') : null,
+      resourcesPathUnpacked: resourcesPathValue
+        ? path.join(resourcesPathValue, 'app.asar.unpacked', 'assets')
+        : null,
+      execDirResources: execDir ? path.join(execDir, 'resources', 'assets') : null,
+      execDirFlat: execDir ? path.join(execDir, 'assets') : null,
       devAssetsBase,
     },
     foundBases: assetBases.map(b => ({ kind: b.kind, fsPath: b.fsPath })),
@@ -274,9 +282,11 @@ const createDiagnoseAssets = () => {
   // Всегда возвращаем объект с диагностической информацией
   const diagnosis = {
     isPackaged: resolvedIsPackaged,
-    resourcesPath: process.resourcesPath || null,
-    execPath: process.execPath || null,
+    resourcesPath: (typeof process !== 'undefined' && process.resourcesPath) || null,
+    execPath: (typeof process !== 'undefined' && process.execPath) || null,
     execDir: execDir || null,
+    dirname: __dirname,
+    assetBasesLength: assetBases.length,
     assetsBase: assetsBase || null,
     assetsBaseUrl: assetsBaseUrl || null,
     assetBases: basesForReport.map(({ kind, fsPath, url }) => ({ kind, fsPath, url })),
