@@ -236,6 +236,33 @@ async function getAssetsPathFromMain() {
   return null;
 }
 
+async function ensureAssetsBase() {
+  if (assetsBaseCache) {
+    return assetsBaseCache;
+  }
+
+  let basePath = findAssetsBase();
+
+  if (!basePath) {
+    basePath = await getAssetsPathFromMain();
+  }
+
+  if (basePath && typeof basePath === 'string') {
+    assetsBaseCache = basePath;
+    try {
+      assetsBaseUrl = pathToFileURL(basePath).href;
+    } catch (error) {
+      if (enableSplashDiag) {
+        console.log('[desktop:preload] Error converting assets base path to URL:', error.message);
+      }
+      assetsBaseUrl = null;
+    }
+    return assetsBaseCache;
+  }
+
+  return null;
+}
+
 function resolveAssetPath(...segments) {
   // Используем кэшированное значение или исходное
   const currentAssetsBase = assetsBaseCache || assetsBase;
@@ -413,4 +440,10 @@ if (enableSplashDiag) {
   desktopApi.diagnoseAssets = () => createDiagnoseAssets();
 }
 
-contextBridge.exposeInMainWorld('desktop', desktopApi);
+const frozenDesktopApi = Object.freeze(desktopApi);
+
+try {
+  contextBridge.exposeInMainWorld('desktop', frozenDesktopApi);
+} catch (error) {
+  console.error('[desktop:preload] Failed to expose desktop API:', error);
+}
