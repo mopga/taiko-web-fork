@@ -1,17 +1,47 @@
 const electronModule = require('electron');
 const { contextBridge, ipcRenderer } = electronModule;
-const electronApp = electronModule.app;
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
-const isPackaged = __dirname.includes('app.asar');
+// Определение isPackaged: проверяем несколько признаков
+const isPackaged = (() => {
+  // 1. Проверяем наличие app.asar в пути
+  if (__dirname.includes('app.asar')) {
+    return true;
+  }
+  // 2. Проверяем наличие process.resourcesPath (устанавливается Electron в packaged режиме)
+  if (process.resourcesPath && typeof process.resourcesPath === 'string') {
+    // resourcesPath существует только в packaged режиме
+    return true;
+  }
+  // 3. Проверяем, что execPath указывает на установленное приложение (не dev режим)
+  if (process.execPath && typeof process.execPath === 'string') {
+    const execDir = path.dirname(process.execPath);
+    // Если рядом с exe есть resources папка, скорее всего это packaged
+    try {
+      if (fs.existsSync(path.join(execDir, 'resources'))) {
+        return true;
+      }
+    } catch (error) {
+      // Игнорируем ошибки
+    }
+  }
+  return false;
+})();
 
 if (!Object.prototype.hasOwnProperty.call(process.env, 'ELECTRON_SPLASH_DIAG')) {
   process.env.ELECTRON_SPLASH_DIAG = '1';
 }
 
 const enableSplashDiag = process.env.ELECTRON_SPLASH_DIAG === '1';
+
+// Определяем execDir один раз для всех путей
+const execDir = process.execPath && typeof process.execPath === 'string'
+  ? path.dirname(process.execPath)
+  : null;
+
+// Стандартные пути через process.resourcesPath (packaged режим)
 const packagedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'assets')
@@ -20,10 +50,13 @@ const unpackedAssetsBase =
   process.resourcesPath && typeof process.resourcesPath === 'string'
     ? path.join(process.resourcesPath, 'app.asar.unpacked', 'assets')
     : null;
-// Дополнительные «железные» базы для инсталлятора на основе win-unpacked:
-const execDir = path.dirname(process.execPath || '');
+
+// Альтернативные пути для win-unpacked и других инсталляторов
+// Эти пути проверяются относительно директории исполняемого файла
 const altResourcesAssetsBase = execDir ? path.join(execDir, 'resources', 'assets') : null;
-const altFlatAssetsBase      = execDir ? path.join(execDir, 'assets')            : null;
+const altFlatAssetsBase = execDir ? path.join(execDir, 'assets') : null;
+
+// Dev режим: путь относительно __dirname (для разработки)
 const devAssetsBase = path.join(__dirname, '..', '..', 'assets');
 
 const assetBases = [];
@@ -38,7 +71,13 @@ const pushAssetBase = (kind, fsPath) => {
     return;
   }
   try {
+    // Проверяем существование базовой директории
     if (!fs.existsSync(resolved)) {
+      return;
+    }
+    // Дополнительная проверка: убеждаемся, что это директория (не файл)
+    const stats = fs.statSync(resolved);
+    if (!stats.isDirectory()) {
       return;
     }
   } catch (error) {
@@ -55,16 +94,58 @@ const pushAssetBase = (kind, fsPath) => {
 };
 
 // Порядок важен: стандартные пути, затем альтернативы рядом с exe
-if (packagedAssetsBase)      pushAssetBase('packaged', packagedAssetsBase);
-if (unpackedAssetsBase)      pushAssetBase('unpacked', unpackedAssetsBase);
-if (altResourcesAssetsBase)  pushAssetBase('packaged-alt', altResourcesAssetsBase);
-if (altFlatAssetsBase)       pushAssetBase('packaged-alt', altFlatAssetsBase);
+// Проверяем пути в порядке приоритета для максимальной совместимости
+
+// 1. Стандартный packaged путь (через process.resourcesPath)
+// Это основной путь для packaged приложений
+if (packagedAssetsBase) {
+  pushAssetBase('packaged', packagedAssetsBase);
+}
+
+// 2. Unpacked путь (для asar.unpacked)
+// Для случаев, когда ассеты находятся в app.asar.unpacked
+if (unpackedAssetsBase) {
+  pushAssetBase('unpacked', unpackedAssetsBase);
+}
+
+// 3. Альтернативный путь через execDir/resources/assets
+// КРИТИЧЕСКИ ВАЖНО для win-unpacked билдов и инсталляторов
+// Проверяем этот путь независимо от process.resourcesPath,
+// так как в некоторых случаях process.resourcesPath может быть недоступен
+if (altResourcesAssetsBase) {
+  pushAssetBase('packaged-alt-resources', altResourcesAssetsBase);
+}
+
+// 4. Плоский путь через execDir/assets
+// Для некоторых инсталляторов, которые копируют ассеты напрямую в папку приложения
+if (altFlatAssetsBase) {
+  pushAssetBase('packaged-alt-flat', altFlatAssetsBase);
+}
 
 // Dev fallback: если базы выше не нашлись или явно dev-режим
 if (assetBases.length === 0 || process.env.ELECTRON_DEV === '1') {
-  if (fs.existsSync(devAssetsBase)) {
+  if (devAssetsBase && fs.existsSync(devAssetsBase)) {
     pushAssetBase('dev', devAssetsBase);
   }
+}
+
+// Диагностическое логирование (только в dev или если не найдено баз)
+if (enableSplashDiag && (assetBases.length === 0 || process.env.ELECTRON_DEV === '1')) {
+  console.log('[desktop:preload] Asset path diagnosis:', {
+    isPackaged,
+    execPath: process.execPath,
+    execDir,
+    resourcesPath: process.resourcesPath,
+    __dirname,
+    checkedPaths: {
+      packagedAssetsBase,
+      unpackedAssetsBase,
+      altResourcesAssetsBase,
+      altFlatAssetsBase,
+      devAssetsBase,
+    },
+    foundBases: assetBases.map(b => ({ kind: b.kind, fsPath: b.fsPath })),
+  });
 }
 
 let assetsBase = null;
@@ -182,26 +263,30 @@ const createDiagnoseAssets = () => {
     return { path: filePath, exists };
   };
 
-  const resolvedIsPackaged =
-    electronApp && typeof electronApp.isPackaged === 'boolean'
-      ? electronApp.isPackaged
-      : isPackaged;
+  // isPackaged уже определен выше, используем его напрямую
+  const resolvedIsPackaged = isPackaged;
 
   const fallbackBases = assetsBase && assetsBaseUrl
     ? [{ kind: 'fallback', fsPath: assetsBase, url: assetsBaseUrl }]
     : [];
   const basesForReport = assetBases.length ? assetBases : fallbackBases;
 
-  return {
+  // Всегда возвращаем объект с диагностической информацией
+  const diagnosis = {
     isPackaged: resolvedIsPackaged,
-    resourcesPath: process.resourcesPath,
-    assetsBase,
+    resourcesPath: process.resourcesPath || null,
+    execPath: process.execPath || null,
+    execDir: execDir || null,
+    assetsBase: assetsBase || null,
+    assetsBaseUrl: assetsBaseUrl || null,
     assetBases: basesForReport.map(({ kind, fsPath, url }) => ({ kind, fsPath, url })),
     resolved: {
       title: resolveWithStatus('launcher', 'title-screen.png'),
       mascot: resolveWithStatus('launcher', 'dancing-don.gif'),
     },
   };
+
+  return diagnosis;
 };
 
 const desktopApi = {

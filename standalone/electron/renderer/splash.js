@@ -368,9 +368,21 @@
     const bg = document.querySelector('.bg');
     const url = api.getAssetUrl && api.getAssetUrl('launcher','title-screen.png');
     const cs  = bg ? getComputedStyle(bg).backgroundImage : '(no .bg)';
+    
+    // Получаем диагностику один раз
+    const diag = api.diagnoseAssets && api.diagnoseAssets();
+    const isPackaged = diag ? (diag.isPackaged ?? 'n/a') : 'n/a';
+    const assetsBase = diag ? (diag.assetsBase ?? 'n/a') : 'n/a';
+    const resourcesPath = diag ? (diag.resourcesPath ?? 'n/a') : 'n/a';
+    const execPath = diag ? (diag.execPath ?? 'n/a') : 'n/a';
+    const assetBasesCount = diag && diag.assetBases ? diag.assetBases.length : 0;
+    
     box.textContent =
-      `isPackaged=${(api.diagnoseAssets && api.diagnoseAssets().isPackaged) ?? 'n/a'}\n` +
-      `assetsBase=${(api.diagnoseAssets && api.diagnoseAssets().assetsBase) ?? 'n/a'}\n` +
+      `isPackaged=${isPackaged}\n` +
+      `resourcesPath=${resourcesPath}\n` +
+      `execPath=${execPath}\n` +
+      `assetsBase=${assetsBase}\n` +
+      `assetBases=${assetBasesCount}\n` +
       `url=${url ?? 'null'}\n` +
       `computed=${cs}`;
 
