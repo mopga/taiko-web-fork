@@ -14,6 +14,42 @@ const DEFAULT_PORT = 8000;
 const HEALTH_TIMEOUT_MS = 30_000;
 const SONGS_TIMEOUT_MS = 60_000;
 
+const DESKTOP_LOG_DIR_NAME = 'logs';
+const DESKTOP_LOG_FILE_NAME = 'desktop.log';
+
+const coerceDesktopLogMessage = (value) => {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value === null || typeof value === 'undefined') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+};
+
+function appendDesktopLog(message) {
+  const text = coerceDesktopLogMessage(message);
+  if (!text || text.length === 0) {
+    return;
+  }
+  try {
+    const userDataPath = app.getPath('userData');
+    const logDir = path.join(userDataPath, DESKTOP_LOG_DIR_NAME);
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, DESKTOP_LOG_FILE_NAME);
+    const line = `[${new Date().toISOString()}] ${text}\n`;
+    fs.appendFileSync(logPath, line);
+  } catch (error) {
+    // Swallow logging errors to avoid crashing the app.
+  }
+}
+
+appendDesktopLog(`main:bootstrap pid=${process.pid}`);
+
 let mainWindow = null;
 let backendProcess = null;
 let backendUrl = null;
@@ -83,6 +119,7 @@ if (process.platform === 'win32') {
 }
 
 ipcMain.handle('desktop:quit', async () => {
+  appendDesktopLog('main:quit-requested');
   quitting = true;
   await stopBackend();
   app.quit();
@@ -94,6 +131,11 @@ ipcMain.handle('desktop:log', (_e, s) => {
   try {
     fs.appendFileSync(path.join(app.getPath('userData'), 'desktop-splash.log'), `[${new Date().toISOString()}] ${s}\n`);
   } catch {}
+  appendDesktopLog(`renderer:${coerceDesktopLogMessage(s)}`);
+});
+
+ipcMain.on('desktop:preload-log', (_event, message) => {
+  appendDesktopLog(`preload:${coerceDesktopLogMessage(message)}`);
 });
 
 // Добавляем IPC handler для получения пути к ассетам
@@ -212,12 +254,14 @@ function resolveWindowIcon() {
 }
 
 app.whenReady().then(() => {
+  appendDesktopLog('main:event:ready');
   setupApplicationMenu();
   createMainWindow();
   startBackendFlow();
 });
 
 app.on('before-quit', (event) => {
+  appendDesktopLog('main:event:before-quit');
   if (quitting) {
     return;
   }
@@ -244,6 +288,7 @@ app.on('activate', () => {
 });
 
 process.on('exit', () => {
+  appendDesktopLog('main:event:process-exit');
   quitting = true;
   if (backendProcess) {
     try {
@@ -258,6 +303,8 @@ function createMainWindow() {
   if (mainWindow) {
     return mainWindow;
   }
+
+  appendDesktopLog('main:create-main-window');
 
   const windowOptions = {
     width: 1280,
@@ -307,6 +354,7 @@ async function startBackendFlow() {
     return;
   }
   starting = true;
+  appendDesktopLog('main:start-backend-flow');
 
   try {
     backendReady = false;
@@ -325,23 +373,29 @@ async function startBackendFlow() {
     updateStatus('Определяем порт…');
     const port = await resolvePort();
     currentPort = port;
+    appendDesktopLog(`main:resolved-port ${port}`);
     emitStatus();
     backendUrl = `http://127.0.0.1:${port}`;
 
     updateStatus('Запускаем сервер…');
     backendProcess = spawnBackend(backendExecutable, backendWorkingDir, info.dataDir, port);
+    appendDesktopLog(`main:backend-spawned pid=${backendProcess.pid}`);
 
     updateStatus('Ожидаем запуск сервера…');
     await waitForHealthz(`${backendUrl}/healthz`, HEALTH_TIMEOUT_MS);
+    appendDesktopLog('main:backend-healthz-ok');
 
     await runSongsScan();
 
     backendReady = true;
+    appendDesktopLog('main:backend-ready');
     const window = createMainWindow();
     await window.loadURL(`${backendUrl}/`);
   } catch (error) {
     backendReady = false;
     await stopBackend();
+    const errorText = error instanceof Error ? `${error.name}: ${error.message}` : coerceDesktopLogMessage(error);
+    appendDesktopLog(`main:startup-error ${errorText}`);
     await showStartupError(error);
   } finally {
     starting = false;
@@ -963,6 +1017,7 @@ function stopBackend() {
     return Promise.resolve();
   }
 
+  appendDesktopLog('main:stop-backend');
   const child = backendProcess;
   backendProcess = null;
   backendReady = false;
