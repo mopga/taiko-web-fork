@@ -314,91 +314,26 @@
     setAssetImages(appliedBackgroundUrl, appliedMascotUrl);
   });
 
-  refreshAssetImages();
-
-  // Гарантированно подставляем фон после готовности DOM и логируем URL
-  window.addEventListener('DOMContentLoaded', () => {
-    const api = window.desktop;
-    api?.log?.(`[splash] __dirname=${typeof __dirname !== 'undefined' ? __dirname : 'n/a'} location=${location.href}`);
-    api?.log?.(`[splash] diagnose=${JSON.stringify(api?.diagnoseAssets?.(), null, 2)}`);
-    const url = api?.getAssetUrl?.('launcher', 'title-screen.png');
-    api?.log?.(`[splash] url=${url}`);
-    try {
-      const bg = document.querySelector('.bg');
-      const getUrl = window.desktop && window.desktop.getAssetUrl;
-      if (!bg || !getUrl) {
-        console.warn('[splash] bg or window.desktop.getAssetUrl is missing', { hasBG: !!bg, hasGet: !!getUrl });
-        return;
-      }
-      const url2 = getUrl('launcher', 'title-screen.png');
-      console.log('[splash] background url =', url2);
-      if (url2) {
-        bg.style.backgroundImage = `url("${url2}")`;
-        // на всякий случай усилим «cover»/позицию (если в css не применилось)
-        bg.style.backgroundSize = 'cover';
-        bg.style.backgroundPosition = 'center center';
-        bg.style.backgroundRepeat = 'no-repeat';
-      }
-    } catch (e) {
-      console.error('[splash] failed to set background', e);
+  // Гарантированно подставляем фон после готовности DOM
+  function tryLoadAssetsOnReady() {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', tryLoadAssetsOnReady, { once: true });
+      return;
     }
-  });
-})();
 
-// ===== OSD DIAG =====
-(function () {
-  const append = (el) => (document.body ? document.body.appendChild(el)
-                                        : document.addEventListener('DOMContentLoaded', () => document.body.appendChild(el), { once:true }));
-
-  const box = document.createElement('div');
-  box.style.position = 'fixed';
-  box.style.left = '8px';
-  box.style.bottom = '8px';
-  box.style.background = 'rgba(0,0,0,0.7)';
-  box.style.color = '#fff';
-  box.style.font = '12px/1.3 monospace';
-  box.style.padding = '6px 8px';
-  box.style.borderRadius = '6px';
-  box.style.zIndex = '2147483647';
-  box.textContent = 'diag: boot...';
-  append(box);
-
-  const run = () => {
-    const api = window.desktop || {};
-    const bg = document.querySelector('.bg');
-    const url = api.getAssetUrl && api.getAssetUrl('launcher','title-screen.png');
-    const cs  = bg ? getComputedStyle(bg).backgroundImage : '(no .bg)';
+    // Попытка загрузить ассеты сразу при готовности DOM
+    const backgroundUrl = resolveAssetUrl('launcher', 'title-screen.png');
+    const mascotUrl = resolveAssetUrl('launcher', 'dancing-don.gif');
     
-    // Получаем диагностику один раз
-    const diag = api.diagnoseAssets && api.diagnoseAssets();
-    const isPackaged = diag ? (diag.isPackaged ?? 'n/a') : 'n/a';
-    const assetsBase = diag ? (diag.assetsBase ?? 'n/a') : 'n/a';
-    const resourcesPath = diag ? (diag.resourcesPath ?? 'n/a') : 'n/a';
-    const execPath = diag ? (diag.execPath ?? 'n/a') : 'n/a';
-    const assetBasesCount = diag && diag.assetBases ? diag.assetBases.length : 0;
-    
-    box.textContent =
-      `isPackaged=${isPackaged}\n` +
-      `resourcesPath=${resourcesPath}\n` +
-      `execPath=${execPath}\n` +
-      `assetsBase=${assetsBase}\n` +
-      `assetBases=${assetBasesCount}\n` +
-      `url=${url ?? 'null'}\n` +
-      `computed=${cs}`;
-
-    // если URL есть — попробуем реальную загрузку как <img>
-    if (url) {
-      const img = new Image();
-      img.onload  = () => box.textContent += `\nimg: LOADED ✓`;
-      img.onerror = () => box.textContent += `\nimg: ERROR ✗`;
-      img.src = url;
+    if (backgroundUrl || mascotUrl) {
+      setAssetImages(backgroundUrl, mascotUrl);
     }
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run, { once:true });
-  } else {
-    run();
+    
+    // Запускаем механизм retry на случай если ассеты еще не готовы
+    refreshAssetImages();
   }
+
+  // Запускаем попытку загрузки
+  tryLoadAssetsOnReady();
 })();
 
