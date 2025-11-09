@@ -39,6 +39,59 @@ if (!Object.prototype.hasOwnProperty.call(process.env, 'ELECTRON_SPLASH_DIAG')) 
 
 const enableSplashDiag = process.env.ELECTRON_SPLASH_DIAG === '1';
 
+const coercePreloadLogString = (value) => {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value === null || typeof value === 'undefined') {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+};
+
+const sendPreloadLog = (message) => {
+  const text = coercePreloadLogString(message);
+  if (!text || text.length === 0) {
+    return;
+  }
+  try {
+    ipcRenderer.send('desktop:preload-log', text);
+  } catch (error) {
+    // noop
+  }
+};
+
+sendPreloadLog('[desktop:preload] initialized');
+
+window.onerror = (message, source, lineno, colno, error) => {
+  const parts = [];
+  parts.push('[window.onerror]');
+  parts.push(coercePreloadLogString(message));
+  if (source) {
+    const lineInfo = [source, lineno != null ? lineno : '?', colno != null ? colno : '?'].join(':');
+    parts.push(`@ ${lineInfo}`);
+  }
+  if (error) {
+    const errorText = error && error.stack ? error.stack : coercePreloadLogString(error);
+    parts.push(`stack=${errorText}`);
+  }
+  sendPreloadLog(parts.join(' '));
+  return false;
+};
+
+window.onunhandledrejection = (event) => {
+  const reason = event && Object.prototype.hasOwnProperty.call(event, 'reason') ? event.reason : undefined;
+  let detail = reason;
+  if (reason instanceof Error) {
+    detail = reason.stack || `${reason.name}: ${reason.message}`;
+  }
+  sendPreloadLog(`[window.unhandledrejection] ${coercePreloadLogString(detail)}`);
+};
+
 // Получаем пути для поиска ассетов
 // КРИТИЧЕСКИ ВАЖНО: В packaged режиме extraResources находятся в process.resourcesPath
 // Структура: AppDir/resources/assets/launcher/

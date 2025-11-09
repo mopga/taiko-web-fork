@@ -59,6 +59,9 @@
       if (typeof value === 'undefined') {
         return 'undefined';
       }
+      if (typeof value === 'boolean') {
+        return value ? 'true' : 'false';
+      }
       if (typeof value === 'string') {
         return value;
       }
@@ -68,9 +71,6 @@
         return String(value);
       }
     };
-
-    const titleInfo = info.resolved && typeof info.resolved === 'object' ? info.resolved.title : null;
-    const mascotInfo = info.resolved && typeof info.resolved === 'object' ? info.resolved.mascot : null;
 
     const overlay = document.createElement('div');
     overlay.style.position = 'fixed';
@@ -84,12 +84,19 @@
     overlay.style.fontFamily = 'monospace';
     overlay.style.pointerEvents = 'none';
     overlay.style.zIndex = '2147483647';
-    overlay.textContent =
-      `base=${formatValue(info.assetsBase)} | ` +
-      `title.path=${formatValue(titleInfo && typeof titleInfo === 'object' ? titleInfo.path : undefined)} ` +
-      `exists=${titleInfo && typeof titleInfo === 'object' && titleInfo.exists ? 'true' : 'false'} | ` +
-      `mascot.path=${formatValue(mascotInfo && typeof mascotInfo === 'object' ? mascotInfo.path : undefined)} ` +
-      `exists=${mascotInfo && typeof mascotInfo === 'object' && mascotInfo.exists ? 'true' : 'false'}`;
+
+    const pre = document.createElement('pre');
+    pre.style.margin = '0';
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.textContent = [
+      `assetsBase: ${formatValue(info.assetsBase)}`,
+      `title.exists: ${formatValue(info.title && Object.prototype.hasOwnProperty.call(info.title, 'exists') ? info.title.exists : false)}`,
+      `title.url: ${formatValue(info.title && Object.prototype.hasOwnProperty.call(info.title, 'url') ? info.title.url : null)}`,
+      `mascot.exists: ${formatValue(info.mascot && Object.prototype.hasOwnProperty.call(info.mascot, 'exists') ? info.mascot.exists : false)}`,
+      `mascot.url: ${formatValue(info.mascot && Object.prototype.hasOwnProperty.call(info.mascot, 'url') ? info.mascot.url : null)}`,
+    ].join('\n');
+
+    overlay.appendChild(pre);
 
     const appendOverlay = () => {
       if (!document.body) {
@@ -109,6 +116,65 @@
       appendOverlay();
       finalize();
     }
+  }
+
+  async function requestDiagnosticsOverlay() {
+    if (diagnosticsOverlayShown) {
+      return;
+    }
+
+    const desktopApi = window.desktop;
+    if (!desktopApi || typeof desktopApi !== 'object') {
+      return;
+    }
+
+    let ensuredBase = null;
+
+    if (typeof desktopApi.ensureAssetsBase === 'function') {
+      try {
+        ensuredBase = await desktopApi.ensureAssetsBase();
+      } catch (error) {
+        console.warn('[splash] Error ensuring assets base for diagnostics:', error);
+      }
+    }
+
+    let diagnosis = null;
+    if (typeof desktopApi.diagnoseAssets === 'function') {
+      try {
+        const result = desktopApi.diagnoseAssets();
+        diagnosis = result && typeof result.then === 'function' ? await result : result;
+      } catch (error) {
+        console.warn('[splash] Error running asset diagnostics:', error);
+      }
+    }
+
+    const assetsBaseFromDiag = diagnosis && typeof diagnosis === 'object'
+      ? (Object.prototype.hasOwnProperty.call(diagnosis, 'assetsBase') ? diagnosis.assetsBase : diagnosis.activeBase)
+      : null;
+
+    const assetsBaseValue = assetsBaseFromDiag || ensuredBase || null;
+
+    const resolvedInfo = diagnosis && typeof diagnosis === 'object' && diagnosis.resolved && typeof diagnosis.resolved === 'object'
+      ? diagnosis.resolved
+      : null;
+
+    const titleInfo = resolvedInfo && Object.prototype.hasOwnProperty.call(resolvedInfo, 'title') ? resolvedInfo.title : null;
+    const mascotInfo = resolvedInfo && Object.prototype.hasOwnProperty.call(resolvedInfo, 'mascot') ? resolvedInfo.mascot : null;
+
+    const titleUrl = resolveAssetUrlSync('launcher', 'title-screen.png');
+    const mascotUrl = resolveAssetUrlSync('launcher', 'dancing-don.gif');
+
+    renderDiagnosticsOverlay({
+      assetsBase: assetsBaseValue,
+      title: {
+        exists: titleInfo && typeof titleInfo === 'object' && titleInfo.exists ? true : !!titleUrl,
+        url: titleUrl,
+      },
+      mascot: {
+        exists: mascotInfo && typeof mascotInfo === 'object' && mascotInfo.exists ? true : !!mascotUrl,
+        url: mascotUrl,
+      },
+    });
   }
 
   async function resolveAssetUrl(...segments) {
@@ -318,25 +384,15 @@
     }
   }
 
-  const handleDiagnosticsResult = (result) => {
-    if (!result) {
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'F10' || event.repeat) {
       return;
     }
-    renderDiagnosticsOverlay(result);
-  };
-
-  if (window.desktop && typeof window.desktop.diagnoseAssets === 'function') {
-    try {
-      const result = window.desktop.diagnoseAssets();
-      if (result && typeof result.then === 'function') {
-        result.then(handleDiagnosticsResult).catch(() => undefined);
-      } else {
-        handleDiagnosticsResult(result);
-      }
-    } catch (error) {
-      // Ignore diagnostics errors to avoid breaking splash screen.
-    }
-  }
+    event.preventDefault();
+    requestDiagnosticsOverlay().catch(err => {
+      console.error('[splash] Error rendering diagnostics overlay:', err);
+    });
+  });
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
