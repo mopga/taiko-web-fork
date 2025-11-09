@@ -52,7 +52,7 @@
       return;
     }
 
-    const formatValue = (value) => {
+    const format = (value) => {
       if (value === null) {
         return 'null';
       }
@@ -65,11 +65,7 @@
       if (typeof value === 'string') {
         return value;
       }
-      try {
-        return JSON.stringify(value);
-      } catch (error) {
-        return String(value);
-      }
+      return String(value);
     };
 
     const overlay = document.createElement('div');
@@ -89,11 +85,11 @@
     pre.style.margin = '0';
     pre.style.whiteSpace = 'pre-wrap';
     pre.textContent = [
-      `assetsBase: ${formatValue(info.assetsBase)}`,
-      `title.exists: ${formatValue(info.title && Object.prototype.hasOwnProperty.call(info.title, 'exists') ? info.title.exists : false)}`,
-      `title.url: ${formatValue(info.title && Object.prototype.hasOwnProperty.call(info.title, 'url') ? info.title.url : null)}`,
-      `mascot.exists: ${formatValue(info.mascot && Object.prototype.hasOwnProperty.call(info.mascot, 'exists') ? info.mascot.exists : false)}`,
-      `mascot.url: ${formatValue(info.mascot && Object.prototype.hasOwnProperty.call(info.mascot, 'url') ? info.mascot.url : null)}`,
+      `assetsBase = ${format(info.assetsBase)}`,
+      `title.exists = ${format(info.titleExists)}`,
+      `title.url = ${format(info.titleUrl)}`,
+      `mascot.exists = ${format(info.mascotExists)}`,
+      `mascot.url = ${format(info.mascotUrl)}`,
     ].join('\n');
 
     overlay.appendChild(pre);
@@ -148,32 +144,55 @@
       }
     }
 
-    const assetsBaseFromDiag = diagnosis && typeof diagnosis === 'object'
-      ? (Object.prototype.hasOwnProperty.call(diagnosis, 'assetsBase') ? diagnosis.assetsBase : diagnosis.activeBase)
-      : null;
-
-    const assetsBaseValue = assetsBaseFromDiag || ensuredBase || null;
-
-    const resolvedInfo = diagnosis && typeof diagnosis === 'object' && diagnosis.resolved && typeof diagnosis.resolved === 'object'
+    const resolved = diagnosis && typeof diagnosis === 'object' && diagnosis.resolved && typeof diagnosis.resolved === 'object'
       ? diagnosis.resolved
       : null;
 
-    const titleInfo = resolvedInfo && Object.prototype.hasOwnProperty.call(resolvedInfo, 'title') ? resolvedInfo.title : null;
-    const mascotInfo = resolvedInfo && Object.prototype.hasOwnProperty.call(resolvedInfo, 'mascot') ? resolvedInfo.mascot : null;
+    const getResolvedEntry = (key) => {
+      if (!resolved || typeof resolved !== 'object') {
+        return null;
+      }
+      if (!Object.prototype.hasOwnProperty.call(resolved, key)) {
+        return null;
+      }
+      const value = resolved[key];
+      return value && typeof value === 'object' ? value : null;
+    };
+
+    const resolvedTitle = getResolvedEntry('title');
+    const resolvedMascot = getResolvedEntry('mascot');
 
     const titleUrl = resolveAssetUrlSync('launcher', 'title-screen.png');
     const mascotUrl = resolveAssetUrlSync('launcher', 'dancing-don.gif');
 
+    const assetsBaseValue = (() => {
+      if (typeof ensuredBase === 'string' && ensuredBase.length > 0) {
+        return ensuredBase;
+      }
+      if (diagnosis && typeof diagnosis === 'object') {
+        if (typeof diagnosis.assetsBase === 'string' && diagnosis.assetsBase.length > 0) {
+          return diagnosis.assetsBase;
+        }
+        if (typeof diagnosis.activeBase === 'string' && diagnosis.activeBase.length > 0) {
+          return diagnosis.activeBase;
+        }
+      }
+      return null;
+    })();
+
+    const titleExists = resolvedTitle && Object.prototype.hasOwnProperty.call(resolvedTitle, 'exists')
+      ? !!resolvedTitle.exists
+      : !!titleUrl;
+    const mascotExists = resolvedMascot && Object.prototype.hasOwnProperty.call(resolvedMascot, 'exists')
+      ? !!resolvedMascot.exists
+      : !!mascotUrl;
+
     renderDiagnosticsOverlay({
       assetsBase: assetsBaseValue,
-      title: {
-        exists: titleInfo && typeof titleInfo === 'object' && titleInfo.exists ? true : !!titleUrl,
-        url: titleUrl,
-      },
-      mascot: {
-        exists: mascotInfo && typeof mascotInfo === 'object' && mascotInfo.exists ? true : !!mascotUrl,
-        url: mascotUrl,
-      },
+      titleExists,
+      titleUrl,
+      mascotExists,
+      mascotUrl,
     });
   }
 

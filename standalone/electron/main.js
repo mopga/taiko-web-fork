@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const treeKill = require('tree-kill');
 
 const DEV_APP_ROOT = path.resolve(__dirname, '..', '..');
+const PRELOAD_BUNDLE_PATH = path.join(__dirname, 'preload.js');
 
 const APP_ID = 'com.taikoweb.desktop';
 const DEFAULT_PORT = 8000;
@@ -135,7 +136,7 @@ ipcMain.handle('desktop:log', (_e, s) => {
 });
 
 ipcMain.on('desktop:preload-log', (_event, message) => {
-  appendDesktopLog(`preload:${coerceDesktopLogMessage(message)}`);
+  appendDesktopLog(`preload:${String(message)}`);
 });
 
 // Добавляем IPC handler для получения пути к ассетам
@@ -306,6 +307,10 @@ function createMainWindow() {
 
   appendDesktopLog('main:create-main-window');
 
+  if (!fs.existsSync(PRELOAD_BUNDLE_PATH)) {
+    appendDesktopLog(`main:warn:missing-preload ${PRELOAD_BUNDLE_PATH}`);
+  }
+
   const windowOptions = {
     width: 1280,
     height: 720,
@@ -313,7 +318,7 @@ function createMainWindow() {
     useContentSize: true,
     backgroundColor: '#000000',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD_BUNDLE_PATH,
       contextIsolation: true,
       nodeIntegration: false,
     },
