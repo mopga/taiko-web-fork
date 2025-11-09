@@ -20,7 +20,8 @@
     "build:backend": "python ../packaging/build_backend.py",
     "build:desktop": "npm run build:backend && electron-builder -mwl --publish always",
     "build:win": "npm run build:backend && electron-builder --win nsis zip --publish always",
-    "build:mac": "npm run build:backend && electron-builder --mac dmg zip --publish always"
+    "build:mac": "npm run build:backend && electron-builder --mac dmg zip --publish always",
+    "smoke:asar": "node ./scripts/smoke-verify-preload.js"
   },
   "build": {
     "appId": "com.taikoweb.desktop",
@@ -104,6 +105,7 @@
   },
   "devDependencies": {
     "cross-env": "^7",
+    "@electron/asar": "^3.2.7",
     "electron": "^30.5.1",
     "electron-builder": "^24",
     "eslint": "^9",

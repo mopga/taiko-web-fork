@@ -131,11 +131,13 @@ const getAssetSearchPaths = () => {
   if (!isPackaged || process.env.ELECTRON_DEV === '1') {
     try {
       const dirnameAssets1 = path.resolve(__dirname, '..', 'assets');
-      paths.push({ kind: 'dirname-up', path: dirnameAssets1, priority: 10 });
+      const devKind = process.env.ELECTRON_DEV === '1' ? 'dev' : 'dirname-up';
+      const devPriority = process.env.ELECTRON_DEV === '1' ? 30 : 10;
+      paths.push({ kind: devKind, path: dirnameAssets1, priority: devPriority });
     } catch (error) {
       // Игнорируем ошибки
     }
-    
+
     try {
       const dirnameAssets2 = path.resolve(__dirname, '..', '..', 'assets');
       paths.push({ kind: 'dirname-up-up', path: dirnameAssets2, priority: 9 });
@@ -290,29 +292,14 @@ async function getAssetsPathFromMain() {
 }
 
 async function ensureAssetsBase() {
-  if (assetsBaseCache) {
+  if (assetsBaseCache) return assetsBaseCache;
+  let base = findAssetsBase();
+  if (!base) base = await getAssetsPathFromMain();
+  if (base && typeof base === 'string') {
+    assetsBaseCache = base;
+    try { assetsBaseUrl = pathToFileURL(base).href; } catch { assetsBaseUrl = null; }
     return assetsBaseCache;
   }
-
-  let basePath = findAssetsBase();
-
-  if (!basePath) {
-    basePath = await getAssetsPathFromMain();
-  }
-
-  if (basePath && typeof basePath === 'string') {
-    assetsBaseCache = basePath;
-    try {
-      assetsBaseUrl = pathToFileURL(basePath).href;
-    } catch (error) {
-      if (enableSplashDiag) {
-        console.log('[desktop:preload] Error converting assets base path to URL:', error.message);
-      }
-      assetsBaseUrl = null;
-    }
-    return assetsBaseCache;
-  }
-
   return null;
 }
 
@@ -438,6 +425,7 @@ const debugAssets = Object.freeze({
   electronDev: process.env.ELECTRON_DEV === '1',
   activeBase: assetsBase,
   activeBaseUrl: assetsBaseUrl,
+  bases: getAssetSearchPaths(),
 });
 
 const createDiagnoseAssets = () => {
@@ -499,4 +487,25 @@ try {
   contextBridge.exposeInMainWorld('desktop', frozenDesktopApi);
 } catch (error) {
   console.error('[desktop:preload] Failed to expose desktop API:', error);
+  sendPreloadLog(`[desktop:preload] expose-error ${coercePreloadLogString(error && error.stack ? error.stack : error)}`);
 }
+
+async function runPreloadSmokeTest() {
+  try {
+    const base = await ensureAssetsBase();
+    const baseString = base && typeof base === 'string' ? base : null;
+    const launcherDir = baseString ? path.join(baseString, 'launcher') : null;
+    const titlePath = launcherDir ? path.join(launcherDir, 'title-screen.png') : null;
+    const mascotPath = launcherDir ? path.join(launcherDir, 'dancing-don.gif') : null;
+    const titleExists = titlePath ? fs.existsSync(titlePath) : false;
+    const mascotExists = mascotPath ? fs.existsSync(mascotPath) : false;
+    sendPreloadLog(
+      `[desktop:preload] smoke assetsBase=${baseString || 'null'} title.exists=${titleExists} mascot.exists=${mascotExists}`,
+    );
+  } catch (error) {
+    const detail = error && error.stack ? error.stack : coercePreloadLogString(error);
+    sendPreloadLog(`[desktop:preload] smoke:error ${detail}`);
+  }
+}
+
+runPreloadSmokeTest().catch(() => undefined);
