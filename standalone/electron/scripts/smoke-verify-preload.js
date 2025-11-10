@@ -23,11 +23,27 @@ function main() {
     return;
   }
 
+  const preloadEntries = ['preload.js', 'standalone/electron/preload.js'];
   let preloadSource = null;
-  try {
-    preloadSource = asar.extractFile(archivePath, 'preload.js').toString('utf8');
-  } catch (error) {
-    fail(`Failed to read preload.js from ${archivePath}: ${error.message}`);
+  let preloadEntry = null;
+  let preloadError = null;
+
+  for (const entry of preloadEntries) {
+    try {
+      const buffer = asar.extractFile(archivePath, entry);
+      if (buffer && buffer.length > 0) {
+        preloadSource = buffer.toString('utf8');
+        preloadEntry = entry;
+        break;
+      }
+    } catch (error) {
+      preloadError = error;
+    }
+  }
+
+  if (!preloadSource) {
+    const reason = preloadError ? preloadError.message : 'File not found';
+    fail(`Failed to read preload.js from ${archivePath}: ${reason}`);
     return;
   }
 
@@ -47,7 +63,7 @@ function main() {
     return;
   }
 
-  process.stdout.write(`[smoke] ensureAssetsBase present in ${archivePath}\n`);
+  process.stdout.write(`[smoke] ensureAssetsBase present in ${archivePath} (entry ${preloadEntry})\n`);
   process.stdout.write(`[smoke] launcher assets verified at ${launcherDir}\n`);
 }
 

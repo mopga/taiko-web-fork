@@ -51,6 +51,38 @@ function appendDesktopLog(message) {
 
 appendDesktopLog(`main:bootstrap pid=${process.pid}`);
 
+function resolvePreloadPath() {
+  const candidates = [];
+
+  const pushCandidate = (value) => {
+    if (value && !candidates.includes(value)) {
+      candidates.push(value);
+    }
+  };
+
+  pushCandidate(PRELOAD_BUNDLE_PATH);
+  pushCandidate(path.join(getAppRoot(), 'preload.js'));
+  pushCandidate(path.join(getAppRoot(), 'standalone', 'electron', 'preload.js'));
+
+  if (process.resourcesPath) {
+    pushCandidate(path.join(process.resourcesPath, 'preload.js'));
+    pushCandidate(path.join(process.resourcesPath, 'app.asar.unpacked', 'preload.js'));
+    pushCandidate(path.join(process.resourcesPath, 'app.asar.unpacked', 'standalone', 'electron', 'preload.js'));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (error) {
+      // Ignore fs errors and continue to the next candidate.
+    }
+  }
+
+  return PRELOAD_BUNDLE_PATH;
+}
+
 let mainWindow = null;
 let backendProcess = null;
 let backendUrl = null;
@@ -307,8 +339,10 @@ function createMainWindow() {
 
   appendDesktopLog('main:create-main-window');
 
-  if (!fs.existsSync(PRELOAD_BUNDLE_PATH)) {
-    appendDesktopLog(`main:warn:missing-preload ${PRELOAD_BUNDLE_PATH}`);
+  const preloadPath = resolvePreloadPath();
+  appendDesktopLog(`main:preload-path ${preloadPath}`);
+  if (!fs.existsSync(preloadPath)) {
+    appendDesktopLog(`main:warn:missing-preload ${preloadPath}`);
   }
 
   const windowOptions = {
@@ -318,7 +352,7 @@ function createMainWindow() {
     useContentSize: true,
     backgroundColor: '#000000',
     webPreferences: {
-      preload: PRELOAD_BUNDLE_PATH,
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -339,6 +373,31 @@ function createMainWindow() {
     if (lastStatusPayload) {
       window.webContents.send('desktop:status', lastStatusPayload);
     }
+  });
+
+  window.webContents.on('preload-error', (_event, failingPath, error) => {
+    const errorMessage = error && error.stack ? error.stack : String(error);
+    appendDesktopLog(`preload-error path=${failingPath} ${errorMessage}`);
+  });
+
+  window.webContents.on('render-process-gone', (_event, details) => {
+    try {
+      appendDesktopLog(`main:render-process-gone ${JSON.stringify(details)}`);
+    } catch (error) {
+      appendDesktopLog(`main:render-process-gone ${String(details && details.reason)} (failed to stringify details: ${String(error)})`);
+    }
+  });
+
+  window.webContents.on('dom-ready', () => {
+    window.webContents
+      .executeJavaScript('typeof window.desktop', true)
+      .then((result) => {
+        appendDesktopLog(`main:renderer-desktop-type ${String(result)}`);
+      })
+      .catch((error) => {
+        const errorMessage = error && error.stack ? error.stack : String(error);
+        appendDesktopLog(`main:renderer-desktop-type-error ${errorMessage}`);
+      });
   });
 
   window.on('closed', () => {
