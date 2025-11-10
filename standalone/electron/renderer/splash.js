@@ -11,6 +11,88 @@
   let appliedBackgroundUrl = null;
   let appliedMascotUrl = null;
   let diagnosticsOverlayShown = false;
+  let preloadBannerTimeoutId = null;
+  let preloadBannerWatcherId = null;
+
+  const PRELOAD_FAILURE_BANNER_ID = 'preload-failure-banner';
+  const PRELOAD_FAILURE_MESSAGE = 'Preload not loaded…';
+  const PRELOAD_POLL_INTERVAL = 500;
+  const PRELOAD_CHECK_TIMEOUT = 600;
+
+  function isDesktopAvailable() {
+    return !!(window.desktop && typeof window.desktop === 'object');
+  }
+
+  function hidePreloadFailureBanner() {
+    const existingBanner = document.getElementById(PRELOAD_FAILURE_BANNER_ID);
+    if (existingBanner && existingBanner.parentNode) {
+      existingBanner.parentNode.removeChild(existingBanner);
+    }
+  }
+
+  function showPreloadFailureBanner() {
+    if (isDesktopAvailable()) {
+      hidePreloadFailureBanner();
+      return;
+    }
+
+    const existingBanner = document.getElementById(PRELOAD_FAILURE_BANNER_ID);
+    if (existingBanner) {
+      return;
+    }
+
+    const banner = document.createElement('div');
+    banner.id = PRELOAD_FAILURE_BANNER_ID;
+    banner.textContent = PRELOAD_FAILURE_MESSAGE;
+    banner.style.position = 'fixed';
+    banner.style.top = '0';
+    banner.style.left = '0';
+    banner.style.right = '0';
+    banner.style.padding = '8px 12px';
+    banner.style.background = '#b00020';
+    banner.style.color = '#ffffff';
+    banner.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    banner.style.fontSize = '14px';
+    banner.style.fontWeight = '600';
+    banner.style.textAlign = 'center';
+    banner.style.zIndex = '2147483646';
+
+    const append = () => {
+      if (!document.body) {
+        return;
+      }
+      document.body.appendChild(banner);
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', append, { once: true });
+    } else {
+      append();
+    }
+  }
+
+  function schedulePreloadDiagnosticsBanner() {
+    if (preloadBannerTimeoutId !== null) {
+      window.clearTimeout(preloadBannerTimeoutId);
+      preloadBannerTimeoutId = null;
+    }
+    preloadBannerTimeoutId = window.setTimeout(() => {
+      preloadBannerTimeoutId = null;
+      showPreloadFailureBanner();
+    }, PRELOAD_CHECK_TIMEOUT);
+
+    if (preloadBannerWatcherId === null) {
+      preloadBannerWatcherId = window.setInterval(() => {
+        if (isDesktopAvailable()) {
+          hidePreloadFailureBanner();
+          if (preloadBannerWatcherId !== null) {
+            window.clearInterval(preloadBannerWatcherId);
+            preloadBannerWatcherId = null;
+          }
+        }
+      }, PRELOAD_POLL_INTERVAL);
+    }
+  }
 
   function applyAssetImages(backgroundUrl, mascotUrl) {
     const nextBackgroundUrl =
@@ -404,7 +486,7 @@
   }
 
   window.addEventListener('keydown', (event) => {
-    if (event.key !== 'F10' || event.repeat) {
+    if (event.key !== 'F9' || event.repeat) {
       return;
     }
     event.preventDefault();
@@ -415,11 +497,17 @@
 
   if (window.desktop && typeof window.desktop.onStatus === 'function') {
     window.desktop.onStatus((payload) => {
+      hidePreloadFailureBanner();
       refreshAssetImages({ immediate: true }).catch(err => {
         console.error('[splash] Error refreshing assets on status update:', err);
       });
       updateStatus(payload);
     });
+  }
+
+  schedulePreloadDiagnosticsBanner();
+  if (isDesktopAvailable()) {
+    hidePreloadFailureBanner();
   }
 
   window.addEventListener('focus', () => {
