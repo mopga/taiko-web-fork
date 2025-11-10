@@ -12,8 +12,9 @@ const PRELOAD_BUNDLE_PATH = path.join(__dirname, 'preload.js');
 
 const APP_ID = 'com.taikoweb.desktop';
 const DEFAULT_PORT = 8000;
-const HEALTH_TIMEOUT_MS = 30_000;
 const SONGS_TIMEOUT_MS = 60_000;
+const HEALTH_RETRY_INTERVAL_MS = 5_000;
+const BACKEND_STDERR_TAIL_LIMIT = 8_192;
 
 const DESKTOP_LOG_DIR_NAME = 'logs';
 const DESKTOP_LOG_FILE_NAME = 'desktop.log';
@@ -94,6 +95,10 @@ let dataDirPath = null;
 let songsLinkPath = null;
 let selectedSongsPath = null;
 let songsScanPromise = null;
+let backendStartupExitInfo = null;
+let backendStartupExitResolver = null;
+let backendStartupExitPromise = null;
+let backendStderrTail = '';
 let lastStatusMessage = 'Запускаем Taiko Web…';
 let lastStatusPayload = {
   message: lastStatusMessage,
@@ -103,6 +108,129 @@ let lastStatusPayload = {
   songsPath: selectedSongsPath,
   errorMessage: null,
 };
+let lastHealthzFailureLog = { message: null, timestamp: 0 };
+
+function resetBackendStartupExitTracking() {
+  backendStartupExitInfo = null;
+  backendStartupExitResolver = null;
+  backendStartupExitPromise = null;
+  backendStderrTail = '';
+  lastHealthzFailureLog = { message: null, timestamp: 0 };
+}
+
+function setBackendStartupExitInfo(info) {
+  if (backendStartupExitInfo) {
+    return;
+  }
+  backendStartupExitInfo = info;
+  if (backendStartupExitResolver) {
+    try {
+      backendStartupExitResolver();
+    } catch (_) {
+      // ignore waiter resolution issues
+    } finally {
+      backendStartupExitResolver = null;
+      backendStartupExitPromise = null;
+    }
+  } else {
+    backendStartupExitPromise = null;
+  }
+}
+
+function waitForBackendStartupExitSignal() {
+  if (backendStartupExitInfo) {
+    return Promise.resolve();
+  }
+  if (!backendStartupExitPromise) {
+    backendStartupExitPromise = new Promise((resolve) => {
+      backendStartupExitResolver = resolve;
+    });
+  }
+  return backendStartupExitPromise;
+}
+
+function recordBackendStderr(chunk) {
+  try {
+    const text = chunk.toString('utf-8');
+    backendStderrTail = (backendStderrTail + text).slice(-BACKEND_STDERR_TAIL_LIMIT);
+  } catch (_) {
+    // ignore encoding issues
+  }
+}
+
+function getBackendStderrSnippet(limit = 1_024) {
+  const tail = backendStderrTail.trim();
+  if (!tail) {
+    return null;
+  }
+  if (tail.length <= limit) {
+    return tail;
+  }
+  return tail.slice(-limit);
+}
+
+function formatBackendStderrDetail(snippet) {
+  if (!snippet) {
+    return null;
+  }
+  return `Last stderr output:\n${snippet}`;
+}
+
+function buildBackendExitedError(info) {
+  if (info.type === 'error') {
+    if (info.error instanceof Error) {
+      if (info.stderr) {
+        try {
+          info.error.message = `${info.error.message}\n\n${formatBackendStderrDetail(info.stderr)}`;
+        } catch (_) {
+          // ignore message mutation issues
+        }
+      }
+      return info.error;
+    }
+    const error = new Error(String(info.error));
+    const snippet = info.stderr ?? getBackendStderrSnippet();
+    if (snippet) {
+      error.message = `${error.message}\n\n${formatBackendStderrDetail(snippet)}`;
+    }
+    return error;
+  }
+
+  const details = [];
+  if (info.code !== null && typeof info.code !== 'undefined') {
+    details.push(`code ${info.code}`);
+  }
+  if (info.signal) {
+    details.push(`signal ${info.signal}`);
+  }
+
+  let message = 'Backend exited before readiness.';
+  if (details.length > 0) {
+    message += ` (${details.join(', ')})`;
+  }
+
+  const snippet = info.stderr ?? getBackendStderrSnippet();
+  if (snippet) {
+    message += `\n\n${formatBackendStderrDetail(snippet)}`;
+  }
+
+  const error = new Error(message);
+  error.name = 'BackendExitError';
+  return error;
+}
+
+function logHealthzRetry(reason) {
+  try {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const now = Date.now();
+    if (lastHealthzFailureLog.message !== message || now - lastHealthzFailureLog.timestamp > 30_000) {
+      appendDesktopLog(`main:backend-healthz-retry ${message}`);
+      lastHealthzFailureLog = { message, timestamp: now };
+    }
+  } catch (_) {
+    // ignore logging issues
+  }
+}
 
 function getAppRoot() {
   if (app.isPackaged) {
@@ -443,11 +571,12 @@ async function startBackendFlow() {
     backendUrl = `http://127.0.0.1:${port}`;
 
     updateStatus('Запускаем сервер…');
+    resetBackendStartupExitTracking();
     backendProcess = spawnBackend(backendExecutable, backendWorkingDir, info.dataDir, port);
     appendDesktopLog(`main:backend-spawned pid=${backendProcess.pid}`);
 
     updateStatus('Ожидаем запуск сервера…');
-    await waitForHealthz(`${backendUrl}/healthz`, HEALTH_TIMEOUT_MS);
+    await waitForHealthz(`${backendUrl}/healthz`);
     appendDesktopLog('main:backend-healthz-ok');
 
     await runSongsScan();
@@ -588,27 +717,36 @@ function spawnBackend(executable, workingDir, dataDir, port) {
   child.unref();
 
   child.once('exit', (code, signal) => {
+    backendProcess = null;
     if (quitting) {
       return;
     }
-    backendProcess = null;
+    const stderrSnippet = getBackendStderrSnippet();
+    appendDesktopLog(
+      `main:backend-exit code=${code ?? 'null'} signal=${signal ?? 'null'} ready=${backendReady} starting=${starting}`
+    );
     if (!backendReady) {
-      showStartupError(new Error('Бэкенд завершился до запуска.')).catch(() => {
-        app.quit();
-      });
-    } else {
-      showFatalBackendExit(code, signal);
+      if (starting) {
+        setBackendStartupExitInfo({ type: 'exit', code, signal, stderr: stderrSnippet });
+      }
+      return;
     }
+    showFatalBackendExit(code, signal, formatBackendStderrDetail(stderrSnippet));
   });
 
   child.once('error', (error) => {
+    backendProcess = null;
     if (quitting) {
       return;
     }
-    backendProcess = null;
-    showStartupError(error).catch(() => {
-      app.quit();
-    });
+    appendDesktopLog(`main:backend-error ${error instanceof Error ? error.message : String(error)}`);
+    if (!backendReady) {
+      if (starting) {
+        setBackendStartupExitInfo({ type: 'error', error, stderr: getBackendStderrSnippet() });
+      }
+      return;
+    }
+    showFatalBackendProcessError(error);
   });
 
   return child;
@@ -625,6 +763,9 @@ function setupBackendLogging(child) {
     const forward = (chunk, isStdErr = false) => {
       if (!logStream.destroyed) {
         logStream.write(chunk);
+      }
+      if (isStdErr) {
+        recordBackendStderr(chunk);
       }
       if (process.env.ELECTRON_DEV === '1') {
         try {
@@ -680,23 +821,30 @@ function setupBackendLogging(child) {
   }
 }
 
-async function waitForHealthz(url, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+async function waitForHealthz(url) {
+  for (;;) {
+    if (backendStartupExitInfo) {
+      throw buildBackendExitedError(backendStartupExitInfo);
+    }
+
     try {
       const payload = await fetchJson(url);
       if (payload && payload.status === 'ok' && payload.profile === 'desktop') {
         const dbPath = payload.db_path;
         if (typeof dbPath === 'string') {
+          backendStartupExitResolver = null;
+          backendStartupExitPromise = null;
           return payload;
         }
+      } else {
+        logHealthzRetry(new Error('Некорректный ответ от /healthz'));
       }
     } catch (error) {
-      // retry until timeout
+      logHealthzRetry(error);
     }
-    await delay(500);
+
+    await Promise.race([delay(HEALTH_RETRY_INTERVAL_MS), waitForBackendStartupExitSignal()]);
   }
-  throw new Error('Не удалось дождаться готовности бэкенда.');
 }
 
 async function waitForSongs(url, timeoutMs) {
@@ -978,7 +1126,7 @@ async function showStartupError(error) {
   }
 }
 
-function showFatalBackendExit(code, signal) {
+function showFatalBackendExit(code, signal, detail = null) {
   const message = `Бэкенд завершился (${signal ?? code ?? 'unknown'}). Приложение будет закрыто.`;
   const window = createMainWindow();
   dialog
@@ -986,6 +1134,26 @@ function showFatalBackendExit(code, signal) {
       type: 'error',
       title: 'Taiko Web',
       message,
+      detail: detail ?? undefined,
+      buttons: ['OK'],
+    })
+    .finally(() => {
+      quitting = true;
+      stopBackend().finally(() => {
+        app.quit();
+      });
+    });
+}
+
+function showFatalBackendProcessError(error) {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const window = createMainWindow();
+  dialog
+    .showMessageBox(window, {
+      type: 'error',
+      title: 'Taiko Web',
+      message: 'Бэкенд завершился с ошибкой. Приложение будет закрыто.',
+      detail: message,
       buttons: ['OK'],
     })
     .finally(() => {
